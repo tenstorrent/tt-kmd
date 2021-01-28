@@ -265,6 +265,34 @@ static long ioctl_free_dma_buf(struct chardev_private *priv,
 	return -EINVAL;
 }
 
+static long ioctl_get_driver_info(struct chardev_private *priv,
+				  struct tenstorrent_get_driver_info __user *arg)
+{
+	const struct pci_dev *pdev = priv->device->pdev;
+	u32 bytes_to_copy;
+
+	struct tenstorrent_get_driver_info_out in;
+	struct tenstorrent_get_driver_info_out out;
+	memset(&in, 0, sizeof(in));
+	memset(&out, 0, sizeof(out));
+
+	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
+		return -EFAULT;
+
+	out.output_size_bytes = sizeof(out);
+	out.driver_version = TENSTORRENT_DRIVER_VERSION;
+
+	if (clear_user(&arg->out, in.output_size_bytes) != 0)
+		return -EFAULT;
+
+	bytes_to_copy = min(in.output_size_bytes, (u32)sizeof(out));
+
+	if (copy_to_user(&arg->out, &out, sizeof(out)) != 0)
+		return -EFAULT;
+
+	return 0;
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	long ret = -EINVAL;
@@ -288,6 +316,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_FREE_DMA_BUF:
 			ret = ioctl_free_dma_buf(priv, (struct tenstorrent_free_dma_buf __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_GET_DRIVER_INFO:
+			ret = ioctl_get_driver_info(priv, (struct tenstorrent_get_driver_info __user *)arg);
 			break;
 
 		default:

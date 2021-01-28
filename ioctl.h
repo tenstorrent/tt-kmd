@@ -4,6 +4,8 @@
 #include <linux/types.h>
 #include <linux/ioctl.h>
 
+#define TENSTORRENT_DRIVER_VERSION 1
+
 #define TENSTORRENT_IOCTL_MAGIC 0xFA
 
 #define TENSTORRENT_IOCTL_GET_DEVICE_INFO	_IO(TENSTORRENT_IOCTL_MAGIC, 0)
@@ -11,6 +13,7 @@
 #define TENSTORRENT_IOCTL_QUERY_MAPPINGS	_IO(TENSTORRENT_IOCTL_MAGIC, 2)
 #define TENSTORRENT_IOCTL_ALLOCATE_DMA_BUF	_IO(TENSTORRENT_IOCTL_MAGIC, 3)
 #define TENSTORRENT_IOCTL_FREE_DMA_BUF		_IO(TENSTORRENT_IOCTL_MAGIC, 4)
+#define TENSTORRENT_IOCTL_GET_DRIVER_INFO	_IO(TENSTORRENT_IOCTL_MAGIC, 5)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED	0
@@ -88,6 +91,20 @@ struct tenstorrent_free_dma_buf_out {
 struct tenstorrent_free_dma_buf {
 	struct tenstorrent_free_dma_buf_in in;
 	struct tenstorrent_free_dma_buf_out out;
+};
+
+struct tenstorrent_get_driver_info_in {
+	__u32 output_size_bytes;
+};
+
+struct tenstorrent_get_driver_info_out {
+	__u32 output_size_bytes;
+	__u32 driver_version;
+};
+
+struct tenstorrent_get_driver_info {
+	struct tenstorrent_get_driver_info_in in;
+	struct tenstorrent_get_driver_info_out out;
 };
 
 #endif

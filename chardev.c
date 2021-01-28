@@ -110,7 +110,9 @@ int tenstorrent_register_device(struct grayskull_device *gs_dev)
 	gs_dev->dev.parent = &gs_dev->pdev->dev;
 	gs_dev->dev.groups = NULL;
 	gs_dev->dev.release = NULL;
-	dev_set_name(&gs_dev->dev, TENSTORRENT "-%d", gs_dev->ordinal);
+
+	gs_dev->dev.id = gs_dev->ordinal;
+	dev_set_name(&gs_dev->dev, TENSTORRENT "/%d", gs_dev->ordinal);
 
 	cdev_init(&gs_dev->chardev, &chardev_fops);
 	return cdev_device_add(&gs_dev->chardev, &gs_dev->dev);

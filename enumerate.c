@@ -6,6 +6,7 @@
 #include "enumerate.h"
 #include "interrupt.h"
 #include "chardev.h"
+#include "grayskull.h"
 
 DEFINE_IDR(tenstorrent_dev_idr);
 DEFINE_MUTEX(tenstorrent_dev_idr_mutex);
@@ -44,6 +45,8 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	gs_dev->interrupt_enabled = tenstorrent_enable_interrupts(gs_dev);
 
+	grayskull_init(gs_dev);
+
 	tenstorrent_register_device(gs_dev);
 
 	return 0;
@@ -54,6 +57,8 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	struct grayskull_device *gs_dev = pci_get_drvdata(dev);
 
 	tenstorrent_unregister_device(gs_dev);
+
+	grayskull_cleanup(gs_dev);
 
 	tenstorrent_disable_interrupts(gs_dev);
 

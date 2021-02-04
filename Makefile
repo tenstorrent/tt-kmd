@@ -1,5 +1,5 @@
 obj-m += tenstorrent.o
-tenstorrent-y := module.o chardev.o enumerate.o interrupt.o
+tenstorrent-y := module.o chardev.o enumerate.o interrupt.o grayskull.o
 
 KDIR := /lib/modules/$(shell uname -r)/build
 KMAKE := $(MAKE) -C $(KDIR) M=$(PWD)

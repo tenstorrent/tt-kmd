@@ -21,6 +21,8 @@ struct grayskull_device {
 	unsigned int ordinal;
 	bool dma_capable;
 	bool interrupt_enabled;
+
+	u8 __iomem *reset_unit_regs;
 };
 
 int tenstorrent_pci_register_driver(void);

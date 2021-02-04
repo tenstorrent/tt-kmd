@@ -1,4 +1,5 @@
 #! /bin/sh
 
 cp udev-50-tenstorrent.rules /etc/udev/rules.d/50-tenstorrent.rules
+cp modprobe.d-tenstorrent.conf /etc/modprobe.d/tenstorrent.conf
 udevadm control -R

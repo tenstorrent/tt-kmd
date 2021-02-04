@@ -16,6 +16,22 @@ static uint max_devices = 16;
 module_param(max_devices, uint, 0444);
 MODULE_PARM_DESC(max_devices, "Maximum number of tenstorrent devices (chips) to support.");
 
+static uint ddr_frequency_override = 0xffff;
+module_param(ddr_frequency_override, uint, 0444);
+MODULE_PARM_DESC(ddr_frequency_override, "DDR frequency override in MHz or 0xffff to auto-detect.");
+
+static bool skip_dram_train = false;
+module_param(skip_dram_train, bool, 0444);
+MODULE_PARM_DESC(skip_dram_train, "Skip DRAM training: Y/N, should be N by default.");
+
+static uint aiclk_override = 0;
+module_param(aiclk_override, uint, 0444);
+MODULE_PARM_DESC(aiclk_override, "AICLK override in MHz or 0 to auto-detect.");
+
+static uint axiclk_override = 0;
+module_param(axiclk_override, uint, 0444);
+MODULE_PARM_DESC(axiclk_override, "AXICLK override in MHz or 0 to auto-detect.");
+
 const struct pci_device_id tenstorrent_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_TENSTORRENT, PCI_DEVICE_ID_GRAYSKULL) },
 	{ 0 },

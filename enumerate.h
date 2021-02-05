@@ -9,7 +9,8 @@
 #define TENSTORRENT "tenstorrent"
 
 #define PCI_VENDOR_ID_TENSTORRENT 0x1E52
-#define PCI_DEVICE_ID_GRAYSKULL 0xFACA
+#define PCI_DEVICE_ID_GRAYSKULL	0xFACA
+#define PCI_DEVICE_ID_WORMHOLE	0x401E
 
 struct pci_dev;
 struct cdev;

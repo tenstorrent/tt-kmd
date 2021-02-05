@@ -33,7 +33,8 @@ module_param(axiclk_override, uint, 0444);
 MODULE_PARM_DESC(axiclk_override, "AXICLK override in MHz or 0 to auto-detect.");
 
 const struct pci_device_id tenstorrent_ids[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_TENSTORRENT, PCI_DEVICE_ID_GRAYSKULL) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_TENSTORRENT, PCI_DEVICE_ID_GRAYSKULL), .driver_data="Grayskull" },
+	{ PCI_DEVICE(PCI_VENDOR_ID_TENSTORRENT, PCI_DEVICE_ID_WORMHOLE), .driver_data="Wormhole" },
 	{ 0 },
 };
 

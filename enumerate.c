@@ -15,8 +15,9 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 {
 	struct grayskull_device *gs_dev = NULL;
 	int ordinal;
+	const char *device_class_name = (const char *)id->driver_data;
 
-	printk(KERN_INFO "Found a Grayskull device at bus %d.", (int)dev->bus->number);
+	printk(KERN_INFO "Found a Tenstorrent %s device at bus %d.\n", device_class_name, (int)dev->bus->number);
 
 	if (pci_enable_device(dev) < 0)
 		return -EIO;

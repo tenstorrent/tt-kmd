@@ -24,10 +24,14 @@
 // These are the mmap offsets for various resources. In the user-kernel
 // interface they are dynamic (TENSTORRENT_IOCTL_QUERY_MAPPINGS and
 // TENSTORRENT_IOCTL_ALLOCATE_DMA_BUF), but they are actually hard-coded.
-#define MMAP_OFFSET_BAR0_UC U64_C(0)
-#define MMAP_OFFSET_BAR0_WC (U64_C(1) << 32)
-#define MMAP_OFFSET_DMA_BUF (U64_C(2) << 32)
+#define MMAP_OFFSET_RESOURCE0_UC	(U64_C(0) << 32)
+#define MMAP_OFFSET_RESOURCE0_WC	(U64_C(1) << 32)
+#define MMAP_OFFSET_DMA_BUF		(U64_C(2) << 32)
 // 2,3,4,5,6,7,8,9 are all DMA buffers.
+#define MMAP_OFFSET_RESOURCE1_UC	(U64_C(10) << 32)
+#define MMAP_OFFSET_RESOURCE1_WC	(U64_C(11) << 32)
+#define MMAP_OFFSET_RESOURCE2_UC	(U64_C(12) << 32)
+#define MMAP_OFFSET_RESOURCE2_WC	(U64_C(13) << 32)
 
 #define MMAP_SIZE_DMA_BUF (U64_C(1) << 32)
 
@@ -159,38 +163,76 @@ static long ioctl_get_device_info(struct chardev_private *priv,
 static long ioctl_query_mappings(struct chardev_private *priv,
 				 struct tenstorrent_query_mappings __user *arg)
 {
-	struct tenstorrent_mapping mappings[2];
+	struct tenstorrent_mapping mappings[6];
+	struct tenstorrent_mapping *next_mapping;
 
 	u32 valid_mappings_to_copy;
-	u32 unused_mappings_to_copy;
+	u32 extra_mappings_to_clear;
+	u32 valid_mappings;
+
+	int resource_len;
 
 	struct tenstorrent_query_mappings_in in;
 	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
 		return -EFAULT;
 
-	valid_mappings_to_copy = min(in.output_mapping_count, (u32)ARRAY_SIZE(mappings));
-	unused_mappings_to_copy = (in.output_mapping_count > ARRAY_SIZE(mappings))
-		? in.output_mapping_count - ARRAY_SIZE(mappings) : 0;
-
-	if (U32_MAX / sizeof(struct tenstorrent_mapping) < unused_mappings_to_copy)
-		return -EFAULT;
-
 	memset(mappings, 0, sizeof(mappings));
+	next_mapping = mappings;
 
-	mappings[0].mapping_id = TENSTORRENT_MAPPING_BAR0_UC;
-	mappings[0].mapping_base = MMAP_OFFSET_BAR0_UC;
-	mappings[0].mapping_size = pci_resource_len(priv->device->pdev, 0);
+	resource_len = pci_resource_len(priv->device->pdev, 0);
+	if (resource_len > 0) {
+		next_mapping->mapping_id = TENSTORRENT_MAPPING_RESOURCE0_UC;
+		next_mapping->mapping_base = MMAP_OFFSET_RESOURCE0_UC;
+		next_mapping->mapping_size = resource_len;
+		next_mapping++;
 
-	mappings[1].mapping_id = TENSTORRENT_MAPPING_BAR0_WC;
-	mappings[1].mapping_base = MMAP_OFFSET_BAR0_WC;
-	mappings[1].mapping_size = pci_resource_len(priv->device->pdev, 0);
+		next_mapping->mapping_id = TENSTORRENT_MAPPING_RESOURCE0_WC;
+		next_mapping->mapping_base = MMAP_OFFSET_RESOURCE0_WC;
+		next_mapping->mapping_size = resource_len;
+		next_mapping++;
+	}
+
+	resource_len = pci_resource_len(priv->device->pdev, 2);
+	if (resource_len > 0) {
+		next_mapping->mapping_id = TENSTORRENT_MAPPING_RESOURCE1_UC;
+		next_mapping->mapping_base = MMAP_OFFSET_RESOURCE1_UC;
+		next_mapping->mapping_size = resource_len;
+		next_mapping++;
+
+		next_mapping->mapping_id = TENSTORRENT_MAPPING_RESOURCE1_WC;
+		next_mapping->mapping_base = MMAP_OFFSET_RESOURCE1_WC;
+		next_mapping->mapping_size = resource_len;
+		next_mapping++;
+	}
+
+	resource_len = pci_resource_len(priv->device->pdev, 4);
+	if (resource_len > 0) {
+		next_mapping->mapping_id = TENSTORRENT_MAPPING_RESOURCE2_UC;
+		next_mapping->mapping_base = MMAP_OFFSET_RESOURCE2_UC;
+		next_mapping->mapping_size = resource_len;
+		next_mapping++;
+
+		next_mapping->mapping_id = TENSTORRENT_MAPPING_RESOURCE2_WC;
+		next_mapping->mapping_base = MMAP_OFFSET_RESOURCE2_WC;
+		next_mapping->mapping_size = resource_len;
+		next_mapping++;
+	}
+
+	valid_mappings = next_mapping - mappings;
+
+	valid_mappings_to_copy = min(in.output_mapping_count, valid_mappings);
+	extra_mappings_to_clear = (in.output_mapping_count > valid_mappings)
+		? in.output_mapping_count - valid_mappings : 0;
+
+	if (U32_MAX / sizeof(struct tenstorrent_mapping) < extra_mappings_to_clear)
+		return -EFAULT;
 
 	if (copy_to_user(&arg->out.mappings, &mappings,
 			 valid_mappings_to_copy * sizeof(struct tenstorrent_mapping)))
 		return -EFAULT;
 
 	if (clear_user(&arg->out.mappings[valid_mappings_to_copy],
-		       unused_mappings_to_copy * sizeof(struct tenstorrent_mapping)))
+		       extra_mappings_to_clear * sizeof(struct tenstorrent_mapping)))
 		return -EFAULT;
 
 	return 0;
@@ -363,32 +405,49 @@ static struct dmabuf *vma_dmabuf_target(struct chardev_private *priv,
 	return NULL;
 }
 
+static int map_pci_bar(struct pci_dev *pdev, struct vm_area_struct *vma, unsigned int bar)
+{
+	u64 bar_start = pci_resource_start(pdev, bar);
+	u64 bar_len = pci_resource_len(pdev, bar);
+
+	return vm_iomap_memory(vma, bar_start, bar_len);
+}
+
 static int tt_cdev_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct chardev_private *priv = file->private_data;
 	struct pci_dev *pdev = priv->device->pdev;
 
-	u64 bar0_start = pci_resource_start(pdev, 0);
-	u64 bar0_size = pci_resource_len(pdev, 0);
-
 	// We multiplex various mappable entities into a single character
 	// device using the mapping offset to determine which entity you get.
 	// Each mapping must be contained within a single entity.
-	// - PCI BAR 0 uncacheable mapping
-	// - PCI BAR 0 write-combining mapping
+	// - PCI BAR 0/2/4 uncacheable mapping
+	// - PCI BAR 0/2/4 write-combining mapping
 	// - DMA buffer mapping
 
-	if (vma_target_range(vma, MMAP_OFFSET_BAR0_UC, bar0_size)) {
-
+	if (vma_target_range(vma, MMAP_OFFSET_RESOURCE0_UC, pci_resource_len(pdev, 0))) {
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
+		return map_pci_bar(pdev, vma, 0);
 
-		return vm_iomap_memory(vma, bar0_start, bar0_size);
-
-	} else if (vma_target_range(vma, MMAP_OFFSET_BAR0_WC, bar0_size)) {
-
+	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE0_WC, pci_resource_len(pdev, 0))) {
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+		return map_pci_bar(pdev, vma, 0);
 
-		return vm_iomap_memory(vma, bar0_start, bar0_size);
+	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE1_UC, pci_resource_len(pdev, 2))) {
+		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
+		return map_pci_bar(pdev, vma, 2);
+
+	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE1_WC, pci_resource_len(pdev, 2))) {
+		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+		return map_pci_bar(pdev, vma, 2);
+
+	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE2_UC, pci_resource_len(pdev, 4))) {
+		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
+		return map_pci_bar(pdev, vma, 4);
+
+	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE2_WC, pci_resource_len(pdev, 4))) {
+		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+		return map_pci_bar(pdev, vma, 4);
 
 	} else {
 		struct dmabuf *dmabuf = vma_dmabuf_target(priv, vma);

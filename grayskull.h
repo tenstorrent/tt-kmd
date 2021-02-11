@@ -2,11 +2,13 @@
 #define TTDRIVER_GRAYSKULL_H_INCLUDED
 
 #include <linux/types.h>
+#include "device.h"
 
-struct grayskull_device;
+struct grayskull_device {
+	struct tenstorrent_device tt;
+	u8 __iomem *reset_unit_regs;
+};
 
-bool grayskull_send_arc_fw_message(struct grayskull_device *gs_dev, u8 message_id, u32 timeout_us);
-bool grayskull_init(struct grayskull_device *gs_dev);
-void grayskull_cleanup(struct grayskull_device *gs_dev);
+bool grayskull_shutdown_firmware(u8 __iomem* reset_unit_regs);
 
 #endif

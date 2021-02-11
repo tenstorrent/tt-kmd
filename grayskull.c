@@ -2,7 +2,7 @@
 #include <linux/types.h>
 #include <asm/io.h>
 
-#include "enumerate.h"
+#include "grayskull.h"
 
 #define RESET_UNIT_BAR 0
 #define RESET_UNIT_REG_START 0x1FF30000
@@ -22,9 +22,9 @@
 
 #define GS_FW_MSG_SHUTDOWN 0x55
 
-bool grayskull_send_arc_fw_message(struct grayskull_device *gs_dev, u8 message_id, u32 timeout_us) {
+bool grayskull_send_arc_fw_message(u8 __iomem* reset_unit_regs, u8 message_id, u32 timeout_us) {
 	u32 delay_counter = 0;
-	void __iomem *scratch_reg_5 = gs_dev->reset_unit_regs + SCRATCH_REG(5);
+	void __iomem *scratch_reg_5 = reset_unit_regs + SCRATCH_REG(5);
 
 	iowrite32(GS_FW_MESSAGE_PRESENT | message_id, scratch_reg_5);
 
@@ -41,20 +41,21 @@ bool grayskull_send_arc_fw_message(struct grayskull_device *gs_dev, u8 message_i
 	}
 }
 
-static u32 read_fw_post_code(struct grayskull_device *gs_dev) {
-	u32 post_code = ioread32(gs_dev->reset_unit_regs + POST_CODE_REG);
+static u32 read_fw_post_code(u8 __iomem* reset_unit_regs) {
+	u32 post_code = ioread32(reset_unit_regs + POST_CODE_REG);
 	return post_code & POST_CODE_MASK;
 }
 
-static bool grayskull_shutdown_firmware(struct grayskull_device *gs_dev) {
+// This is shared with wormhole.
+bool grayskull_shutdown_firmware(u8 __iomem* reset_unit_regs) {
 	const u32 post_code_timeout = 1000;
 	u32 delay_counter = 0;
 
-	if (!grayskull_send_arc_fw_message(gs_dev, GS_FW_MSG_SHUTDOWN, 5000)) // 2249 observed
+	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_SHUTDOWN, 5000)) // 2249 observed
 		return false;
 
 	while (1) {
-		u32 post_code = read_fw_post_code(gs_dev);
+		u32 post_code = read_fw_post_code(reset_unit_regs);
 		if (post_code == POST_CODE_ARC_SLEEP)
 			return true;
 
@@ -66,14 +67,25 @@ static bool grayskull_shutdown_firmware(struct grayskull_device *gs_dev) {
 	}
 }
 
-bool grayskull_init(struct grayskull_device *gs_dev) {
-	gs_dev->reset_unit_regs = pci_iomap_range(gs_dev->pdev, RESET_UNIT_BAR, RESET_UNIT_REG_START, RESET_UNIT_REG_LEN);
+bool grayskull_init(struct tenstorrent_device *tt_dev) {
+	struct grayskull_device *gs_dev = container_of(tt_dev, struct grayskull_device, tt);
+
+	gs_dev->reset_unit_regs = pci_iomap_range(gs_dev->tt.pdev, RESET_UNIT_BAR, RESET_UNIT_REG_START, RESET_UNIT_REG_LEN);
 	return (gs_dev->reset_unit_regs != NULL);
 }
 
-void grayskull_cleanup(struct grayskull_device *gs_dev) {
-	grayskull_shutdown_firmware(gs_dev);
+void grayskull_cleanup(struct tenstorrent_device *tt_dev) {
+	struct grayskull_device *gs_dev = container_of(tt_dev, struct grayskull_device, tt);
 
-	if (gs_dev->reset_unit_regs != NULL)
-		pci_iounmap(gs_dev->pdev, gs_dev->reset_unit_regs);
+	if (gs_dev->reset_unit_regs != NULL) {
+		grayskull_shutdown_firmware(gs_dev->reset_unit_regs);
+		pci_iounmap(gs_dev->tt.pdev, gs_dev->reset_unit_regs);
+	}
 }
+
+struct tenstorrent_device_class grayskull_class = {
+	.name = "Grayskull",
+	.instance_size = sizeof(struct grayskull_device),
+	.init_device = grayskull_init,
+	.cleanup_device = grayskull_cleanup,
+};

@@ -9,6 +9,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/version.h>
 
+#include "device.h"
 #include "enumerate.h"
 #include "ioctl.h"
 
@@ -44,7 +45,7 @@ struct dmabuf {
 // This is our device-private data assocated with each open character device fd.
 // Accessed through struct file::private_data.
 struct chardev_private {
-	struct grayskull_device *device;
+	struct tenstorrent_device *device;
 	struct mutex mutex;
 	struct dmabuf dmabufs[TENSTORRENT_MAX_DMA_BUFS];
 };
@@ -99,32 +100,32 @@ void cleanup_char_driver(void)
 	unregister_chrdev_region(tt_device_id, tt_max_devices);
 }
 
-static dev_t devt_for_device(struct grayskull_device *gs_dev)
+static dev_t devt_for_device(struct tenstorrent_device *tt_dev)
 {
-	return MKDEV(MAJOR(tt_device_id), MINOR(tt_device_id) + gs_dev->ordinal);
+	return MKDEV(MAJOR(tt_device_id), MINOR(tt_device_id) + tt_dev->ordinal);
 }
 
-int tenstorrent_register_device(struct grayskull_device *gs_dev)
+int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 {
-	dev_t devt = devt_for_device(gs_dev);
+	dev_t devt = devt_for_device(tt_dev);
 
-	device_initialize(&gs_dev->dev);
-	gs_dev->dev.devt = devt;
-	gs_dev->dev.class = tt_dev_class;
-	gs_dev->dev.parent = &gs_dev->pdev->dev;
-	gs_dev->dev.groups = NULL;
-	gs_dev->dev.release = NULL;
+	device_initialize(&tt_dev->dev);
+	tt_dev->dev.devt = devt;
+	tt_dev->dev.class = tt_dev_class;
+	tt_dev->dev.parent = &tt_dev->pdev->dev;
+	tt_dev->dev.groups = NULL;
+	tt_dev->dev.release = NULL;
 
-	gs_dev->dev.id = gs_dev->ordinal;
-	dev_set_name(&gs_dev->dev, TENSTORRENT "/%d", gs_dev->ordinal);
+	tt_dev->dev.id = tt_dev->ordinal;
+	dev_set_name(&tt_dev->dev, TENSTORRENT "/%d", tt_dev->ordinal);
 
-	cdev_init(&gs_dev->chardev, &chardev_fops);
-	return cdev_device_add(&gs_dev->chardev, &gs_dev->dev);
+	cdev_init(&tt_dev->chardev, &chardev_fops);
+	return cdev_device_add(&tt_dev->chardev, &tt_dev->dev);
 }
 
-void tenstorrent_unregister_device(struct grayskull_device *gs_dev)
+void tenstorrent_unregister_device(struct tenstorrent_device *tt_dev)
 {
-	cdev_device_del(&gs_dev->chardev, &gs_dev->dev);
+	cdev_device_del(&tt_dev->chardev, &tt_dev->dev);
 }
 
 static long ioctl_get_device_info(struct chardev_private *priv,
@@ -305,14 +306,14 @@ static long ioctl_free_dma_buf(struct chardev_private *priv,
 {
 	// This is unsupported until I figure out how to block freeing as long
 	// as a mapping exists. Otherwise the dma buffer is freed when the
-	// struct file, and that's safe because the mapping refcounts the file.
+	// struct file is destroyed, and that's safe because the mapping
+	// refcounts the file.
 	return -EINVAL;
 }
 
 static long ioctl_get_driver_info(struct chardev_private *priv,
 				  struct tenstorrent_get_driver_info __user *arg)
 {
-	const struct pci_dev *pdev = priv->device->pdev;
 	u32 bytes_to_copy;
 
 	struct tenstorrent_get_driver_info_out in;
@@ -459,14 +460,14 @@ static int tt_cdev_mmap(struct file *file, struct vm_area_struct *vma)
 	}
 }
 
-static struct grayskull_device *inode_to_gs_dev(struct inode *inode)
+static struct tenstorrent_device *inode_to_tt_dev(struct inode *inode)
 {
-	return container_of(inode->i_cdev, struct grayskull_device, chardev);
+	return container_of(inode->i_cdev, struct tenstorrent_device, chardev);
 }
 
 static int tt_cdev_open(struct inode *inode, struct file *file)
 {
-	struct grayskull_device *gs_dev = inode_to_gs_dev(inode);
+	struct tenstorrent_device *tt_dev = inode_to_tt_dev(inode);
 	struct chardev_private *private_data;
 
 	private_data = kzalloc(sizeof(*private_data), GFP_KERNEL);
@@ -475,7 +476,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 
 	mutex_init(&private_data->mutex);
 
-	private_data->device = gs_dev;
+	private_data->device = tt_dev;
 	file->private_data = private_data;
 
 	return 0;

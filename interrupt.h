@@ -1,9 +1,9 @@
 #ifndef TTDRIVER_INTERRUPT_H_INCLUDED
 #define TTDRIVER_INTERRUPT_H_INCLUDED
 
-struct grayskull_device;
+struct tenstorrent_device;
 
-bool tenstorrent_enable_interrupts(struct grayskull_device *gs_dev);
-void tenstorrent_disable_interrupts(struct grayskull_device *gs_dev);
+bool tenstorrent_enable_interrupts(struct tenstorrent_device *tt_dev);
+void tenstorrent_disable_interrupts(struct tenstorrent_device *tt_dev);
 
 #endif

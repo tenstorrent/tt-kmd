@@ -32,9 +32,15 @@ static uint axiclk_override = 0;
 module_param(axiclk_override, uint, 0444);
 MODULE_PARM_DESC(axiclk_override, "AXICLK override in MHz or 0 to auto-detect.");
 
+struct tenstorrent_device_class;
+extern struct tenstorrent_device_class grayskull_class;
+extern struct tenstorrent_device_class wormhole_class;
+
 const struct pci_device_id tenstorrent_ids[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_TENSTORRENT, PCI_DEVICE_ID_GRAYSKULL), .driver_data="Grayskull" },
-	{ PCI_DEVICE(PCI_VENDOR_ID_TENSTORRENT, PCI_DEVICE_ID_WORMHOLE), .driver_data="Wormhole" },
+	{ PCI_DEVICE(PCI_VENDOR_ID_TENSTORRENT, PCI_DEVICE_ID_GRAYSKULL),
+	  .driver_data=(kernel_ulong_t)&grayskull_class },
+	{ PCI_DEVICE(PCI_VENDOR_ID_TENSTORRENT, PCI_DEVICE_ID_WORMHOLE),
+	  .driver_data=(kernel_ulong_t)&wormhole_class },
 	{ 0 },
 };
 

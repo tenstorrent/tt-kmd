@@ -15,20 +15,9 @@
 struct pci_dev;
 struct cdev;
 
-struct grayskull_device {
-	struct device dev;
-	struct cdev chardev;
-	struct pci_dev *pdev;
-	unsigned int ordinal;
-	bool dma_capable;
-	bool interrupt_enabled;
-
-	u8 __iomem *reset_unit_regs;
-};
-
 int tenstorrent_pci_register_driver(void);
 void tenstorrent_pci_unregister_driver(void);
 
-struct grayskull_device *tenstorrent_lookup_device(unsigned minor);
+struct tenstorrent_device *tenstorrent_lookup_device(unsigned minor);
 
 #endif

@@ -81,6 +81,7 @@ static struct pci_driver tenstorrent_pci_driver = {
 	.id_table = tenstorrent_ids,
 	.probe = tenstorrent_pci_probe,
 	.remove = tenstorrent_pci_remove,
+	.shutdown = tenstorrent_pci_remove,
 };
 
 int tenstorrent_pci_register_driver(void)

@@ -52,12 +52,19 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = container_of(tt_dev, struct wormhole_device, tt);
 
 	wh_dev->bar2_mapping = pci_iomap(wh_dev->tt.pdev, 2, 0);
-	if (wh_dev->bar2_mapping) return false;
+	if (wh_dev->bar2_mapping == NULL) goto fail_bar2;
+
+	wh_dev->bar4_mapping = pci_iomap(wh_dev->tt.pdev, 4, 0);
+	if (wh_dev->bar4_mapping == NULL) goto fail_bar4;
 
 	map_bar4_to_system_registers(wh_dev);
 
-	wh_dev->bar4_mapping = pci_iomap(wh_dev->tt.pdev, 4, 0);
-	return (wh_dev->bar4_mapping != NULL);
+	return true;
+
+fail_bar4:
+	pci_iounmap(wh_dev->tt.pdev, wh_dev->bar2_mapping);
+fail_bar2:
+	return false;
 }
 
 static u8 __iomem *reset_unit_regs(struct wormhole_device *wh_dev) {

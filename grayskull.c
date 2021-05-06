@@ -191,7 +191,7 @@ bool grayskull_shutdown_firmware(u8 __iomem* reset_unit_regs) {
 }
 
 bool grayskull_init(struct tenstorrent_device *tt_dev) {
-	struct grayskull_device *gs_dev = container_of(tt_dev, struct grayskull_device, tt);
+	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
 	gs_dev->reset_unit_regs = pci_iomap_range(gs_dev->tt.pdev, RESET_UNIT_BAR, RESET_UNIT_REG_START, RESET_UNIT_REG_LEN);
 
@@ -207,7 +207,7 @@ bool grayskull_init(struct tenstorrent_device *tt_dev) {
 }
 
 void grayskull_cleanup(struct tenstorrent_device *tt_dev) {
-	struct grayskull_device *gs_dev = container_of(tt_dev, struct grayskull_device, tt);
+	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
 	if (gs_dev->reset_unit_regs != NULL) {
 		grayskull_shutdown_firmware(gs_dev->reset_unit_regs);

@@ -49,7 +49,7 @@ static void map_bar4_to_system_registers(struct wormhole_device *wh_dev) {
 }
 
 static bool wormhole_init(struct tenstorrent_device *tt_dev) {
-	struct wormhole_device *wh_dev = container_of(tt_dev, struct wormhole_device, tt);
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
 	wh_dev->bar2_mapping = pci_iomap(wh_dev->tt.pdev, 2, 0);
 	if (wh_dev->bar2_mapping == NULL) goto fail_bar2;
@@ -72,7 +72,7 @@ static u8 __iomem *reset_unit_regs(struct wormhole_device *wh_dev) {
 }
 
 static void wormhole_cleanup(struct tenstorrent_device *tt_dev) {
-	struct wormhole_device *wh_dev = container_of(tt_dev, struct wormhole_device, tt);
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
 	grayskull_shutdown_firmware(reset_unit_regs(wh_dev));
 

@@ -9,6 +9,9 @@ struct grayskull_device {
 	u8 __iomem *reset_unit_regs;
 };
 
+#define tt_dev_to_gs_dev(ttdev) \
+	container_of((tt_dev), struct grayskull_device, tt)
+
 bool grayskull_shutdown_firmware(u8 __iomem* reset_unit_regs);
 
 #endif

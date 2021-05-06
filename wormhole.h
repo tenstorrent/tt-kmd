@@ -10,4 +10,7 @@ struct wormhole_device {
 	u8 __iomem *bar4_mapping;
 };
 
+#define tt_dev_to_wh_dev(ttdev) \
+	container_of((tt_dev), struct wormhole_device, tt)
+
 #endif

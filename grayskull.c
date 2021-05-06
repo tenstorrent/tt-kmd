@@ -183,8 +183,15 @@ grayskull_arc_init_err:
 	return -1;
 }
 
+static bool hardware_is_hung(u8 __iomem *reset_unit_regs) {
+	return (ioread32(reset_unit_regs + SCRATCH_REG(2)) == 0xFFFFFFFF);
+}
+
 // This is shared with wormhole.
 bool grayskull_shutdown_firmware(u8 __iomem* reset_unit_regs) {
+	if (hardware_is_hung(reset_unit_regs))
+		return false;
+
 	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_ASTATE3, 5000))
 		return false;
 	return true;

@@ -16,19 +16,39 @@ static uint max_devices = 16;
 module_param(max_devices, uint, 0444);
 MODULE_PARM_DESC(max_devices, "Maximum number of tenstorrent devices (chips) to support.");
 
-static uint ddr_frequency_override = 0xffff;
+bool auto_init = true;
+module_param(auto_init, bool, 0444);
+MODULE_PARM_DESC(auto_init, "Automatically initialize tenstorrent devices. Default Y.");
+
+bool arc_fw_override = false;
+module_param(arc_fw_override, bool, 0444);
+MODULE_PARM_DESC(arc_fw_override, "Override ARC FW from filesystem instead of auto load from SPI: Y/N. Default N.");
+
+bool ddr_train_en = true;
+module_param(ddr_train_en, bool, 0444);
+MODULE_PARM_DESC(skip_dram_train, "Enable DRAM training: Y/N. Default Y.");
+
+uint ddr_frequency_override = 0;
 module_param(ddr_frequency_override, uint, 0444);
-MODULE_PARM_DESC(ddr_frequency_override, "DDR frequency override in MHz or 0xffff to auto-detect.");
+MODULE_PARM_DESC(ddr_frequency_override, "DDR frequency override in MHz or 0 to auto-detect.");
 
-static bool skip_dram_train = false;
-module_param(skip_dram_train, bool, 0444);
-MODULE_PARM_DESC(skip_dram_train, "Skip DRAM training: Y/N, should be N by default.");
+bool aiclk_ppm_en = true;
+module_param(aiclk_ppm_en, bool, 0444);
+MODULE_PARM_DESC(aiclk_override, "Enable dynamic AICLK: Y/N. Default Y.");
 
-static uint aiclk_override = 0;
-module_param(aiclk_override, uint, 0444);
-MODULE_PARM_DESC(aiclk_override, "AICLK override in MHz or 0 to auto-detect.");
+uint aiclk_fmax_override = 0;
+module_param(aiclk_fmax_override, uint, 0444);
+MODULE_PARM_DESC(aiclk_fmax_override, "AICLK override in MHz or 0 to auto-detect.");
 
-static uint axiclk_override = 0;
+bool watchdog_fw_en = true;
+module_param(watchdog_fw_en, bool, 0444);
+MODULE_PARM_DESC(watchdog_fw_en, "Enable watchdog FW: Y/N. Default Y.");
+
+bool watchdog_fw_override = true;
+module_param(watchdog_fw_override, bool, 0444);
+MODULE_PARM_DESC(watchdog_fw_override, "Override watchdog FW from filesystem instead of auto load from SPI: Y/N. Default N.");
+
+uint axiclk_override = 0;
 module_param(axiclk_override, uint, 0444);
 MODULE_PARM_DESC(axiclk_override, "AXICLK override in MHz or 0 to auto-detect.");
 

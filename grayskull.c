@@ -30,6 +30,7 @@
 
 #define ARC_MISC_CNTL_REG 0x100
 #define ARC_MISC_CNTL_RESET_MASK (1 << 12)
+#define ARC_MISC_CNTL_IRQ0_MASK (1 << 16)
 #define ARC_UDMIAXI_REGION_REG 0x10C
 #define ARC_UDMIAXI_REGION_CSM 0x10
 
@@ -65,8 +66,14 @@ int wait_reg32_with_timeout(u8 __iomem* reg, u32 expected_val, u32 timeout_us) {
 bool grayskull_send_arc_fw_message(u8 __iomem* reset_unit_regs, u8 message_id, u32 timeout_us) {
 	u32 delay_counter = 0;
 	void __iomem *scratch_reg_5 = reset_unit_regs + SCRATCH_REG(5);
+	void __iomem *arc_misc_cntl_reg = reset_unit_regs + ARC_MISC_CNTL_REG;
+	u32 arc_misc_cntl;
 
 	iowrite32(GS_FW_MESSAGE_PRESENT | message_id, scratch_reg_5);
+
+	// Trigger IRQ to ARC
+	arc_misc_cntl = ioread32(arc_misc_cntl_reg);
+	iowrite32(arc_misc_cntl | ARC_MISC_CNTL_IRQ0_MASK, arc_misc_cntl_reg);
 
 	while (1) {
 		u32 response = ioread32(scratch_reg_5);
@@ -79,11 +86,6 @@ bool grayskull_send_arc_fw_message(u8 __iomem* reset_unit_regs, u8 message_id, u
 		}
 		udelay(1);
 	}
-}
-
-static u32 read_fw_post_code(u8 __iomem* reset_unit_regs) {
-	u32 post_code = ioread32(reset_unit_regs + POST_CODE_REG);
-	return post_code & POST_CODE_MASK;
 }
 
 static bool arc_l2_is_running(u8 __iomem* reset_unit_regs) {
@@ -174,23 +176,9 @@ grayskull_arc_init_err:
 
 // This is shared with wormhole.
 bool grayskull_shutdown_firmware(u8 __iomem* reset_unit_regs) {
-	const u32 post_code_timeout = 1000;
-	u32 delay_counter = 0;
-
-	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_SHUTDOWN, 5000)) // 2249 observed
+	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_ASTATE3, 5000)) // 2249 observed
 		return false;
-
-	while (1) {
-		u32 post_code = read_fw_post_code(reset_unit_regs);
-		if (post_code == POST_CODE_ARC_SLEEP)
-			return true;
-
-		if (delay_counter++ >= post_code_timeout) {
-			printk(KERN_WARNING "Timeout waiting for sleep post code.\n");
-			return false;
-		}
-		udelay(1);
-	}
+	return true;
 }
 
 bool grayskull_init(struct tenstorrent_device *tt_dev) {

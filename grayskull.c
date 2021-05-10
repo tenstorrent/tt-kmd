@@ -22,19 +22,19 @@
 #define POST_CODE_REG SCRATCH_REG(0)
 #define POST_CODE_MASK ((u32)0x3FFF)
 #define POST_CODE_ARC_SLEEP 2
-#define POST_CODE_ARC_L2 ((u32)0xC0DE0000)
-#define POST_CODE_ARC_L2_MASK ((u32)0xFFFF0000)
+#define POST_CODE_ARC_L2 0xC0DE0000
+#define POST_CODE_ARC_L2_MASK 0xFFFF0000
 
-#define SCRATCH_5_ARC_BOOTROM_DONE (0x60)
-#define SCRATCH_5_ARC_L2_DONE (0x0)
+#define SCRATCH_5_ARC_BOOTROM_DONE 0x60
+#define SCRATCH_5_ARC_L2_DONE 0x0
 
-#define ARC_MISC_CNTL_REG (0x100)
+#define ARC_MISC_CNTL_REG 0x100
 #define ARC_MISC_CNTL_RESET_MASK (1 << 12)
-#define ARC_UDMIAXI_REGION_REG (0x10C)
-#define ARC_UDMIAXI_REGION_CSM (0x10)
+#define ARC_UDMIAXI_REGION_REG 0x10C
+#define ARC_UDMIAXI_REGION_CSM 0x10
 
 
-#define GPIO_PAD_VAL_REG (0x1B8)
+#define GPIO_PAD_VAL_REG 0x1B8
 #define GPIO_ARC_SPI_BOOTROM_EN_MASK (1 << 12)
 
 
@@ -56,9 +56,8 @@ int wait_reg32_with_timeout(u8 __iomem* reg, u32 expected_val, u32 timeout_us) {
 		u32 read_val = ioread32(reg);
 		if (read_val == expected_val)
 			return 0;
-		if (delay_counter++ >= timeout_us) {
+		if (delay_counter++ >= timeout_us)
 			return -1;
-		}
 		udelay(1);
 	}
 }
@@ -101,7 +100,7 @@ static int grayskull_populate_arc_if(struct grayskull_device *gs_dev) {
 						sizeof(ttkmd_arc_if_u));
 
 	if (ttkmd_arc_if == NULL || device_ttkmd_arc_if == NULL)
-		return ENOMEM;
+		return -ENOMEM;
 
 	// ARC is little-endian. Convert to little-endian so we can use memcpy_toio
 	ttkmd_arc_if->f.magic_number[0] = cpu_to_le32(TTKMD_ARC_MAGIC_NUMBER_0);

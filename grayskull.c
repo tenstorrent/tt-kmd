@@ -52,14 +52,17 @@
 #define GS_FW_MSG_ASTATE5 0xA5
 
 int wait_reg32_with_timeout(u8 __iomem* reg, u32 expected_val, u32 timeout_us) {
+	const uint POLL_PERIOD_US = 10;
 	u32 delay_counter = 0;
+	// Round up
+	u32 timeout_count = (timeout_us + POLL_PERIOD_US - 1) / POLL_PERIOD_US;
 	while (1) {
 		u32 read_val = ioread32(reg);
 		if (read_val == expected_val)
 			return 0;
-		if (delay_counter++ >= timeout_us)
+		if (delay_counter++ >= timeout_count)
 			return -1;
-		udelay(1);
+		usleep_range(POLL_PERIOD_US, 2 * POLL_PERIOD_US);
 	}
 }
 
@@ -164,6 +167,10 @@ static int grayskull_arc_init(struct grayskull_device *gs_dev) {
 	}
 
 	if (toggle_arc_reset(reset_unit_regs))
+		goto grayskull_arc_init_err;
+
+	if (wait_reg32_with_timeout(reset_unit_regs + SCRATCH_REG(5),
+					SCRATCH_5_ARC_L2_DONE, 5000000))
 		goto grayskull_arc_init_err;
 
 	pr_info("ARC initialization done.\n");

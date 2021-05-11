@@ -52,17 +52,19 @@
 #define GS_FW_MSG_ASTATE5 0xA5
 
 int wait_reg32_with_timeout(u8 __iomem* reg, u32 expected_val, u32 timeout_us) {
-	const uint POLL_PERIOD_US = 10;
-	u32 delay_counter = 0;
+	// Scale poll_period for around 100 polls, and at least 10 us
+	u32 poll_period_us = max((u32)10, timeout_us / 100);
 	// Round up
-	u32 timeout_count = (timeout_us + POLL_PERIOD_US - 1) / POLL_PERIOD_US;
+	u32 timeout_count = (timeout_us + poll_period_us - 1) / poll_period_us;
+	u32 delay_counter = 0;
+
 	while (1) {
 		u32 read_val = ioread32(reg);
 		if (read_val == expected_val)
 			return 0;
 		if (delay_counter++ >= timeout_count)
 			return -1;
-		usleep_range(POLL_PERIOD_US, 2 * POLL_PERIOD_US);
+		usleep_range(poll_period_us, 2 * poll_period_us);
 	}
 }
 
@@ -183,7 +185,7 @@ grayskull_arc_init_err:
 
 // This is shared with wormhole.
 bool grayskull_shutdown_firmware(u8 __iomem* reset_unit_regs) {
-	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_ASTATE3, 5000)) // 2249 observed
+	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_ASTATE3, 5000))
 		return false;
 	return true;
 }
@@ -197,7 +199,7 @@ bool grayskull_init(struct tenstorrent_device *tt_dev) {
 		return false;
 
 	if (arc_l2_is_running(gs_dev->reset_unit_regs)) {
-		grayskull_send_arc_fw_message(gs_dev->reset_unit_regs, GS_FW_MSG_ASTATE0, 1000);
+		grayskull_send_arc_fw_message(gs_dev->reset_unit_regs, GS_FW_MSG_ASTATE0, 5000);
 		return true;
 	}
 

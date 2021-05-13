@@ -44,7 +44,7 @@ bool watchdog_fw_en = true;
 module_param(watchdog_fw_en, bool, 0444);
 MODULE_PARM_DESC(watchdog_fw_en, "Enable watchdog FW: Y/N. Default Y.");
 
-bool watchdog_fw_override = true;
+bool watchdog_fw_override = false;
 module_param(watchdog_fw_override, bool, 0444);
 MODULE_PARM_DESC(watchdog_fw_override, "Override watchdog FW from filesystem instead of auto load from SPI: Y/N. Default N.");
 

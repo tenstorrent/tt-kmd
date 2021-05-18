@@ -465,6 +465,22 @@ static struct tenstorrent_device *inode_to_tt_dev(struct inode *inode)
 	return container_of(inode->i_cdev, struct tenstorrent_device, chardev);
 }
 
+static void increment_cdev_open_count(struct tenstorrent_device *tt_dev) {
+	mutex_lock(&tt_dev->chardev_mutex);
+	if (!tt_dev->chardev_open_count && tt_dev->dev_class->first_open_cb)
+		tt_dev->dev_class->first_open_cb(tt_dev);
+	tt_dev->chardev_open_count++;
+	mutex_unlock(&tt_dev->chardev_mutex);
+}
+
+static void decrement_cdev_open_count(struct tenstorrent_device *tt_dev) {
+	mutex_lock(&tt_dev->chardev_mutex);
+	tt_dev->chardev_open_count--;
+	if (!tt_dev->chardev_open_count && tt_dev->dev_class->last_release_cb)
+		tt_dev->dev_class->last_release_cb(tt_dev);
+	mutex_unlock(&tt_dev->chardev_mutex);
+}
+
 static int tt_cdev_open(struct inode *inode, struct file *file)
 {
 	struct tenstorrent_device *tt_dev = inode_to_tt_dev(inode);
@@ -479,13 +495,18 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	private_data->device = tt_dev;
 	file->private_data = private_data;
 
+	increment_cdev_open_count(tt_dev);
+
 	return 0;
 }
 
 static int tt_cdev_release(struct inode *inode, struct file *file)
 {
+	struct tenstorrent_device *tt_dev = inode_to_tt_dev(inode);
 	struct chardev_private *priv = file->private_data;
 	unsigned int i;
+
+	decrement_cdev_open_count(tt_dev);
 
 	for (i = 0; i < ARRAY_SIZE(priv->dmabufs); i++) {
 		struct dmabuf *dmabuf = &priv->dmabufs[i];

@@ -16,6 +16,9 @@ struct tenstorrent_device {
 	unsigned int ordinal;
 	bool dma_capable;
 	bool interrupt_enabled;
+
+	struct mutex chardev_mutex;
+	unsigned int chardev_open_count;
 };
 
 struct tenstorrent_device_class {
@@ -23,6 +26,8 @@ struct tenstorrent_device_class {
 	u32 instance_size;
 	bool (*init_device)(struct tenstorrent_device *ttdev);
 	void (*cleanup_device)(struct tenstorrent_device *ttdev);
+	void (*first_open_cb)(struct tenstorrent_device *ttdev);
+	void (*last_release_cb)(struct tenstorrent_device *ttdev);
 };
 
 #endif

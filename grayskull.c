@@ -45,6 +45,7 @@
 // Appearance of any other value indicates a conflict with another message.
 #define GS_FW_MESSAGE_PRESENT 0xAA00
 
+#define GS_FW_MSG_GO_LONG_IDLE 0x54
 #define GS_FW_MSG_SHUTDOWN 0x55
 #define GS_FW_MSG_ASTATE0 0xA0
 #define GS_FW_MSG_ASTATE1 0xA1
@@ -222,9 +223,17 @@ void grayskull_cleanup(struct tenstorrent_device *tt_dev) {
 	}
 }
 
+static void grayskull_last_release_handler(struct tenstorrent_device *tt_dev) {
+	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
+	grayskull_send_arc_fw_message(gs_dev->reset_unit_regs,
+					GS_FW_MSG_GO_LONG_IDLE,
+					2000);
+}
+
 struct tenstorrent_device_class grayskull_class = {
 	.name = "Grayskull",
 	.instance_size = sizeof(struct grayskull_device),
 	.init_device = grayskull_init,
 	.cleanup_device = grayskull_cleanup,
+	.last_release_cb = grayskull_last_release_handler,
 };

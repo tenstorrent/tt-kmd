@@ -3,6 +3,7 @@
 
 #include <linux/types.h>
 #include <linux/device.h>
+#include <linux/pci.h>
 #include <linux/cdev.h>
 
 struct tenstorrent_device_class;

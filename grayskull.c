@@ -2,11 +2,16 @@
 #include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/slab.h>
+#include <linux/firmware.h>
 #include <asm/io.h>
 
 #include "module.h"
 #include "grayskull.h"
 #include "ttkmd_arc_if.h"
+
+#define ARC_ROM_MEMORY_BAR 0
+#define ARC_ROM_MEMORY_START 0x1FF00000
+#define ARC_ROM_MEMORY_LEN 0x10000
 
 #define RESET_UNIT_BAR 0
 #define RESET_UNIT_REG_START 0x1FF30000
@@ -51,6 +56,11 @@
 #define GS_FW_MSG_ASTATE1 0xA1
 #define GS_FW_MSG_ASTATE3 0xA3
 #define GS_FW_MSG_ASTATE5 0xA5
+
+#define GS_ARC_L2_FW_NAME "tenstorrent_gs_arc_l2_fw.bin"
+#define GS_ARC_L2_FW_SIZE_BYTES 0xF000
+#define GS_WATCHDOG_FW_NAME "tenstorrent_gs_wdg_fw.bin"
+#define GS_WATCHDOG_FW_SIZE_BYTES 0x1000
 
 int wait_reg32_with_timeout(u8 __iomem* reg, u32 expected_val, u32 timeout_us) {
 	// Scale poll_period for around 100 polls, and at least 10 us
@@ -97,6 +107,43 @@ bool grayskull_send_arc_fw_message(u8 __iomem* reset_unit_regs, u8 message_id, u
 static bool arc_l2_is_running(u8 __iomem* reset_unit_regs) {
 	u32 post_code = ioread32(reset_unit_regs + POST_CODE_REG);
 	return ((post_code & POST_CODE_ARC_L2_MASK) == POST_CODE_ARC_L2);
+}
+
+static int grayskull_load_arc_fw(struct grayskull_device *gs_dev) {
+	const struct firmware *firmware;
+	int ret = 0;
+	u32 reset_vector;
+	u8 __iomem* reset_unit_regs = gs_dev->reset_unit_regs;
+	u8 __iomem* fw_target_mem = pci_iomap_range(gs_dev->tt.pdev,
+							ARC_CSM_MEMORY_BAR,
+							ARC_CSM_MEMORY_START,
+							GS_ARC_L2_FW_SIZE_BYTES);
+	u8 __iomem* reset_vec_target_mem = pci_iomap_range(gs_dev->tt.pdev,
+							ARC_ROM_MEMORY_BAR,
+							ARC_ROM_MEMORY_START, 4);
+
+	if (!fw_target_mem || !reset_vec_target_mem)
+		return -ENOMEM;
+
+	ret = request_firmware(&firmware, GS_ARC_L2_FW_NAME, &gs_dev->tt.pdev->dev);
+	if (ret)
+		goto grayskull_load_arc_fw_cleanup;
+
+	if (firmware->size != GS_ARC_L2_FW_SIZE_BYTES) {
+		ret = -EINVAL;
+		goto grayskull_load_arc_fw_cleanup;
+	}
+
+	iowrite32(ARC_UDMIAXI_REGION_CSM, reset_unit_regs + ARC_UDMIAXI_REGION_REG);
+	memcpy_toio(fw_target_mem, firmware->data, GS_ARC_L2_FW_SIZE_BYTES);
+	reset_vector = le32_to_cpu(*(u32 *)firmware->data);
+	iowrite32(reset_vector, reset_vec_target_mem);
+
+grayskull_load_arc_fw_cleanup:
+	release_firmware(firmware);
+	pci_iounmap(gs_dev->tt.pdev, reset_vec_target_mem);
+	pci_iounmap(gs_dev->tt.pdev, fw_target_mem);
+	return ret;
 }
 
 static int grayskull_populate_arc_if(struct grayskull_device *gs_dev) {
@@ -162,6 +209,13 @@ static int grayskull_arc_init(struct grayskull_device *gs_dev) {
 	} else {
 		pr_warn("SPI bootrom not enabled.\n");
 		goto grayskull_arc_init_err;
+	}
+
+	if (arc_fw_override) {
+		if (grayskull_load_arc_fw(gs_dev)) {
+			pr_warn("ARC FW Override unsuccessful.\n");
+			goto grayskull_arc_init_err;
+		}
 	}
 
 	if (grayskull_populate_arc_if(gs_dev)) {

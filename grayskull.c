@@ -17,6 +17,10 @@
 #define RESET_UNIT_REG_START 0x1FF30000
 #define RESET_UNIT_REG_LEN 0x10000
 
+#define ARC_ICCM_MEMORY_BAR 0
+#define ARC_ICCM_MEMORY_START 0x1FE00000
+#define ARC_ICCM_MEMORY_LEN 0x80000
+
 #define ARC_CSM_MEMORY_BAR 0
 #define ARC_CSM_MEMORY_START 0x1FE80000
 #define ARC_CSM_MEMORY_LEN 0x80000
@@ -37,6 +41,7 @@
 #define ARC_MISC_CNTL_RESET_MASK (1 << 12)
 #define ARC_MISC_CNTL_IRQ0_MASK (1 << 16)
 #define ARC_UDMIAXI_REGION_REG 0x10C
+#define ARC_UDMIAXI_REGION_ICCM(n) (0x3 * (n))
 #define ARC_UDMIAXI_REGION_CSM 0x10
 
 
@@ -61,6 +66,7 @@
 #define GS_ARC_L2_FW_SIZE_BYTES 0xF000
 #define GS_WATCHDOG_FW_NAME "tenstorrent_gs_wdg_fw.bin"
 #define GS_WATCHDOG_FW_SIZE_BYTES 0x1000
+#define GS_WATCHDOG_FW_CORE_ID 3
 
 int wait_reg32_with_timeout(u8 __iomem* reg, u32 expected_val, u32 timeout_us) {
 	// Scale poll_period for around 100 polls, and at least 10 us
@@ -146,6 +152,42 @@ grayskull_load_arc_fw_cleanup:
 	return ret;
 }
 
+static int grayskull_load_watchdog_fw(struct grayskull_device *gs_dev) {
+	const struct firmware *firmware;
+	int ret = 0;
+	u32 reset_vector;
+	u8 __iomem* reset_unit_regs = gs_dev->reset_unit_regs;
+	u8 __iomem* fw_target_mem = pci_iomap_range(gs_dev->tt.pdev,
+							ARC_ICCM_MEMORY_BAR,
+							ARC_ICCM_MEMORY_START,
+							GS_WATCHDOG_FW_SIZE_BYTES);
+
+	if (!fw_target_mem)
+		return -ENOMEM;
+
+	ret = request_firmware(&firmware, GS_WATCHDOG_FW_NAME, &gs_dev->tt.pdev->dev);
+	if (ret)
+		goto grayskull_load_watchdog_fw_cleanup;
+
+	if (firmware->size != GS_WATCHDOG_FW_SIZE_BYTES) {
+		ret = -EINVAL;
+		goto grayskull_load_watchdog_fw_cleanup;
+	}
+
+	iowrite32(ARC_UDMIAXI_REGION_ICCM(GS_WATCHDOG_FW_CORE_ID),
+		reset_unit_regs + ARC_UDMIAXI_REGION_REG);
+	memcpy_toio(fw_target_mem, firmware->data, GS_WATCHDOG_FW_SIZE_BYTES);
+	// Reset vector needs to be passed to FW through ttkmd_arc_if
+	reset_vector = le32_to_cpu(*(u32 *)firmware->data);
+	gs_dev->tt.watchdog_fw_reset_vec = reset_vector;
+	iowrite32(ARC_UDMIAXI_REGION_CSM, reset_unit_regs + ARC_UDMIAXI_REGION_REG);
+
+grayskull_load_watchdog_fw_cleanup:
+	release_firmware(firmware);
+	pci_iounmap(gs_dev->tt.pdev, fw_target_mem);
+	return ret;
+}
+
 static int grayskull_populate_arc_if(struct grayskull_device *gs_dev) {
 	ttkmd_arc_if_u *ttkmd_arc_if = kzalloc(sizeof(ttkmd_arc_if_u), GFP_KERNEL);
 	u8 __iomem* reset_unit_regs = gs_dev->reset_unit_regs;
@@ -168,6 +210,8 @@ static int grayskull_populate_arc_if(struct grayskull_device *gs_dev) {
 	ttkmd_arc_if->f.aiclk_ppm_ovr = cpu_to_le32(aiclk_fmax_override);
 	ttkmd_arc_if->f.watchdog_fw_en = watchdog_fw_en;
 	ttkmd_arc_if->f.watchdog_fw_load = !watchdog_fw_override;
+	ttkmd_arc_if->f.watchdog_fw_reset_vec =
+		cpu_to_le32(gs_dev->tt.watchdog_fw_reset_vec);
 
 	iowrite32(ARC_UDMIAXI_REGION_CSM, reset_unit_regs + ARC_UDMIAXI_REGION_REG);
 	memcpy_toio(device_ttkmd_arc_if, ttkmd_arc_if, sizeof(ttkmd_arc_if_u));
@@ -214,6 +258,13 @@ static int grayskull_arc_init(struct grayskull_device *gs_dev) {
 	if (arc_fw_override) {
 		if (grayskull_load_arc_fw(gs_dev)) {
 			pr_warn("ARC FW Override unsuccessful.\n");
+			goto grayskull_arc_init_err;
+		}
+	}
+
+	if (watchdog_fw_override) {
+		if (grayskull_load_watchdog_fw(gs_dev)) {
+			pr_warn("Watchdog FW Override unsuccessful.\n");
 			goto grayskull_arc_init_err;
 		}
 	}

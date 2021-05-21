@@ -26,7 +26,7 @@ MODULE_PARM_DESC(arc_fw_override, "Override ARC FW from filesystem instead of au
 
 bool ddr_train_en = true;
 module_param(ddr_train_en, bool, 0444);
-MODULE_PARM_DESC(skip_dram_train, "Enable DRAM training: Y/N. Default Y.");
+MODULE_PARM_DESC(ddr_train_en, "Enable DRAM training: Y/N. Default Y.");
 
 uint ddr_frequency_override = 0;
 module_param(ddr_frequency_override, uint, 0444);
@@ -34,7 +34,7 @@ MODULE_PARM_DESC(ddr_frequency_override, "DDR frequency override in MHz or 0 to 
 
 bool aiclk_ppm_en = true;
 module_param(aiclk_ppm_en, bool, 0444);
-MODULE_PARM_DESC(aiclk_override, "Enable dynamic AICLK: Y/N. Default Y.");
+MODULE_PARM_DESC(aiclk_ppm_en, "Enable dynamic AICLK: Y/N. Default Y.");
 
 uint aiclk_fmax_override = 0;
 module_param(aiclk_fmax_override, uint, 0444);

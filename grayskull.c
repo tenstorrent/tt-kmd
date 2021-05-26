@@ -203,7 +203,7 @@ static int grayskull_populate_arc_if(struct grayskull_device *gs_dev) {
 	ttkmd_arc_if->f.magic_number[0] = cpu_to_le32(TTKMD_ARC_MAGIC_NUMBER_0);
 	ttkmd_arc_if->f.magic_number[1] = cpu_to_le32(TTKMD_ARC_MAGIC_NUMBER_1);
 	ttkmd_arc_if->f.version = cpu_to_le32(TTKMD_ARC_IF_VERSION);
-	ttkmd_arc_if->f.auto_init = auto_init;
+	ttkmd_arc_if->f.stage2_init = arc_fw_stage2_init;
 	ttkmd_arc_if->f.ddr_train_en = ddr_train_en;
 	ttkmd_arc_if->f.ddr_freq_ovr = cpu_to_le32(ddr_frequency_override);
 	ttkmd_arc_if->f.aiclk_ppm_en = aiclk_ppm_en;
@@ -237,8 +237,8 @@ static int grayskull_arc_init(struct grayskull_device *gs_dev) {
 	u32 gpio_val;
 	int ret;
 
-	if (!auto_init) {
-		pr_info("ARC auto init skipped.\n");
+	if (!arc_fw_init) {
+		pr_info("ARC initialization skipped.\n");
 		return 0;
 	}
 

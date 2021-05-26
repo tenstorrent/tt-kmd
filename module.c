@@ -16,13 +16,17 @@ static uint max_devices = 16;
 module_param(max_devices, uint, 0444);
 MODULE_PARM_DESC(max_devices, "Maximum number of tenstorrent devices (chips) to support.");
 
-bool auto_init = true;
-module_param(auto_init, bool, 0444);
-MODULE_PARM_DESC(auto_init, "Automatically initialize tenstorrent devices. Default Y.");
+bool arc_fw_init = true;
+module_param(arc_fw_init, bool, 0444);
+MODULE_PARM_DESC(arc_fw_init, "Automatically initialize tenstorrent devices' ARC FW. Default Y.");
 
 bool arc_fw_override = false;
 module_param(arc_fw_override, bool, 0444);
 MODULE_PARM_DESC(arc_fw_override, "Override ARC FW from filesystem instead of auto load from SPI: Y/N. Default N.");
+
+bool arc_fw_stage2_init = true;
+module_param(arc_fw_stage2_init, bool, 0444);
+MODULE_PARM_DESC(arc_fw_stage2_init, "Enable ARC FW stage 2 initialization. Default Y.");
 
 bool ddr_train_en = true;
 module_param(ddr_train_en, bool, 0444);

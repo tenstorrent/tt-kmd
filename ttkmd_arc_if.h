@@ -13,12 +13,12 @@
 
 #define TTKMD_ARC_MAGIC_NUMBER_0  (0x54544b4d)
 #define TTKMD_ARC_MAGIC_NUMBER_1  (0x44415243)
-#define TTKMD_ARC_IF_VERSION      0x2
+#define TTKMD_ARC_IF_VERSION      0x3
 
 typedef struct {
   uint32_t  magic_number[2];
   uint32_t  version;
-  uint8_t   auto_init;
+  uint8_t   stage2_init;
   uint8_t   padding0[3];
   uint8_t   aiclk_ppm_en;
   uint8_t   padding1[3];

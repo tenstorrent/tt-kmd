@@ -41,11 +41,11 @@ static void write_iatu_reg(struct wormhole_device *wh_dev, unsigned direction,
 static void map_bar4_to_system_registers(struct wormhole_device *wh_dev) {
 	u32 region_ctrl_2 = REGION_EN | BAR_MATCH_MODE | FUZZY_TYPE_MATCH | BAR_NUM(4);
 
-	WRITE_IATU_REG(wh_dev, INBOUND, 0, LOWER_TARGET_ADDR, BAR4_SOC_TARGET_ADDRESS);
-	WRITE_IATU_REG(wh_dev, INBOUND, 0, UPPER_TARGET_ADDR, 0);
+	WRITE_IATU_REG(wh_dev, INBOUND, 1, LOWER_TARGET_ADDR, BAR4_SOC_TARGET_ADDRESS);
+	WRITE_IATU_REG(wh_dev, INBOUND, 1, UPPER_TARGET_ADDR, 0);
 
-	WRITE_IATU_REG(wh_dev, INBOUND, 0, REGION_CTRL_1, 0);
-	WRITE_IATU_REG(wh_dev, INBOUND, 0, REGION_CTRL_2, region_ctrl_2);
+	WRITE_IATU_REG(wh_dev, INBOUND, 1, REGION_CTRL_1, 0);
+	WRITE_IATU_REG(wh_dev, INBOUND, 1, REGION_CTRL_2, region_ctrl_2);
 }
 
 static bool wormhole_init(struct tenstorrent_device *tt_dev) {

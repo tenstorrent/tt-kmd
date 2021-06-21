@@ -52,6 +52,8 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	if (device_class->init_device(tt_dev))
 		device_class->init_hardware(tt_dev);
 
+	pci_save_state(dev);
+
 	tenstorrent_register_device(tt_dev);
 
 	return 0;

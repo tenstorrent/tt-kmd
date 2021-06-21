@@ -338,6 +338,40 @@ static long ioctl_get_driver_info(struct chardev_private *priv,
 	return 0;
 }
 
+static long ioctl_reset_device(struct chardev_private *priv,
+			       struct tenstorrent_reset_device __user *arg)
+{
+	bool ok;
+	u32 bytes_to_copy;
+
+	struct tenstorrent_reset_device_in in;
+	struct tenstorrent_reset_device_out out;
+	memset(&in, 0, sizeof(in));
+	memset(&out, 0, sizeof(out));
+
+	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
+		return -EFAULT;
+
+	if (in.flags != 0)
+		return -EINVAL;
+
+	pci_restore_state(priv->device->pdev);
+	ok = priv->device->dev_class->init_hardware(priv->device);
+
+	out.output_size_bytes = sizeof(out);
+	out.result = !ok;
+
+	if (clear_user(&arg->out, in.output_size_bytes) != 0)
+		return -EFAULT;
+
+	bytes_to_copy = min(in.output_size_bytes, (u32)sizeof(out));
+
+	if (copy_to_user(&arg->out, &out, sizeof(out)) != 0)
+		return -EFAULT;
+
+	return 0;
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	long ret = -EINVAL;
@@ -365,6 +399,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_GET_DRIVER_INFO:
 			ret = ioctl_get_driver_info(priv, (struct tenstorrent_get_driver_info __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_RESET_DEVICE:
+			ret = ioctl_reset_device(priv, (struct tenstorrent_reset_device __user *)arg);
 			break;
 
 		default:

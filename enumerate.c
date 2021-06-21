@@ -49,7 +49,8 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	tt_dev->interrupt_enabled = tenstorrent_enable_interrupts(tt_dev);
 
-	device_class->init_device(tt_dev);
+	if (device_class->init_device(tt_dev))
+		device_class->init_hardware(tt_dev);
 
 	tenstorrent_register_device(tt_dev);
 

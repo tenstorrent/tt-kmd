@@ -308,8 +308,11 @@ bool grayskull_init(struct tenstorrent_device *tt_dev) {
 
 	gs_dev->reset_unit_regs = pci_iomap_range(gs_dev->tt.pdev, RESET_UNIT_BAR, RESET_UNIT_REG_START, RESET_UNIT_REG_LEN);
 
-	if (gs_dev->reset_unit_regs == NULL)
-		return false;
+	return (gs_dev->reset_unit_regs != NULL);
+}
+
+bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
+	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
 	if (arc_l2_is_running(gs_dev->reset_unit_regs)) {
 		grayskull_send_arc_fw_message(gs_dev->reset_unit_regs, GS_FW_MSG_ASTATE0, 5000);
@@ -339,6 +342,7 @@ struct tenstorrent_device_class grayskull_class = {
 	.name = "Grayskull",
 	.instance_size = sizeof(struct grayskull_device),
 	.init_device = grayskull_init,
+	.init_hardware = grayskull_init_hardware,
 	.cleanup_device = grayskull_cleanup,
 	.last_release_cb = grayskull_last_release_handler,
 };

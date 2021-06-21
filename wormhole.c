@@ -57,14 +57,20 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev) {
 	wh_dev->bar4_mapping = pci_iomap(wh_dev->tt.pdev, 4, 0);
 	if (wh_dev->bar4_mapping == NULL) goto fail_bar4;
 
-	map_bar4_to_system_registers(wh_dev);
-
 	return true;
 
 fail_bar4:
 	pci_iounmap(wh_dev->tt.pdev, wh_dev->bar2_mapping);
 fail_bar2:
 	return false;
+}
+
+static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+
+	map_bar4_to_system_registers(wh_dev);
+
+	return true;
 }
 
 static u8 __iomem *reset_unit_regs(struct wormhole_device *wh_dev) {
@@ -87,5 +93,6 @@ struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
 	.init_device = wormhole_init,
+	.init_hardware = wormhole_init_hardware,
 	.cleanup_device = wormhole_cleanup,
 };

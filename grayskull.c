@@ -71,16 +71,17 @@
 int wait_reg32_with_timeout(u8 __iomem* reg, u32 expected_val, u32 timeout_us) {
 	// Scale poll_period for around 100 polls, and at least 10 us
 	u32 poll_period_us = max((u32)10, timeout_us / 100);
-	// Round up
-	u32 timeout_count = (timeout_us + poll_period_us - 1) / poll_period_us;
-	u32 delay_counter = 0;
+
+	ktime_t end_time = ktime_add_us(ktime_get(), timeout_us);
 
 	while (1) {
 		u32 read_val = ioread32(reg);
 		if (read_val == expected_val)
 			return 0;
-		if (delay_counter++ >= timeout_count)
+
+		if (ktime_after(ktime_get(), end_time))
 			return -1;
+
 		usleep_range(poll_period_us, 2 * poll_period_us);
 	}
 }

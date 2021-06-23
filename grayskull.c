@@ -68,7 +68,12 @@
 #define GS_WATCHDOG_FW_SIZE_BYTES 0x1000
 #define GS_WATCHDOG_FW_CORE_ID 3
 
-int wait_reg32_with_timeout(u8 __iomem* reg, u32 expected_val, u32 timeout_us) {
+static bool is_hardware_hung(u8 __iomem *reset_unit_regs) {
+	return (ioread32(reset_unit_regs + SCRATCH_REG(6)) == 0xFFFFFFFF);
+}
+
+int wait_reg32_with_timeout(u8 __iomem* reset_unit_regs, u8 __iomem* reg,
+			    u32 expected_val, u32 timeout_us) {
 	// Scale poll_period for around 100 polls, and at least 10 us
 	u32 poll_period_us = max((u32)10, timeout_us / 100);
 
@@ -78,6 +83,9 @@ int wait_reg32_with_timeout(u8 __iomem* reg, u32 expected_val, u32 timeout_us) {
 		u32 read_val = ioread32(reg);
 		if (read_val == expected_val)
 			return 0;
+
+		if (read_val == 0xFFFFFFFFu && is_hardware_hung(reset_unit_regs))
+			return -2;
 
 		if (ktime_after(ktime_get(), end_time))
 			return -1;
@@ -97,7 +105,7 @@ bool grayskull_send_arc_fw_message(u8 __iomem* reset_unit_regs, u8 message_id, u
 	arc_misc_cntl = ioread32(arc_misc_cntl_reg);
 	iowrite32(arc_misc_cntl | ARC_MISC_CNTL_IRQ0_MASK, arc_misc_cntl_reg);
 
-	if (wait_reg32_with_timeout(scratch_reg_5, message_id, timeout_us) == -1) {
+	if (wait_reg32_with_timeout(reset_unit_regs, scratch_reg_5, message_id, timeout_us) < 0) {
 		printk(KERN_WARNING "Tenstorrent FW message timeout: %08X.\n", (unsigned int)message_id);
 		return false;
 	} else {
@@ -239,7 +247,7 @@ static int grayskull_arc_init(struct grayskull_device *gs_dev) {
 
 	gpio_val = ioread32(reset_unit_regs + GPIO_PAD_VAL_REG);
 	if ((gpio_val & GPIO_ARC_SPI_BOOTROM_EN_MASK) == GPIO_ARC_SPI_BOOTROM_EN_MASK) {
-		ret = wait_reg32_with_timeout(reset_unit_regs + SCRATCH_REG(5),
+		ret = wait_reg32_with_timeout(reset_unit_regs, reset_unit_regs + SCRATCH_REG(5),
 						SCRATCH_5_ARC_BOOTROM_DONE, 1000);
 		if (ret) {
 			pr_warn("Timeout waiting for SPI bootrom init done.\n");
@@ -272,7 +280,7 @@ static int grayskull_arc_init(struct grayskull_device *gs_dev) {
 	if (toggle_arc_reset(reset_unit_regs))
 		goto grayskull_arc_init_err;
 
-	if (wait_reg32_with_timeout(reset_unit_regs + SCRATCH_REG(5),
+	if (wait_reg32_with_timeout(reset_unit_regs, reset_unit_regs + SCRATCH_REG(5),
 					SCRATCH_5_ARC_L2_DONE, 5000000))
 		goto grayskull_arc_init_err;
 
@@ -284,13 +292,9 @@ grayskull_arc_init_err:
 	return -1;
 }
 
-static bool hardware_is_hung(u8 __iomem *reset_unit_regs) {
-	return (ioread32(reset_unit_regs + SCRATCH_REG(2)) == 0xFFFFFFFF);
-}
-
 // This is shared with wormhole.
 bool grayskull_shutdown_firmware(u8 __iomem* reset_unit_regs) {
-	if (hardware_is_hung(reset_unit_regs))
+	if (is_hardware_hung(reset_unit_regs))
 		return false;
 
 	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_ASTATE3, 5000))

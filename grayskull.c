@@ -87,7 +87,6 @@ int wait_reg32_with_timeout(u8 __iomem* reg, u32 expected_val, u32 timeout_us) {
 }
 
 bool grayskull_send_arc_fw_message(u8 __iomem* reset_unit_regs, u8 message_id, u32 timeout_us) {
-	u32 delay_counter = 0;
 	void __iomem *scratch_reg_5 = reset_unit_regs + SCRATCH_REG(5);
 	void __iomem *arc_misc_cntl_reg = reset_unit_regs + ARC_MISC_CNTL_REG;
 	u32 arc_misc_cntl;
@@ -98,16 +97,11 @@ bool grayskull_send_arc_fw_message(u8 __iomem* reset_unit_regs, u8 message_id, u
 	arc_misc_cntl = ioread32(arc_misc_cntl_reg);
 	iowrite32(arc_misc_cntl | ARC_MISC_CNTL_IRQ0_MASK, arc_misc_cntl_reg);
 
-	while (1) {
-		u32 response = ioread32(scratch_reg_5);
-		if (response == message_id)
-			return true;
-
-		if (delay_counter++ >= timeout_us) {
-			printk(KERN_WARNING "Tenstorrent FW message timeout: %08X.\n", (unsigned int)message_id);
-			return false;
-		}
-		udelay(1);
+	if (wait_reg32_with_timeout(scratch_reg_5, message_id, timeout_us) == -1) {
+		printk(KERN_WARNING "Tenstorrent FW message timeout: %08X.\n", (unsigned int)message_id);
+		return false;
+	} else {
+		return true;
 	}
 }
 

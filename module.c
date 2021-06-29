@@ -44,6 +44,10 @@ uint aiclk_fmax_override = 0;
 module_param(aiclk_fmax_override, uint, 0444);
 MODULE_PARM_DESC(aiclk_fmax_override, "AICLK override in MHz or 0 to auto-detect.");
 
+uint arc_fw_feat_dis_override = 0;
+module_param(arc_fw_feat_dis_override, uint, 0444);
+MODULE_PARM_DESC(arc_fw_feat_dis_override, "Feature disable bitmap. Default 0.");
+
 bool watchdog_fw_en = true;
 module_param(watchdog_fw_en, bool, 0444);
 MODULE_PARM_DESC(watchdog_fw_en, "Enable watchdog FW: Y/N. Default Y.");

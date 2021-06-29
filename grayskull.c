@@ -211,6 +211,7 @@ static int grayskull_populate_arc_if(struct grayskull_device *gs_dev) {
 	ttkmd_arc_if->f.ddr_freq_ovr = cpu_to_le32(ddr_frequency_override);
 	ttkmd_arc_if->f.aiclk_ppm_en = aiclk_ppm_en;
 	ttkmd_arc_if->f.aiclk_ppm_ovr = cpu_to_le32(aiclk_fmax_override);
+	ttkmd_arc_if->f.feature_disable_ovr = cpu_to_le32(arc_fw_feat_dis_override);
 	ttkmd_arc_if->f.watchdog_fw_en = watchdog_fw_en;
 	ttkmd_arc_if->f.watchdog_fw_load = !watchdog_fw_override;
 	ttkmd_arc_if->f.watchdog_fw_reset_vec =

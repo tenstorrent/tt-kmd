@@ -1,4 +1,5 @@
 #include <linux/pci.h>
+#include <linux/aer.h>
 #include <linux/slab.h>
 #include <linux/idr.h>
 #include <linux/mutex.h>
@@ -44,6 +45,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	tt_dev->dma_capable = (dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(32)) == 0);
 	pci_set_master(dev);
+	pci_enable_pcie_error_reporting(dev);
 
 	pci_set_drvdata(dev, tt_dev);
 
@@ -71,6 +73,7 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 
 	pci_set_drvdata(dev, NULL);
 
+	pci_disable_pcie_error_reporting(dev);
 	pci_disable_device(dev);
 
 	mutex_lock(&tenstorrent_dev_idr_mutex);

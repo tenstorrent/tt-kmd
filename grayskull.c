@@ -282,7 +282,9 @@ static void grayskull_harvesting_init(struct grayskull_device *gs_dev) {
 	u32 bad_mem_bits, bad_logic_bits, bad_row_bits;
 	int i;
 
-	harvesting_fuses = ioread32(gs_dev->reg_iomap + ARC_CSM_MEMORY_OFFSET + ARC_CSM_ROW_HARVESTING_OFFSET);
+	harvesting_fuses = tensix_harvest_override;
+	if (harvesting_fuses == 0xFFFFFFFF)
+		harvesting_fuses = ioread32(gs_dev->reg_iomap + ARC_CSM_MEMORY_OFFSET + ARC_CSM_ROW_HARVESTING_OFFSET);
 	if (harvesting_fuses == 0xFFFFFFFF)
 		harvesting_fuses = 0;
 

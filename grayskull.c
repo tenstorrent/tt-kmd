@@ -9,21 +9,20 @@
 #include "grayskull.h"
 #include "ttkmd_arc_if.h"
 
-#define ARC_ROM_MEMORY_BAR 0
-#define ARC_ROM_MEMORY_START 0x1FF00000
-#define ARC_ROM_MEMORY_LEN 0x10000
+#define REG_IOMAP_BAR	0
+#define REG_IOMAP_START 0x1FC00000	// Starting at PCI TLB config registers
+#define REG_IOMAP_LEN   0x00400000	// Covering entire system register space
 
-#define RESET_UNIT_BAR 0
-#define RESET_UNIT_REG_START 0x1FF30000
-#define RESET_UNIT_REG_LEN 0x10000
+#define PCI_TLB_BAR 	0
+#define PCI_TLB_START	0
+#define PCI_TLB_LEN	(1u << 20)	// Map just TLB 0, it's 1MB.
 
-#define ARC_ICCM_MEMORY_BAR 0
-#define ARC_ICCM_MEMORY_START 0x1FE00000
-#define ARC_ICCM_MEMORY_LEN 0x80000
+#define PCI_TLB_CONFIG_OFFSET	(0x1FC00000 - REG_IOMAP_START)
+#define ARC_ICCM_MEMORY_OFFSET	(0x1FE00000 - REG_IOMAP_START)
+#define ARC_CSM_MEMORY_OFFSET	(0x1FE80000 - REG_IOMAP_START)
+#define ARC_ROM_MEMORY_OFFSET	(0x1FF00000 - REG_IOMAP_START)
+#define RESET_UNIT_REG_OFFSET	(0x1FF30000 - REG_IOMAP_START)
 
-#define ARC_CSM_MEMORY_BAR 0
-#define ARC_CSM_MEMORY_START 0x1FE80000
-#define ARC_CSM_MEMORY_LEN 0x80000
 #define TTKMD_ARC_IF_OFFSET 0x77000
 
 #define SCRATCH_REG(n) (0x60 + (n)*sizeof(u32))	/* byte offset */
@@ -123,16 +122,8 @@ static int grayskull_load_arc_fw(struct grayskull_device *gs_dev) {
 	int ret = 0;
 	u32 reset_vector;
 	u8 __iomem* reset_unit_regs = gs_dev->reset_unit_regs;
-	u8 __iomem* fw_target_mem = pci_iomap_range(gs_dev->tt.pdev,
-							ARC_CSM_MEMORY_BAR,
-							ARC_CSM_MEMORY_START,
-							GS_ARC_L2_FW_SIZE_BYTES);
-	u8 __iomem* reset_vec_target_mem = pci_iomap_range(gs_dev->tt.pdev,
-							ARC_ROM_MEMORY_BAR,
-							ARC_ROM_MEMORY_START, 4);
-
-	if (!fw_target_mem || !reset_vec_target_mem)
-		return -ENOMEM;
+	u8 __iomem* fw_target_mem = gs_dev->reg_iomap + ARC_CSM_MEMORY_OFFSET;
+	u8 __iomem* reset_vec_target_mem = gs_dev->reg_iomap + ARC_ROM_MEMORY_OFFSET;
 
 	ret = request_firmware(&firmware, GS_ARC_L2_FW_NAME, &gs_dev->tt.pdev->dev);
 	if (ret)
@@ -150,8 +141,6 @@ static int grayskull_load_arc_fw(struct grayskull_device *gs_dev) {
 
 grayskull_load_arc_fw_cleanup:
 	release_firmware(firmware);
-	pci_iounmap(gs_dev->tt.pdev, reset_vec_target_mem);
-	pci_iounmap(gs_dev->tt.pdev, fw_target_mem);
 	return ret;
 }
 
@@ -160,13 +149,7 @@ static int grayskull_load_watchdog_fw(struct grayskull_device *gs_dev) {
 	int ret = 0;
 	u32 reset_vector;
 	u8 __iomem* reset_unit_regs = gs_dev->reset_unit_regs;
-	u8 __iomem* fw_target_mem = pci_iomap_range(gs_dev->tt.pdev,
-							ARC_ICCM_MEMORY_BAR,
-							ARC_ICCM_MEMORY_START,
-							GS_WATCHDOG_FW_SIZE_BYTES);
-
-	if (!fw_target_mem)
-		return -ENOMEM;
+	u8 __iomem* fw_target_mem = gs_dev->reg_iomap + ARC_ICCM_MEMORY_OFFSET;
 
 	ret = request_firmware(&firmware, GS_WATCHDOG_FW_NAME, &gs_dev->tt.pdev->dev);
 	if (ret)
@@ -187,19 +170,15 @@ static int grayskull_load_watchdog_fw(struct grayskull_device *gs_dev) {
 
 grayskull_load_watchdog_fw_cleanup:
 	release_firmware(firmware);
-	pci_iounmap(gs_dev->tt.pdev, fw_target_mem);
 	return ret;
 }
 
 static int grayskull_populate_arc_if(struct grayskull_device *gs_dev) {
 	ttkmd_arc_if_u *ttkmd_arc_if = kzalloc(sizeof(ttkmd_arc_if_u), GFP_KERNEL);
 	u8 __iomem* reset_unit_regs = gs_dev->reset_unit_regs;
-	u8 __iomem* device_ttkmd_arc_if = pci_iomap_range(gs_dev->tt.pdev,
-						ARC_CSM_MEMORY_BAR,
-						ARC_CSM_MEMORY_START + TTKMD_ARC_IF_OFFSET,
-						sizeof(ttkmd_arc_if_u));
+	u8 __iomem* device_ttkmd_arc_if = gs_dev->reg_iomap + ARC_CSM_MEMORY_OFFSET + TTKMD_ARC_IF_OFFSET;
 
-	if (ttkmd_arc_if == NULL || device_ttkmd_arc_if == NULL)
+	if (ttkmd_arc_if == NULL)
 		return -ENOMEM;
 
 	// ARC is little-endian. Convert to little-endian so we can use memcpy_toio
@@ -220,7 +199,6 @@ static int grayskull_populate_arc_if(struct grayskull_device *gs_dev) {
 	iowrite32(ARC_UDMIAXI_REGION_CSM, reset_unit_regs + ARC_UDMIAXI_REGION_REG);
 	memcpy_toio(device_ttkmd_arc_if, ttkmd_arc_if, sizeof(ttkmd_arc_if_u));
 
-	pci_iounmap(gs_dev->tt.pdev, device_ttkmd_arc_if);
 	kfree(ttkmd_arc_if);
 	return 0;
 }
@@ -306,9 +284,21 @@ bool grayskull_shutdown_firmware(u8 __iomem* reset_unit_regs) {
 bool grayskull_init(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
-	gs_dev->reset_unit_regs = pci_iomap_range(gs_dev->tt.pdev, RESET_UNIT_BAR, RESET_UNIT_REG_START, RESET_UNIT_REG_LEN);
+	gs_dev->reg_iomap = pci_iomap_range(gs_dev->tt.pdev, 0, REG_IOMAP_START, REG_IOMAP_LEN);
+	gs_dev->pci_tlb = pci_iomap_range(gs_dev->tt.pdev, PCI_TLB_BAR, PCI_TLB_START, PCI_TLB_LEN);
 
-	return (gs_dev->reset_unit_regs != NULL);
+	if (gs_dev->reg_iomap == NULL || gs_dev->pci_tlb == NULL) {
+		if (gs_dev->reg_iomap != NULL)
+			pci_iounmap(gs_dev->tt.pdev, gs_dev->reg_iomap);
+
+		if (gs_dev->pci_tlb != NULL)
+			pci_iounmap(gs_dev->tt.pdev, gs_dev->pci_tlb);
+		return false;
+	}
+
+	gs_dev->reset_unit_regs = gs_dev->reg_iomap + RESET_UNIT_REG_OFFSET;
+
+	return true;
 }
 
 bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
@@ -325,10 +315,14 @@ bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 void grayskull_cleanup(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
-	if (gs_dev->reset_unit_regs != NULL) {
+	if (gs_dev->reset_unit_regs != NULL)
 		grayskull_shutdown_firmware(gs_dev->reset_unit_regs);
-		pci_iounmap(gs_dev->tt.pdev, gs_dev->reset_unit_regs);
-	}
+
+	if (gs_dev->reg_iomap != NULL)
+		pci_iounmap(gs_dev->tt.pdev, gs_dev->reg_iomap);
+
+	if (gs_dev->pci_tlb != NULL)
+		pci_iounmap(gs_dev->tt.pdev, gs_dev->pci_tlb);
 }
 
 static void grayskull_last_release_handler(struct tenstorrent_device *tt_dev) {

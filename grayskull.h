@@ -6,6 +6,8 @@
 
 struct grayskull_device {
 	struct tenstorrent_device tt;
+	u8 __iomem *reg_iomap;	// everything after the TLB windows
+	u8 __iomem *pci_tlb;	// covers one TLB window
 	u8 __iomem *reset_unit_regs;
 };
 

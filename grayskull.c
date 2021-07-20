@@ -9,6 +9,9 @@
 #include "grayskull.h"
 #include "ttkmd_arc_if.h"
 
+#define GRID_SIZE_X 13
+#define GRID_SIZE_Y 12
+
 #define REG_IOMAP_BAR	0
 #define REG_IOMAP_START 0x1FC00000	// Starting at PCI TLB config registers
 #define REG_IOMAP_LEN   0x00400000	// Covering entire system register space
@@ -67,6 +70,53 @@
 #define GS_WATCHDOG_FW_NAME "tenstorrent_gs_wdg_fw.bin"
 #define GS_WATCHDOG_FW_SIZE_BYTES 0x1000
 #define GS_WATCHDOG_FW_CORE_ID 3
+
+#define DRAM_NOC0_REG_BASE 0xffff4000
+#define DRAM_NOC1_REG_BASE 0xffff5000
+
+#define ARC_NOC0_REG_BASE 0x1ff50000
+#define ARC_NOC1_REG_BASE 0x1ff58000
+
+#define PCI_NOC0_REG_BASE 0x1fd00000
+#define PCI_NOC1_REG_BASE 0x1fd08000
+
+#define TENSIX_NOC0_REG_BASE 0xffb20000
+#define TENSIX_NOC1_REG_BASE 0xffb30000
+
+#define NIU_CFG_0	0x100
+#define ROUTER_CFG_0	0x104
+#define ROUTER_CFG_1	0x108
+#define ROUTER_CFG_3	0x110
+
+// NIU_CFG_0
+#define NIU_CLOCK_GATING_ENABLE	(1u << 0)
+#define NIU_TILE_CLOCK_DISABLE	(1u << 12)
+
+// ROUTER_CFG_0
+#define ROUTER_CLOCK_GATING_ENABLE	(1u << 0)
+#define ROUTER_MAX_BACKOFF_EXP		(0xFu << 8)
+
+struct TLB_1M_REG {
+	union {
+		struct {
+			u32 low32;
+			u32 high32;
+		};
+		struct {
+			u64 local_offset: 12;
+			u64 x_end: 6;
+			u64 y_end: 6;
+			u64 x_start: 6;
+			u64 y_start: 6;
+			u64 noc_sel : 1;
+			u64 mcast: 1;
+			u64 ordering: 2;
+			u64 linked: 1;
+		};
+	};
+};
+
+#define TLB_1M_SIZE_SHIFT 20
 
 static bool is_hardware_hung(u8 __iomem *reset_unit_regs) {
 	return (ioread32(reset_unit_regs + SCRATCH_REG(6)) == 0xFFFFFFFF);
@@ -305,6 +355,174 @@ static void grayskull_harvesting_init(struct grayskull_device *gs_dev) {
 	// pr_info("harvesting enabled_rows = %08x\n", gs_dev->enabled_rows);
 }
 
+static u32 program_tlb(struct grayskull_device *gs_dev, unsigned int x, unsigned int y, unsigned int noc, u32 addr) {
+	struct TLB_1M_REG tlb;
+
+	tlb.low32 = 0;
+	tlb.high32 = 0;
+
+	tlb.local_offset = addr >> TLB_1M_SIZE_SHIFT;
+	tlb.x_end = x;
+	tlb.y_end = y;
+	tlb.noc_sel = noc;
+
+	// pr_info("TLB %08x %d-%d/%d @ %08x = %08x:%08x\n", tlb.local_offset, tlb.x_end, tlb.y_end, tlb.noc_sel, addr,
+	// 	tlb.high32, tlb.low32);
+
+	iowrite32(tlb.low32, gs_dev->reg_iomap + PCI_TLB_CONFIG_OFFSET);
+	iowrite32(tlb.high32, gs_dev->reg_iomap + PCI_TLB_CONFIG_OFFSET + sizeof(u32));
+
+	return addr % (1u << TLB_1M_SIZE_SHIFT);
+}
+
+// setup_noc_common handles two cases:
+// 1. NOC registers are mapped at a fixed offset within BAR0
+// 2. NOC registers are mapped through a TLB
+// We don't have a single mapping that covers both the fixed mappings and the TLB windows so we must accept a pointer.
+static void setup_noc_common(u8 __iomem *noc_reg_base, const u32 *router_cfg) {
+	u32 reg;
+
+	iowrite32(router_cfg[0], noc_reg_base + ROUTER_CFG_1);
+	iowrite32(router_cfg[1], noc_reg_base + ROUTER_CFG_3);
+
+	reg = ioread32(noc_reg_base + NIU_CFG_0);
+	reg |= NIU_CLOCK_GATING_ENABLE;
+	iowrite32(reg, noc_reg_base + NIU_CFG_0);
+
+	reg = ioread32(noc_reg_base + ROUTER_CFG_0);
+	reg |= ROUTER_CLOCK_GATING_ENABLE;
+	reg |= ROUTER_MAX_BACKOFF_EXP;
+	iowrite32(reg, noc_reg_base + ROUTER_CFG_0);
+}
+
+// noc0,1_reg_base are the BAR0-relative addresses of the NOC registers
+static void setup_noc_by_address(struct grayskull_device *gs_dev, u32 noc0_reg_base, u32 noc1_reg_base, const u32 *router_cfg) {
+	setup_noc_common(gs_dev->reg_iomap + noc0_reg_base - REG_IOMAP_START, router_cfg);
+	setup_noc_common(gs_dev->reg_iomap + noc1_reg_base - REG_IOMAP_START, router_cfg+2);
+}
+
+// x,y are NOC0 coordinates. noc0,1_reg_base are the local addresses of the NOC registers
+// router_cfg is { NOC0 ROUTER_CFG_1, NOC0 ROUTER_CFG_3, NOC1 ROUTER_CFG_1, NOC1 ROUTER_CFG_3 }
+static void setup_noc_by_xy(struct grayskull_device *gs_dev,
+			    unsigned int x, unsigned int y,
+			    u32 noc0_reg_base, u32 noc1_reg_base,
+			    const u32 *router_cfg) {
+	unsigned int noc1_x = GRID_SIZE_X - x - 1;
+	unsigned int noc1_y = GRID_SIZE_Y - y - 1;
+
+	u32 tlb_offset;
+
+	tlb_offset = program_tlb(gs_dev, x, y, 0, noc0_reg_base);
+	setup_noc_common(gs_dev->pci_tlb + tlb_offset, router_cfg);
+
+	tlb_offset = program_tlb(gs_dev, noc1_x, noc1_y, 1, noc1_reg_base);
+	setup_noc_common(gs_dev->pci_tlb + tlb_offset, router_cfg+2);
+}
+
+// Set NIU_CFG_0 tile clock disable based on core harvesting.
+static void set_tile_clock_disable(struct grayskull_device *gs_dev, unsigned int x, unsigned int y) {
+	unsigned int noc1_x = GRID_SIZE_X - x - 1;
+	unsigned int noc1_y = GRID_SIZE_Y - y - 1;
+
+	bool enabled = ((gs_dev->enabled_rows & (1 << y)) != 0);
+
+	u32 reg, tlb_offset;
+
+	tlb_offset = program_tlb(gs_dev, x, y, 0, TENSIX_NOC0_REG_BASE);
+	reg = ioread32(gs_dev->pci_tlb + tlb_offset + NIU_CFG_0);
+	if (enabled)
+		reg &= ~NIU_TILE_CLOCK_DISABLE;
+	else
+		reg |= NIU_TILE_CLOCK_DISABLE;
+	iowrite32(reg, gs_dev->pci_tlb + tlb_offset + NIU_CFG_0);
+
+	tlb_offset = program_tlb(gs_dev, noc1_x, noc1_y, 1, TENSIX_NOC1_REG_BASE);
+	reg = ioread32(gs_dev->pci_tlb + tlb_offset + NIU_CFG_0);
+	if (enabled)
+		reg &= ~NIU_TILE_CLOCK_DISABLE;
+	else
+		reg |= NIU_TILE_CLOCK_DISABLE;
+	iowrite32(reg, gs_dev->pci_tlb + tlb_offset + NIU_CFG_0);
+}
+
+#define TENSIX_NODE_TYPE 0
+#define DRAM_NODE_TYPE 1
+#define ARC_NODE_TYPE 2
+#define PCI_NODE_TYPE 3
+#define EXTRA_ROUTER_NODE_TYPE 4
+
+#define D DRAM_NODE_TYPE
+#define A ARC_NODE_TYPE
+#define P PCI_NODE_TYPE
+#define E EXTRA_ROUTER_NODE_TYPE
+#define T TENSIX_NODE_TYPE
+
+// This is indexed by NOC0 coordinates.
+static const u8 node_types[GRID_SIZE_Y][GRID_SIZE_X] = {
+	{ E, D, E, E, D, E, E, D, E, E, D, E, E, },
+	{ E, T, T, T, T, T, T, T, T, T, T, T, T, },
+	{ A, T, T, T, T, T, T, T, T, T, T, T, T, },
+	{ E, T, T, T, T, T, T, T, T, T, T, T, T, },
+	{ P, T, T, T, T, T, T, T, T, T, T, T, T, },
+	{ E, T, T, T, T, T, T, T, T, T, T, T, T, },
+	{ E, D, E, E, D, E, E, D, E, E, D, E, E, },
+	{ E, T, T, T, T, T, T, T, T, T, T, T, T, },
+	{ E, T, T, T, T, T, T, T, T, T, T, T, T, },
+	{ E, T, T, T, T, T, T, T, T, T, T, T, T, },
+	{ E, T, T, T, T, T, T, T, T, T, T, T, T, },
+	{ E, T, T, T, T, T, T, T, T, T, T, T, T, },
+};
+
+#undef D
+#undef A
+#undef P
+#undef E
+#undef T
+
+static void grayskull_noc_init(struct grayskull_device *gs_dev) {
+	u32 router_cfg[4]; // NOC0 ROUTER_CFG_1, NOC0, ROUTER_CFG_3, NOC1 ROUTER_CFG_1, NOC1 ROUTER_CFG_3
+	unsigned x, y;
+
+	// NOC0 & NOC1 column broadcast disable bits (column 0 aka 12)
+	router_cfg[0] = 1 << 0;
+	router_cfg[2] = 1 << 12;
+
+	// NOC0 & NOC1 row broadcast disable bits (rows 0, 6 and any disabled by harvesting)
+	router_cfg[1] = ~gs_dev->enabled_rows & ((1 << GRID_SIZE_Y) - 1);
+	router_cfg[3] = 0;
+	for (y = 0; y < GRID_SIZE_Y; y++) {
+		router_cfg[3] |= ((router_cfg[1] >> y) & 1) << (GRID_SIZE_Y - y - 1);
+	}
+	// pr_info("router_cfg %08x %08x %08x %08x\n", router_cfg[0], router_cfg[1], router_cfg[2], router_cfg[3]);
+
+	for (y = 0; y < GRID_SIZE_Y; y++) {
+		for (x = 0; x < GRID_SIZE_X; x++) {
+			switch (node_types[y][x]) {
+				case DRAM_NODE_TYPE:
+					setup_noc_by_xy(gs_dev, x, y, DRAM_NOC0_REG_BASE, DRAM_NOC1_REG_BASE, router_cfg);
+					break;
+
+				case ARC_NODE_TYPE:
+					setup_noc_by_address(gs_dev, ARC_NOC0_REG_BASE, ARC_NOC1_REG_BASE, router_cfg);
+					break;
+
+				case PCI_NODE_TYPE:
+					setup_noc_by_address(gs_dev, PCI_NOC0_REG_BASE, PCI_NOC1_REG_BASE, router_cfg);
+					break;
+
+				case EXTRA_ROUTER_NODE_TYPE:
+					setup_noc_by_xy(gs_dev, x, y, TENSIX_NOC0_REG_BASE, TENSIX_NOC1_REG_BASE, router_cfg);
+					break;
+
+				case TENSIX_NODE_TYPE:
+					setup_noc_by_xy(gs_dev, x, y, TENSIX_NOC0_REG_BASE, TENSIX_NOC1_REG_BASE, router_cfg);
+					set_tile_clock_disable(gs_dev, x, y);
+					break;
+			}
+		}
+	}
+}
+
 // This is shared with wormhole.
 bool grayskull_shutdown_firmware(u8 __iomem* reset_unit_regs) {
 	if (is_hardware_hung(reset_unit_regs))
@@ -345,6 +563,8 @@ bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 	}
 
 	grayskull_harvesting_init(gs_dev);
+
+	grayskull_noc_init(gs_dev);
 
 	return true;
 }

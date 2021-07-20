@@ -24,6 +24,7 @@
 #define RESET_UNIT_REG_OFFSET	(0x1FF30000 - REG_IOMAP_START)
 
 #define TTKMD_ARC_IF_OFFSET 0x77000
+#define ARC_CSM_ROW_HARVESTING_OFFSET 0x7836C
 
 #define SCRATCH_REG(n) (0x60 + (n)*sizeof(u32))	/* byte offset */
 
@@ -271,6 +272,37 @@ grayskull_arc_init_err:
 	return -1;
 }
 
+// Compute gs_dev->enabled_rows which has 1 bit set for each enabled row.
+// Indexed by NOC0 Y coordinate. 0 and 6 are "disabled", the router setup
+// code depends on this.
+static void grayskull_harvesting_init(struct grayskull_device *gs_dev) {
+	static const u8 fuse_row_to_noc0[] = { 5, 7, 4, 8, 3, 9, 2, 10, 1, 11 };
+
+	u32 harvesting_fuses;
+	u32 bad_mem_bits, bad_logic_bits, bad_row_bits;
+	int i;
+
+	harvesting_fuses = ioread32(gs_dev->reg_iomap + ARC_CSM_MEMORY_OFFSET + ARC_CSM_ROW_HARVESTING_OFFSET);
+	if (harvesting_fuses == 0xFFFFFFFF)
+		harvesting_fuses = 0;
+
+	// harvesting_fuses contains 10 bits for bad rows due to memory failures
+	// followed by 10 bits for bad rows due to logic failures.
+	// These are physically-mapped in "bottom-up" order.
+
+	bad_mem_bits = harvesting_fuses & 0x3FF;
+	bad_logic_bits = (harvesting_fuses >> 10) & 0x3FF;
+	bad_row_bits = bad_mem_bits | bad_logic_bits;
+
+	gs_dev->enabled_rows = 0;
+	for (i = 0; i < 10; i++) {
+		if (!(bad_row_bits & (1 << i)))
+			gs_dev->enabled_rows |= 1 << fuse_row_to_noc0[i];
+	}
+
+	// pr_info("harvesting enabled_rows = %08x\n", gs_dev->enabled_rows);
+}
+
 // This is shared with wormhole.
 bool grayskull_shutdown_firmware(u8 __iomem* reset_unit_regs) {
 	if (is_hardware_hung(reset_unit_regs))
@@ -306,10 +338,13 @@ bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 
 	if (arc_l2_is_running(gs_dev->reset_unit_regs)) {
 		grayskull_send_arc_fw_message(gs_dev->reset_unit_regs, GS_FW_MSG_ASTATE0, 5000);
-		return true;
+	} else if (grayskull_arc_init(gs_dev) != 0) {
+		return false;
 	}
 
-	return 0 == grayskull_arc_init(gs_dev);
+	grayskull_harvesting_init(gs_dev);
+
+	return true;
 }
 
 void grayskull_cleanup(struct tenstorrent_device *tt_dev) {

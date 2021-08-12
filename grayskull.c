@@ -270,11 +270,6 @@ static int grayskull_arc_init(struct grayskull_device *gs_dev) {
 	u32 gpio_val;
 	int ret;
 
-	if (!arc_fw_init) {
-		pr_info("ARC initialization skipped.\n");
-		return 0;
-	}
-
 	gpio_val = ioread32(reset_unit_regs + GPIO_PAD_VAL_REG);
 	if ((gpio_val & GPIO_ARC_SPI_BOOTROM_EN_MASK) == GPIO_ARC_SPI_BOOTROM_EN_MASK) {
 		ret = wait_reg32_with_timeout(reset_unit_regs, reset_unit_regs + SCRATCH_REG(5),
@@ -558,6 +553,9 @@ bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 
 	if (arc_l2_is_running(gs_dev->reset_unit_regs)) {
 		grayskull_send_arc_fw_message(gs_dev->reset_unit_regs, GS_FW_MSG_ASTATE0, 5000);
+	} else if (!arc_fw_init) {
+		pr_info("ARC initialization skipped.\n");
+		return true;
 	} else if (grayskull_arc_init(gs_dev) != 0) {
 		return false;
 	}

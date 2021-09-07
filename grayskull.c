@@ -60,6 +60,7 @@
 
 #define GS_FW_MSG_GO_LONG_IDLE 0x54
 #define GS_FW_MSG_SHUTDOWN 0x55
+#define GS_FW_MSG_TYPE_PCIE_MUTEX_ACQUIRE 0x9E
 #define GS_FW_MSG_ASTATE0 0xA0
 #define GS_FW_MSG_ASTATE1 0xA1
 #define GS_FW_MSG_ASTATE3 0xA3
@@ -594,6 +595,11 @@ static void grayskull_last_release_handler(struct tenstorrent_device *tt_dev) {
 	grayskull_send_arc_fw_message(gs_dev->reset_unit_regs,
 					GS_FW_MSG_GO_LONG_IDLE,
 					2000);
+
+	// arg0 = 0 => release the PCIE mutex.
+	grayskull_send_arc_fw_message_with_args(gs_dev->reset_unit_regs,
+						GS_FW_MSG_TYPE_PCIE_MUTEX_ACQUIRE,
+						0, 0, 2000);
 }
 
 struct tenstorrent_device_class grayskull_class = {

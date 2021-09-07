@@ -144,23 +144,32 @@ int wait_reg32_with_timeout(u8 __iomem* reset_unit_regs, u8 __iomem* reg,
 	}
 }
 
-bool grayskull_send_arc_fw_message(u8 __iomem* reset_unit_regs, u8 message_id, u32 timeout_us) {
-	void __iomem *scratch_reg_5 = reset_unit_regs + SCRATCH_REG(5);
+bool grayskull_send_arc_fw_message_with_args(u8 __iomem* reset_unit_regs,
+					    u8 message_id, u16 arg0, u16 arg1,
+					    u32 timeout_us) {
+	void __iomem *args_reg = reset_unit_regs + SCRATCH_REG(3);
+	void __iomem *message_reg = reset_unit_regs + SCRATCH_REG(5);
 	void __iomem *arc_misc_cntl_reg = reset_unit_regs + ARC_MISC_CNTL_REG;
+	u32 args = arg0 | ((u32)arg1 << 16);
 	u32 arc_misc_cntl;
 
-	iowrite32(GS_FW_MESSAGE_PRESENT | message_id, scratch_reg_5);
+	iowrite32(args, args_reg);
+	iowrite32(GS_FW_MESSAGE_PRESENT | message_id, message_reg);
 
 	// Trigger IRQ to ARC
 	arc_misc_cntl = ioread32(arc_misc_cntl_reg);
 	iowrite32(arc_misc_cntl | ARC_MISC_CNTL_IRQ0_MASK, arc_misc_cntl_reg);
 
-	if (wait_reg32_with_timeout(reset_unit_regs, scratch_reg_5, message_id, timeout_us) < 0) {
+	if (wait_reg32_with_timeout(reset_unit_regs, message_reg, message_id, timeout_us) < 0) {
 		printk(KERN_WARNING "Tenstorrent FW message timeout: %08X.\n", (unsigned int)message_id);
 		return false;
 	} else {
 		return true;
 	}
+}
+
+bool grayskull_send_arc_fw_message(u8 __iomem* reset_unit_regs, u8 message_id, u32 timeout_us) {
+	return grayskull_send_arc_fw_message_with_args(reset_unit_regs, message_id, 0, 0, timeout_us);
 }
 
 static bool arc_l2_is_running(u8 __iomem* reset_unit_regs) {

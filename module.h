@@ -15,4 +15,5 @@ extern bool watchdog_fw_en;
 extern bool watchdog_fw_override;
 extern uint axiclk_override;
 extern uint tensix_harvest_override;
+extern uint dma_address_bits;
 #endif

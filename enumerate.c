@@ -8,6 +8,7 @@
 #include "interrupt.h"
 #include "chardev.h"
 #include "grayskull.h"
+#include "module.h"
 
 DEFINE_IDR(tenstorrent_dev_idr);
 DEFINE_MUTEX(tenstorrent_dev_idr_mutex);
@@ -43,7 +44,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	mutex_init(&tt_dev->chardev_mutex);
 
-	tt_dev->dma_capable = (dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(32)) == 0);
+	tt_dev->dma_capable = (dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(dma_address_bits ?: 32)) == 0);
 	pci_set_master(dev);
 	pci_enable_pcie_error_reporting(dev);
 

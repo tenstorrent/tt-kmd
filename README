@@ -13,14 +13,3 @@ To install:
 To uninstall:
 1. sudo modprobe -r tenstorrent
 2. sudo dkms remove tenstorrent/1.7 --all
-
-
-To remove ttpd:
-
-1. In /etc/rc.local comment out any lines matching
-a. /usr/bin/wdreg ttpd
-b. chmod a+w /dev/ttpd
-c. setpci -s 01:00.0 COMMAND=0x02 # Enable the memory
-
-2. Compress the Windriver kernel modules:
-a. for i in $(find /lib/modules -name 'ttpd' -o -name 'windrvr1290*'); do sudo gzip $i; done

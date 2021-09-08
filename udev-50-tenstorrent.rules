@@ -1,1 +1,1 @@
-KERNEL=="tenstorrent*", MODE="0666", SYMLINK+="tenstorrent-%n"
+KERNEL=="tenstorrent*", MODE="0666"

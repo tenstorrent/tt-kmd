@@ -533,7 +533,7 @@ bool grayskull_shutdown_firmware(u8 __iomem* reset_unit_regs) {
 	if (is_hardware_hung(reset_unit_regs))
 		return false;
 
-	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_ASTATE3, 5000))
+	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_ASTATE3, 10000))
 		return false;
 	return true;
 }
@@ -562,7 +562,7 @@ bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
 	if (arc_l2_is_running(gs_dev->reset_unit_regs)) {
-		grayskull_send_arc_fw_message(gs_dev->reset_unit_regs, GS_FW_MSG_ASTATE0, 5000);
+		grayskull_send_arc_fw_message(gs_dev->reset_unit_regs, GS_FW_MSG_ASTATE0, 10000);
 	} else if (!arc_fw_init) {
 		pr_info("ARC initialization skipped.\n");
 		return true;
@@ -594,12 +594,12 @@ static void grayskull_last_release_handler(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 	grayskull_send_arc_fw_message(gs_dev->reset_unit_regs,
 					GS_FW_MSG_GO_LONG_IDLE,
-					2000);
+					10000);
 
 	// arg0 = 0 => release the PCIE mutex.
 	grayskull_send_arc_fw_message_with_args(gs_dev->reset_unit_regs,
 						GS_FW_MSG_TYPE_PCIE_MUTEX_ACQUIRE,
-						0, 0, 2000);
+						0, 0, 10000);
 }
 
 struct tenstorrent_device_class grayskull_class = {

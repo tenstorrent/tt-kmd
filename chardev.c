@@ -19,7 +19,7 @@
 #define dma_alloc_coherent dma_zalloc_coherent
 #endif
 
-#define MAX_DMA_BUF_SIZE_LOG2 22
+#define MAX_DMA_BUF_SIZE_LOG2 28
 #define MAX_DMA_BUF_SIZE (1u << MAX_DMA_BUF_SIZE_LOG2)
 
 // These are the mmap offsets for various resources. In the user-kernel

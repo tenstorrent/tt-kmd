@@ -324,7 +324,7 @@ static int grayskull_arc_init(struct grayskull_device *gs_dev) {
 
 	if (wait_reg32_with_timeout(reset_unit_regs, reset_unit_regs + SCRATCH_REG(5),
 					SCRATCH_5_ARC_L2_DONE, 5000000)) {
-		pr_warn("Timeout waiting for ARC FW initialization to complete.")
+		pr_warn("Timeout waiting for ARC FW initialization to complete.");
 		goto grayskull_arc_init_err;
 	}
 

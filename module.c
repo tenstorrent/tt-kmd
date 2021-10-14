@@ -32,6 +32,10 @@ bool ddr_train_en = true;
 module_param(ddr_train_en, bool, 0444);
 MODULE_PARM_DESC(ddr_train_en, "Enable DRAM training: Y/N. Default Y.");
 
+bool ddr_test_mode = false;
+module_param(ddr_test_mode, bool, 0444);
+MODULE_PARM_DESC(ddr_test_mode, "DRAM test mode: Y/N. Default N.");
+
 uint ddr_frequency_override = 0;
 module_param(ddr_frequency_override, uint, 0444);
 MODULE_PARM_DESC(ddr_frequency_override, "DDR frequency override in MHz or 0 to auto-detect.");

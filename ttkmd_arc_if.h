@@ -13,7 +13,7 @@
 
 #define TTKMD_ARC_MAGIC_NUMBER_0  (0x54544b4d)
 #define TTKMD_ARC_MAGIC_NUMBER_1  (0x44415243)
-#define TTKMD_ARC_IF_VERSION      0x4
+#define TTKMD_ARC_IF_VERSION      0x5
 
 typedef struct {
   uint32_t  magic_number[2];
@@ -24,7 +24,8 @@ typedef struct {
   uint8_t   padding1[3];
   uint32_t  aiclk_ppm_ovr;
   uint8_t   ddr_train_en;
-  uint8_t   padding2[3];
+  uint8_t   ddr_test_mode;
+  uint8_t   padding2[2];
   uint32_t  ddr_freq_ovr;
   uint8_t   watchdog_fw_load;
   uint8_t   watchdog_fw_en;

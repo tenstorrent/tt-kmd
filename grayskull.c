@@ -145,6 +145,11 @@ int wait_reg32_with_timeout(u8 __iomem* reset_unit_regs, u8 __iomem* reg,
 	}
 }
 
+static bool arc_l2_is_running(u8 __iomem* reset_unit_regs) {
+	u32 post_code = ioread32(reset_unit_regs + POST_CODE_REG);
+	return ((post_code & POST_CODE_ARC_L2_MASK) == POST_CODE_ARC_L2);
+}
+
 bool grayskull_send_arc_fw_message_with_args(u8 __iomem* reset_unit_regs,
 					    u8 message_id, u16 arg0, u16 arg1,
 					    u32 timeout_us) {
@@ -154,6 +159,12 @@ bool grayskull_send_arc_fw_message_with_args(u8 __iomem* reset_unit_regs,
 	u32 args = arg0 | ((u32)arg1 << 16);
 	u32 arc_misc_cntl;
 
+	if (!arc_l2_is_running(reset_unit_regs)) {
+		pr_warn("Skipping message %08X due to FW not running.\n",
+			(unsigned int)message_id);
+		return false;
+	}
+
 	iowrite32(args, args_reg);
 	iowrite32(GS_FW_MESSAGE_PRESENT | message_id, message_reg);
 
@@ -162,7 +173,7 @@ bool grayskull_send_arc_fw_message_with_args(u8 __iomem* reset_unit_regs,
 	iowrite32(arc_misc_cntl | ARC_MISC_CNTL_IRQ0_MASK, arc_misc_cntl_reg);
 
 	if (wait_reg32_with_timeout(reset_unit_regs, message_reg, message_id, timeout_us) < 0) {
-		printk(KERN_WARNING "Tenstorrent FW message timeout: %08X.\n", (unsigned int)message_id);
+		pr_warn("Tenstorrent FW message timeout: %08X.\n", (unsigned int)message_id);
 		return false;
 	} else {
 		return true;
@@ -171,11 +182,6 @@ bool grayskull_send_arc_fw_message_with_args(u8 __iomem* reset_unit_regs,
 
 bool grayskull_send_arc_fw_message(u8 __iomem* reset_unit_regs, u8 message_id, u32 timeout_us) {
 	return grayskull_send_arc_fw_message_with_args(reset_unit_regs, message_id, 0, 0, timeout_us);
-}
-
-static bool arc_l2_is_running(u8 __iomem* reset_unit_regs) {
-	u32 post_code = ioread32(reset_unit_regs + POST_CODE_REG);
-	return ((post_code & POST_CODE_ARC_L2_MASK) == POST_CODE_ARC_L2);
 }
 
 static int grayskull_load_arc_fw(struct grayskull_device *gs_dev) {
@@ -317,8 +323,10 @@ static int grayskull_arc_init(struct grayskull_device *gs_dev) {
 		goto grayskull_arc_init_err;
 
 	if (wait_reg32_with_timeout(reset_unit_regs, reset_unit_regs + SCRATCH_REG(5),
-					SCRATCH_5_ARC_L2_DONE, 5000000))
+					SCRATCH_5_ARC_L2_DONE, 5000000)) {
+		pr_warn("Timeout waiting for ARC FW initialization to complete.")
 		goto grayskull_arc_init_err;
+	}
 
 	pr_info("ARC initialization done.\n");
 	return 0;

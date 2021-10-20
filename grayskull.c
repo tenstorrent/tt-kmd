@@ -16,9 +16,11 @@
 #define REG_IOMAP_START 0x1FC00000	// Starting at PCI TLB config registers
 #define REG_IOMAP_LEN   0x00400000	// Covering entire system register space
 
-#define PCI_TLB_BAR 	0
-#define PCI_TLB_START	0
-#define PCI_TLB_LEN	(1u << 20)	// Map just TLB 0, it's 1MB.
+// Map the last 16MB TLB for kernel dynamic access.
+#define KERNEL_TLB_BAR		0
+#define KERNEL_TLB_START	(156*(1<<20) + 10*(1<<21) + 19*(1<<24))
+#define KERNEL_TLB_LEN		(1u << 24)
+#define KERNEL_TLB_REGS		((156+10+19)*2*sizeof(u32))
 
 #define PCI_TLB_CONFIG_OFFSET	(0x1FC00000 - REG_IOMAP_START)
 #define ARC_ICCM_MEMORY_OFFSET	(0x1FE00000 - REG_IOMAP_START)
@@ -97,14 +99,14 @@
 #define ROUTER_CLOCK_GATING_ENABLE	(1u << 0)
 #define ROUTER_MAX_BACKOFF_EXP		(0xFu << 8)
 
-struct TLB_1M_REG {
+struct TLB_16M_REG {
 	union {
 		struct {
 			u32 low32;
 			u32 high32;
 		};
 		struct {
-			u64 local_offset: 12;
+			u64 local_offset: 8;
 			u64 x_end: 6;
 			u64 y_end: 6;
 			u64 x_start: 6;
@@ -117,7 +119,7 @@ struct TLB_1M_REG {
 	};
 };
 
-#define TLB_1M_SIZE_SHIFT 20
+#define TLB_16M_SIZE_SHIFT 24
 
 static bool is_hardware_hung(u8 __iomem *reset_unit_regs) {
 	return (ioread32(reset_unit_regs + SCRATCH_REG(6)) == 0xFFFFFFFF);
@@ -370,12 +372,12 @@ static void grayskull_harvesting_init(struct grayskull_device *gs_dev) {
 }
 
 static u32 program_tlb(struct grayskull_device *gs_dev, unsigned int x, unsigned int y, unsigned int noc, u32 addr) {
-	struct TLB_1M_REG tlb;
+	struct TLB_16M_REG tlb;
 
 	tlb.low32 = 0;
 	tlb.high32 = 0;
 
-	tlb.local_offset = addr >> TLB_1M_SIZE_SHIFT;
+	tlb.local_offset = addr >> TLB_16M_SIZE_SHIFT;
 	tlb.x_end = x;
 	tlb.y_end = y;
 	tlb.noc_sel = noc;
@@ -383,10 +385,10 @@ static u32 program_tlb(struct grayskull_device *gs_dev, unsigned int x, unsigned
 	// pr_info("TLB %08x %d-%d/%d @ %08x = %08x:%08x\n", tlb.local_offset, tlb.x_end, tlb.y_end, tlb.noc_sel, addr,
 	// 	tlb.high32, tlb.low32);
 
-	iowrite32(tlb.low32, gs_dev->reg_iomap + PCI_TLB_CONFIG_OFFSET);
-	iowrite32(tlb.high32, gs_dev->reg_iomap + PCI_TLB_CONFIG_OFFSET + sizeof(u32));
+	iowrite32(tlb.low32, gs_dev->reg_iomap + PCI_TLB_CONFIG_OFFSET + KERNEL_TLB_REGS);
+	iowrite32(tlb.high32, gs_dev->reg_iomap + PCI_TLB_CONFIG_OFFSET + KERNEL_TLB_REGS + sizeof(u32));
 
-	return addr % (1u << TLB_1M_SIZE_SHIFT);
+	return addr % (1u << TLB_16M_SIZE_SHIFT);
 }
 
 // setup_noc_common handles two cases:
@@ -427,10 +429,10 @@ static void setup_noc_by_xy(struct grayskull_device *gs_dev,
 	u32 tlb_offset;
 
 	tlb_offset = program_tlb(gs_dev, x, y, 0, noc0_reg_base);
-	setup_noc_common(gs_dev->pci_tlb + tlb_offset, router_cfg);
+	setup_noc_common(gs_dev->kernel_tlb + tlb_offset, router_cfg);
 
 	tlb_offset = program_tlb(gs_dev, noc1_x, noc1_y, 1, noc1_reg_base);
-	setup_noc_common(gs_dev->pci_tlb + tlb_offset, router_cfg+2);
+	setup_noc_common(gs_dev->kernel_tlb + tlb_offset, router_cfg+2);
 }
 
 // Set NIU_CFG_0 tile clock disable based on core harvesting.
@@ -443,20 +445,20 @@ static void set_tile_clock_disable(struct grayskull_device *gs_dev, unsigned int
 	u32 reg, tlb_offset;
 
 	tlb_offset = program_tlb(gs_dev, x, y, 0, TENSIX_NOC0_REG_BASE);
-	reg = ioread32(gs_dev->pci_tlb + tlb_offset + NIU_CFG_0);
+	reg = ioread32(gs_dev->kernel_tlb + tlb_offset + NIU_CFG_0);
 	if (enabled)
 		reg &= ~NIU_TILE_CLOCK_DISABLE;
 	else
 		reg |= NIU_TILE_CLOCK_DISABLE;
-	iowrite32(reg, gs_dev->pci_tlb + tlb_offset + NIU_CFG_0);
+	iowrite32(reg, gs_dev->kernel_tlb + tlb_offset + NIU_CFG_0);
 
 	tlb_offset = program_tlb(gs_dev, noc1_x, noc1_y, 1, TENSIX_NOC1_REG_BASE);
-	reg = ioread32(gs_dev->pci_tlb + tlb_offset + NIU_CFG_0);
+	reg = ioread32(gs_dev->kernel_tlb + tlb_offset + NIU_CFG_0);
 	if (enabled)
 		reg &= ~NIU_TILE_CLOCK_DISABLE;
 	else
 		reg |= NIU_TILE_CLOCK_DISABLE;
-	iowrite32(reg, gs_dev->pci_tlb + tlb_offset + NIU_CFG_0);
+	iowrite32(reg, gs_dev->kernel_tlb + tlb_offset + NIU_CFG_0);
 }
 
 #define TENSIX_NODE_TYPE 0
@@ -551,14 +553,14 @@ bool grayskull_init(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
 	gs_dev->reg_iomap = pci_iomap_range(gs_dev->tt.pdev, 0, REG_IOMAP_START, REG_IOMAP_LEN);
-	gs_dev->pci_tlb = pci_iomap_range(gs_dev->tt.pdev, PCI_TLB_BAR, PCI_TLB_START, PCI_TLB_LEN);
+	gs_dev->kernel_tlb = pci_iomap_range(gs_dev->tt.pdev, KERNEL_TLB_BAR, KERNEL_TLB_START, KERNEL_TLB_LEN);
 
-	if (gs_dev->reg_iomap == NULL || gs_dev->pci_tlb == NULL) {
+	if (gs_dev->reg_iomap == NULL || gs_dev->kernel_tlb == NULL) {
 		if (gs_dev->reg_iomap != NULL)
 			pci_iounmap(gs_dev->tt.pdev, gs_dev->reg_iomap);
 
-		if (gs_dev->pci_tlb != NULL)
-			pci_iounmap(gs_dev->tt.pdev, gs_dev->pci_tlb);
+		if (gs_dev->kernel_tlb != NULL)
+			pci_iounmap(gs_dev->tt.pdev, gs_dev->kernel_tlb);
 		return false;
 	}
 
@@ -595,8 +597,8 @@ void grayskull_cleanup(struct tenstorrent_device *tt_dev) {
 	if (gs_dev->reg_iomap != NULL)
 		pci_iounmap(gs_dev->tt.pdev, gs_dev->reg_iomap);
 
-	if (gs_dev->pci_tlb != NULL)
-		pci_iounmap(gs_dev->tt.pdev, gs_dev->pci_tlb);
+	if (gs_dev->kernel_tlb != NULL)
+		pci_iounmap(gs_dev->tt.pdev, gs_dev->kernel_tlb);
 }
 
 static void grayskull_last_release_handler(struct tenstorrent_device *tt_dev) {

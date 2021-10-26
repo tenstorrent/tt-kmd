@@ -15,6 +15,7 @@
 #define TENSTORRENT_IOCTL_FREE_DMA_BUF		_IO(TENSTORRENT_IOCTL_MAGIC, 4)
 #define TENSTORRENT_IOCTL_GET_DRIVER_INFO	_IO(TENSTORRENT_IOCTL_MAGIC, 5)
 #define TENSTORRENT_IOCTL_RESET_DEVICE		_IO(TENSTORRENT_IOCTL_MAGIC, 6)
+#define TENSTORRENT_IOCTL_PIN_PAGES		_IO(TENSTORRENT_IOCTL_MAGIC, 7)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -125,6 +126,25 @@ struct tenstorrent_reset_device_out {
 struct tenstorrent_reset_device {
 	struct tenstorrent_reset_device_in in;
 	struct tenstorrent_reset_device_out out;
+};
+
+// tenstorrent_pin_pages_in.flags
+#define TENSTORRENT_PIN_PAGES_CONTIGUOUS 1
+
+struct tenstorrent_pin_pages_in {
+	__u32 output_size_bytes;
+	__u32 flags;
+	__u64 virtual_address;
+	__u64 size;
+};
+
+struct tenstorrent_pin_pages_out {
+	__u64 physical_address;
+};
+
+struct tenstorrent_pin_pages {
+	struct tenstorrent_pin_pages_in in;
+	struct tenstorrent_pin_pages_out out;
 };
 
 #endif

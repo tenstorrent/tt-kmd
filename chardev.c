@@ -1,3 +1,4 @@
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/fs.h>
@@ -48,6 +49,9 @@ struct chardev_private {
 	struct tenstorrent_device *device;
 	struct mutex mutex;
 	struct dmabuf dmabufs[TENSTORRENT_MAX_DMA_BUFS];
+
+	unsigned long pinned_page_count;
+	struct page **pinned_pages;
 };
 
 static dev_t tt_device_id;
@@ -372,6 +376,93 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	return 0;
 }
 
+static long ioctl_pin_pages(struct chardev_private *priv,
+			    struct tenstorrent_pin_pages __user *arg)
+{
+	unsigned long nr_pages;
+	struct page **pages;
+	long pages_pinned;
+	long ret;
+	long i;
+	u32 bytes_to_copy;
+
+	struct tenstorrent_pin_pages_in in;
+	struct tenstorrent_pin_pages_out out;
+	memset(&in, 0, sizeof(in));
+	memset(&out, 0, sizeof(out));
+
+	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
+		return -EFAULT;
+
+	if (!PAGE_ALIGNED(in.virtual_address) || !PAGE_ALIGNED(in.size))
+		return -EINVAL;
+
+	if (!(in.flags & TENSTORRENT_PIN_PAGES_CONTIGUOUS))
+		return -EINVAL;
+
+	if (priv->pinned_page_count != 0)
+		return -EINVAL;
+
+	nr_pages = PAGE_ALIGN(in.size) >> PAGE_SHIFT;
+	pages = vzalloc(nr_pages * sizeof(struct page *));
+	if (!pages) {
+		pr_err("vzalloc failed for %lu page pointers\n", nr_pages);
+		return -ENOMEM;
+	}
+
+	pages_pinned = get_user_pages_fast(in.virtual_address, nr_pages, FOLL_WRITE|FOLL_LONGTERM, pages);
+	if (pages_pinned < 0) {
+		pr_warn("get_user_pages_fast failed: %ld\n", pages_pinned);
+		ret = pages_pinned;
+		goto err_vfree;
+	}
+
+	if (pages_pinned != nr_pages) {
+		pr_err("could only pin %ld of %lu pages\n", pages_pinned, nr_pages);
+		ret = -EINVAL;
+		goto err_put_pages;
+	}
+
+	for (i = 1; i < pages_pinned; i++) {
+		if (page_to_pfn(pages[i]) != page_to_pfn(pages[i-1]) + 1) {
+			pr_err("pages discontiguous at %lu\n", i);
+			ret = -EINVAL;
+			goto err_put_pages;
+		}
+	}
+
+	mutex_lock(&priv->mutex);
+
+	if (priv->pinned_page_count != 0) {
+		mutex_unlock(&priv->mutex);
+		ret = -EINVAL;
+		goto err_put_pages;
+	}
+
+	priv->pinned_page_count = pages_pinned;
+	priv->pinned_pages = pages;
+
+	out.physical_address = page_to_phys(pages[0]);
+
+	mutex_unlock(&priv->mutex);
+
+	if (clear_user(&arg->out, in.output_size_bytes) != 0)
+		return -EFAULT;
+
+	bytes_to_copy = min(in.output_size_bytes, (u32)sizeof(out));
+
+	if (copy_to_user(&arg->out, &out, bytes_to_copy) != 0)
+		return -EFAULT;
+
+	return 0;
+
+err_put_pages:
+	put_user_pages(pages, pages_pinned);
+err_vfree:
+	vfree(pages);
+	return ret;
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	long ret = -EINVAL;
@@ -403,6 +494,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_RESET_DEVICE:
 			ret = ioctl_reset_device(priv, (struct tenstorrent_reset_device __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_PIN_PAGES:
+			ret = ioctl_pin_pages(priv, (struct tenstorrent_pin_pages __user *)arg);
 			break;
 
 		default:
@@ -552,6 +647,11 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 		if (dmabuf->ptr != NULL)
 			dma_free_coherent(&priv->device->pdev->dev,
 					  dmabuf->size, dmabuf->ptr, dmabuf->phys);
+	}
+
+	if (priv->pinned_page_count != 0) {
+		put_user_pages(priv->pinned_pages, priv->pinned_page_count);
+		vfree(priv->pinned_pages);
 	}
 
 	kfree(file->private_data);

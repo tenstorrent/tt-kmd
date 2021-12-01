@@ -20,6 +20,61 @@
 #define dma_alloc_coherent dma_zalloc_coherent
 #endif
 
+#if LINUX_VERSION_CODE >= 0x050600
+static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsigned int gup_flags, struct page **pages)
+{
+	return pin_user_pages_fast(start, nr_pages, gup_flags | FOLL_LONGTERM, pages);
+}
+#elif LINUX_VERSION_CODE >= 0x050200
+static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsigned int gup_flags, struct page **pages)
+{
+	return get_user_pages_fast(start, nr_pages, gup_flags | FOLL_LONGTERM, pages);
+}
+#elif LINUX_VERSION_CODE >= 0x041404
+static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsigned int gup_flags, struct page **pages)
+{
+	int ret;
+
+	down_read(&current->mm->mmap_sem);
+	ret = get_user_pages_longterm(start, nr_pages, gup_flags, pages, NULL);
+	up_read(&current->mm->mmap_sem);
+	return ret;
+}
+#else
+static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsigned int gup_flags, struct page **pages)
+{
+	return get_user_pages_fast(start, nr_pages, gup_flags, pages);
+}
+#endif
+
+#if LINUX_VERSION_CODE >= 0x050600
+// unpin_user_pages_dirty_lock is provided by the kernel.
+#elif LINUX_VERSION_CODE >= 0x050400
+static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npages, bool make_dirty)
+{
+	put_user_pages_dirty_lock(pages, npages, make_dirty);
+}
+#elif LINUX_VERSION_CODE >= 0x050200
+static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npages, bool make_dirty)
+{
+	if (make_dirty)
+		put_user_pages_dirty_lock(pages, npages);
+	else
+		put_user_pages(pages, npages);
+}
+#else
+static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npages, bool make_dirty)
+{
+	struct page **end = pages + npages;
+	for (; pages != end; pages++) {
+		if (make_dirty)
+			set_page_dirty_lock(*pages);
+		put_page(*pages);
+	}
+}
+#endif
+
+
 #define MAX_DMA_BUF_SIZE_LOG2 28
 #define MAX_DMA_BUF_SIZE (1u << MAX_DMA_BUF_SIZE_LOG2)
 
@@ -381,9 +436,9 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 {
 	unsigned long nr_pages;
 	struct page **pages;
-	long pages_pinned;
+	int pages_pinned;
 	long ret;
-	long i;
+	int i;
 	u32 bytes_to_copy;
 
 	struct tenstorrent_pin_pages_in in;
@@ -410,24 +465,24 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 		return -ENOMEM;
 	}
 
-	pages_pinned = get_user_pages_fast(in.virtual_address, nr_pages, FOLL_WRITE|FOLL_LONGTERM, pages);
+	pages_pinned = pin_user_pages_fast_longterm(in.virtual_address, nr_pages, FOLL_WRITE, pages);
 	if (pages_pinned < 0) {
-		pr_warn("get_user_pages_fast failed: %ld\n", pages_pinned);
+		pr_warn("pin_user_pages_longterm failed: %d\n", pages_pinned);
 		ret = pages_pinned;
 		goto err_vfree;
 	}
 
 	if (pages_pinned != nr_pages) {
-		pr_err("could only pin %ld of %lu pages\n", pages_pinned, nr_pages);
+		pr_err("could only pin %d of %lu pages\n", pages_pinned, nr_pages);
 		ret = -EINVAL;
-		goto err_put_pages;
+		goto err_unpin_pages;
 	}
 
 	for (i = 1; i < pages_pinned; i++) {
 		if (page_to_pfn(pages[i]) != page_to_pfn(pages[i-1]) + 1) {
-			pr_err("pages discontiguous at %lu\n", i);
+			pr_err("pages discontiguous at %d\n", i);
 			ret = -EINVAL;
-			goto err_put_pages;
+			goto err_unpin_pages;
 		}
 	}
 
@@ -436,7 +491,7 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 	if (priv->pinned_page_count != 0) {
 		mutex_unlock(&priv->mutex);
 		ret = -EINVAL;
-		goto err_put_pages;
+		goto err_unpin_pages;
 	}
 
 	priv->pinned_page_count = pages_pinned;
@@ -456,8 +511,8 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 
 	return 0;
 
-err_put_pages:
-	put_user_pages(pages, pages_pinned);
+err_unpin_pages:
+	unpin_user_pages_dirty_lock(pages, pages_pinned, false);
 err_vfree:
 	vfree(pages);
 	return ret;
@@ -650,7 +705,7 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	}
 
 	if (priv->pinned_page_count != 0) {
-		put_user_pages(priv->pinned_pages, priv->pinned_page_count);
+		unpin_user_pages_dirty_lock(priv->pinned_pages, priv->pinned_page_count, true);
 		vfree(priv->pinned_pages);
 	}
 

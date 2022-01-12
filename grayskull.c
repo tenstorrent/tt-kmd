@@ -70,9 +70,11 @@
 
 #define GS_ARC_L2_FW_NAME "tenstorrent_gs_arc_l2_fw.bin"
 #define GS_ARC_L2_FW_SIZE_BYTES 0xF000
+#define GS_ICCM_FW_SIZE_BYTES 0x1000
 #define GS_WATCHDOG_FW_NAME "tenstorrent_gs_wdg_fw.bin"
-#define GS_WATCHDOG_FW_SIZE_BYTES 0x1000
 #define GS_WATCHDOG_FW_CORE_ID 3
+#define GS_SMBUS_FW_NAME "tenstorrent_gs_smbus_fw.bin"
+#define GS_SMBUS_FW_CORE_ID 1
 
 #define DRAM_NOC0_REG_BASE 0xffff4000
 #define DRAM_NOC1_REG_BASE 0xffff5000
@@ -213,31 +215,34 @@ grayskull_load_arc_fw_cleanup:
 	return ret;
 }
 
-static int grayskull_load_watchdog_fw(struct grayskull_device *gs_dev) {
+
+
+static int grayskull_load_iccm_fw(struct grayskull_device *gs_dev,
+					const char* fw_name,
+					u32 core_id,
+					u32 *reset_vector) {
 	const struct firmware *firmware;
 	int ret = 0;
-	u32 reset_vector;
 	u8 __iomem* reset_unit_regs = gs_dev->reset_unit_regs;
 	u8 __iomem* fw_target_mem = gs_dev->reg_iomap + ARC_ICCM_MEMORY_OFFSET;
 
-	ret = request_firmware(&firmware, GS_WATCHDOG_FW_NAME, &gs_dev->tt.pdev->dev);
+	ret = request_firmware(&firmware, fw_name, &gs_dev->tt.pdev->dev);
 	if (ret)
-		goto grayskull_load_watchdog_fw_cleanup;
+		goto grayskull_load_iccm_fw_cleanup;
 
-	if (firmware->size != GS_WATCHDOG_FW_SIZE_BYTES) {
+	if (firmware->size != GS_ICCM_FW_SIZE_BYTES) {
 		ret = -EINVAL;
-		goto grayskull_load_watchdog_fw_cleanup;
+		goto grayskull_load_iccm_fw_cleanup;
 	}
 
-	iowrite32(ARC_UDMIAXI_REGION_ICCM(GS_WATCHDOG_FW_CORE_ID),
+	iowrite32(ARC_UDMIAXI_REGION_ICCM(core_id),
 		reset_unit_regs + ARC_UDMIAXI_REGION_REG);
-	memcpy_toio(fw_target_mem, firmware->data, GS_WATCHDOG_FW_SIZE_BYTES);
+	memcpy_toio(fw_target_mem, firmware->data, GS_ICCM_FW_SIZE_BYTES);
 	// Reset vector needs to be passed to FW through ttkmd_arc_if
-	reset_vector = le32_to_cpu(*(u32 *)firmware->data);
-	gs_dev->tt.watchdog_fw_reset_vec = reset_vector;
+	*reset_vector = le32_to_cpu(*(u32 *)firmware->data);
 	iowrite32(ARC_UDMIAXI_REGION_CSM, reset_unit_regs + ARC_UDMIAXI_REGION_REG);
 
-grayskull_load_watchdog_fw_cleanup:
+grayskull_load_iccm_fw_cleanup:
 	release_firmware(firmware);
 	return ret;
 }
@@ -265,6 +270,10 @@ static int grayskull_populate_arc_if(struct grayskull_device *gs_dev) {
 	ttkmd_arc_if->f.watchdog_fw_load = !watchdog_fw_override;
 	ttkmd_arc_if->f.watchdog_fw_reset_vec =
 		cpu_to_le32(gs_dev->tt.watchdog_fw_reset_vec);
+	ttkmd_arc_if->f.smbus_fw_en = smbus_fw_en;
+	ttkmd_arc_if->f.smbus_fw_load = !smbus_fw_override;
+	ttkmd_arc_if->f.smbus_fw_reset_vec =
+		cpu_to_le32(gs_dev->tt.smbus_fw_reset_vec);
 
 	iowrite32(ARC_UDMIAXI_REGION_CSM, reset_unit_regs + ARC_UDMIAXI_REGION_REG);
 	memcpy_toio(device_ttkmd_arc_if, ttkmd_arc_if, sizeof(ttkmd_arc_if_u));
@@ -310,11 +319,25 @@ static int grayskull_arc_init(struct grayskull_device *gs_dev) {
 	}
 
 	if (watchdog_fw_override) {
-		if (grayskull_load_watchdog_fw(gs_dev)) {
+		if (grayskull_load_iccm_fw(gs_dev,
+					GS_WATCHDOG_FW_NAME,
+					GS_WATCHDOG_FW_CORE_ID,
+					&gs_dev->tt.watchdog_fw_reset_vec)) {
 			pr_warn("Watchdog FW Override unsuccessful.\n");
 			goto grayskull_arc_init_err;
 		}
 	}
+
+	if (smbus_fw_override) {
+		if (grayskull_load_iccm_fw(gs_dev,
+					GS_SMBUS_FW_NAME,
+					GS_SMBUS_FW_CORE_ID,
+					&gs_dev->tt.smbus_fw_reset_vec)) {
+			pr_warn("Watchdog FW Override unsuccessful.\n");
+			goto grayskull_arc_init_err;
+		}
+	}
+
 
 	if (grayskull_populate_arc_if(gs_dev)) {
 		pr_warn("Driver to ARC table init failed.\n");

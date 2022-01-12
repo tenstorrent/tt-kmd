@@ -4,6 +4,7 @@
 # (for commit in $(git log --format=%H -- modprobe.d-tenstorrent.conf); do git show $commit:./modprobe.d-tenstorrent.conf |md5sum; done) |sort -u |cut -d" " -f1
 UNMODIFIED_TENSTORRENT_CONF="1de3e34baf9f122f895fb7397e8f479f \
 4e352c89c8482a6b29cfcc8c94b82d80 \
+5c9842477cddcf996df21277565817c7 \
 5d55a1258e8d104e16e0c9423207c691 \
 700d8ac587bff597e42f3783f4d0cb82 \
 7c52a78ebfb9921d2c7af7782ab5eee6 \

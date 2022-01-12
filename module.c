@@ -60,6 +60,14 @@ bool watchdog_fw_override = false;
 module_param(watchdog_fw_override, bool, 0444);
 MODULE_PARM_DESC(watchdog_fw_override, "Override watchdog FW from filesystem instead of auto load from SPI: Y/N. Default N.");
 
+bool smbus_fw_en = true;
+module_param(smbus_fw_en, bool, 0444);
+MODULE_PARM_DESC(smbus_fw_en, "Enable smbus FW: Y/N. Default Y.");
+
+bool smbus_fw_override = false;
+module_param(smbus_fw_override, bool, 0444);
+MODULE_PARM_DESC(smbus_fw_override, "Override smbus FW from filesystem instead of auto load from SPI: Y/N. Default N.");
+
 uint axiclk_override = 0;
 module_param(axiclk_override, uint, 0444);
 MODULE_PARM_DESC(axiclk_override, "AXICLK override in MHz or 0 to auto-detect.");

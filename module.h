@@ -14,6 +14,8 @@ extern uint aiclk_fmax_override;
 extern uint arc_fw_feat_dis_override;
 extern bool watchdog_fw_en;
 extern bool watchdog_fw_override;
+extern bool smbus_fw_en;
+extern bool smbus_fw_override;
 extern uint axiclk_override;
 extern uint tensix_harvest_override;
 extern uint dma_address_bits;

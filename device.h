@@ -22,6 +22,7 @@ struct tenstorrent_device {
 	unsigned int chardev_open_count;
 
 	u32 watchdog_fw_reset_vec;
+	u32 smbus_fw_reset_vec;
 };
 
 struct tenstorrent_device_class {

@@ -19,4 +19,5 @@ extern bool smbus_fw_override;
 extern uint axiclk_override;
 extern uint tensix_harvest_override;
 extern uint dma_address_bits;
+extern uint e75_reset_limit;
 #endif

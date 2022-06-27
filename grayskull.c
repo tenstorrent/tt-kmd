@@ -101,6 +101,17 @@
 #define ROUTER_CLOCK_GATING_ENABLE	(1u << 0)
 #define ROUTER_MAX_BACKOFF_EXP		(0xFu << 8)
 
+#define GRAYSKULL_E75 7
+
+// PCIE Controller RAS definitions
+#define PCI_EVENT_COUNTER_CONTROL_REG		0x208
+#define PCI_EVENT_L0_TO_RECOVERY		0x05000000
+#define PCI_EVENT_COUNTER_CONTROL_ALL_OFF	0x14
+#define PCI_EVENT_COUNTER_CONTROL_ALL_ON	0x1C
+#define PCI_EVENT_COUNTER_CONTROL_CLEAR_ALL	3
+
+#define PCI_EVENT_COUNTER_DATA_REG		0x20C
+
 struct TLB_16M_REG {
 	union {
 		struct {
@@ -592,8 +603,69 @@ bool grayskull_init(struct tenstorrent_device *tt_dev) {
 	return true;
 }
 
+static bool reset_e75(struct grayskull_device *gs_dev) {
+	struct pci_dev *pdev = gs_dev->tt.pdev;
+	u16 aer_cap = pdev->aer_cap;
+	struct pci_dev *bridge_dev = pci_upstream_bridge(pdev);
+
+	u32 error_count;
+	unsigned int i;
+
+	if (e75_reset_limit == 0)
+		return true;
+
+	for (i = 0; i < e75_reset_limit; i++) {
+		u16 bridge_ctrl;
+		u32 ce_status;
+
+		// We don't sleep the first time around as the board booted
+		// more than 100ms ago so no errors now indicates a good boot.
+
+		// read L0-to-recovery event counter
+		pci_write_config_dword(pdev, PCI_EVENT_COUNTER_CONTROL_REG, PCI_EVENT_L0_TO_RECOVERY);
+		pci_read_config_dword(pdev, PCI_EVENT_COUNTER_DATA_REG, &error_count); // actual counter
+
+		if (error_count == 0) {
+			pr_debug("reset_e75 passed after %u iterations.\n", i);
+			return true;
+		} else {
+			pr_debug("reset_e75 %u errors on iteration %u.\n", error_count, i);
+		}
+
+		// reset link - like pci_reset_secondary_bus, but we don't want the full 1s delay.
+		pci_read_config_word(bridge_dev, PCI_BRIDGE_CONTROL, &bridge_ctrl);
+		pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl | PCI_BRIDGE_CTL_BUS_RESET);
+
+		msleep(2);
+
+		pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl);
+
+		msleep(500);
+
+		// clear L0-to-recovery event counter
+		pci_write_config_dword(pdev, PCI_EVENT_COUNTER_CONTROL_REG,
+				       PCI_EVENT_L0_TO_RECOVERY | PCI_EVENT_COUNTER_CONTROL_ALL_OFF | PCI_EVENT_COUNTER_CONTROL_CLEAR_ALL);
+		pci_write_config_dword(pdev, PCI_EVENT_COUNTER_CONTROL_REG,
+				       PCI_EVENT_L0_TO_RECOVERY | PCI_EVENT_COUNTER_CONTROL_ALL_ON);
+
+		// clear AER correctable error status
+		pci_read_config_dword(pdev, aer_cap + PCI_ERR_COR_STATUS, &ce_status);
+		pci_write_config_dword(pdev, aer_cap + PCI_ERR_COR_STATUS, ce_status);
+
+		msleep(100);
+	}
+
+	return false;
+}
+
 bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
+
+	if (gs_dev->tt.pdev->subsystem_device == GRAYSKULL_E75
+	    && !reset_e75(gs_dev)) {
+		pr_err("E75 failed to reset without PCIe errors.\n");
+		return false;
+	}
 
 	if (arc_l2_is_running(gs_dev->reset_unit_regs)) {
 		grayskull_send_arc_fw_message(gs_dev->reset_unit_regs, GS_FW_MSG_ASTATE0, 10000);

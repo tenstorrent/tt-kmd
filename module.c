@@ -80,6 +80,10 @@ uint dma_address_bits = 0;
 module_param(dma_address_bits, uint, 0444);
 MODULE_PARM_DESC(dma_address_bits, "DMA address bits, 0 for automatic.");
 
+uint e75_reset_limit = 30;
+module_param(e75_reset_limit, uint, 0444);
+MODULE_PARM_DESC(e75_reset_limit, "Maximum number of times to reset E75 during boot.");
+
 struct tenstorrent_device_class;
 extern struct tenstorrent_device_class grayskull_class;
 extern struct tenstorrent_device_class wormhole_class;

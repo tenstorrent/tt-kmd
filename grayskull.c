@@ -608,11 +608,14 @@ static bool reset_e75(struct grayskull_device *gs_dev) {
 	u16 aer_cap = pdev->aer_cap;
 	struct pci_dev *bridge_dev = pci_upstream_bridge(pdev);
 
+	u16 command;
 	u32 error_count;
 	unsigned int i;
 
 	if (e75_reset_limit == 0)
 		return true;
+
+	pci_read_config_word(pdev, PCI_COMMAND, &command);
 
 	for (i = 0; i < e75_reset_limit; i++) {
 		u16 bridge_ctrl;
@@ -641,6 +644,8 @@ static bool reset_e75(struct grayskull_device *gs_dev) {
 		pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl);
 
 		msleep(500);
+
+		pci_write_config_word(pdev, PCI_COMMAND, command);
 
 		// clear L0-to-recovery event counter
 		pci_write_config_dword(pdev, PCI_EVENT_COUNTER_CONTROL_REG,

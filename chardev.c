@@ -23,26 +23,58 @@
 #if LINUX_VERSION_CODE >= 0x050600
 static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsigned int gup_flags, struct page **pages)
 {
-	return pin_user_pages_fast(start, nr_pages, gup_flags | FOLL_LONGTERM, pages);
+	// Can't use pin_user_pages_fast(FOLL_LONGTERM) because it calls __gup_longterm_locked with vmas = NULL
+	// which allocates a contiguous vmas array and that fails often.
+
+	int ret;
+
+	struct vm_area_struct **vmas = kvmalloc_array(nr_pages, sizeof(struct vm_area_struct *), GFP_KERNEL);
+	if (vmas == NULL)
+		return -ENOMEM;
+
+	ret = pin_user_pages(start, nr_pages, gup_flags | FOLL_LONGTERM, pages, vmas);
+
+	kvfree(vmas);
+	return ret;
 }
 #elif LINUX_VERSION_CODE >= 0x050200
 static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsigned int gup_flags, struct page **pages)
 {
-	return get_user_pages_fast(start, nr_pages, gup_flags | FOLL_LONGTERM, pages);
+	// Can't use get_user_pages_fast(FOLL_LONGTERM) because it calls __gup_longterm_locked with vmas = NULL
+	// which allocates a contiguous vmas array and that fails often.
+
+	int ret;
+
+	struct vm_area_struct **vmas = kvmalloc_array(nr_pages, sizeof(struct vm_area_struct *), GFP_KERNEL);
+	if (vmas == NULL)
+		return -ENOMEM;
+
+	ret = get_user_pages(start, nr_pages, gup_flags | FOLL_LONGTERM, pages, vmas);
+
+	kvfree(vmas);
+	return ret;
 }
 #elif LINUX_VERSION_CODE >= 0x041404
 static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsigned int gup_flags, struct page **pages)
 {
 	int ret;
 
+	// If we don't pass in vmas, get_user_pages_longterm will allocate it in contiguous memory and that fails often.
+	struct vm_area_struct **vmas = kvmalloc_array(nr_pages, sizeof(struct vm_area_struct *), GFP_KERNEL);
+	if (vmas == NULL)
+		return -ENOMEM;
+
 	down_read(&current->mm->mmap_sem);
-	ret = get_user_pages_longterm(start, nr_pages, gup_flags, pages, NULL);
+	ret = get_user_pages_longterm(start, nr_pages, gup_flags, pages, vmas);
 	up_read(&current->mm->mmap_sem);
+
+	kvfree(vmas);
 	return ret;
 }
 #else
 static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsigned int gup_flags, struct page **pages)
 {
+	// Kernels this old don't know about long-term pinning, so they don't allocate the vmas array.
 	return get_user_pages_fast(start, nr_pages, gup_flags, pages);
 }
 #endif

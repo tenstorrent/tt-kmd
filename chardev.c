@@ -432,6 +432,7 @@ static long ioctl_get_driver_info(struct chardev_private *priv,
 static long ioctl_reset_device(struct chardev_private *priv,
 			       struct tenstorrent_reset_device __user *arg)
 {
+	u16 vendor_id;
 	bool ok;
 	u32 bytes_to_copy;
 
@@ -446,8 +447,16 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	if (in.flags != 0)
 		return -EINVAL;
 
-	pci_restore_state(priv->device->pdev);
-	ok = priv->device->dev_class->init_hardware(priv->device);
+	// Start with a test read. pci_restore_state calls pci_find_next_ext_capability which has
+	// a bounded loop that is still long enough to trigger a soft lockup warning if hardware
+	// is extremely misbehaving.
+	if (pci_read_config_word(priv->device->pdev, PCI_VENDOR_ID, &vendor_id) != PCIBIOS_SUCCESSFUL
+	    || vendor_id != PCI_VENDOR_ID_TENSTORRENT) {
+		ok = false;
+	} else {
+		pci_restore_state(priv->device->pdev);
+		ok = priv->device->dev_class->init_hardware(priv->device);
+	}
 
 	out.output_size_bytes = sizeof(out);
 	out.result = !ok;

@@ -3,6 +3,8 @@
 #include "wormhole.h"
 #include "grayskull.h"
 
+#define WH_FW_MSG_PCIE_INDEX 0x51
+
 // The iATU can be used to match & remap PCIE transactions.
 #define IATU_BASE 0x1200	// Relative to the start of BAR2
 #define IATU_OUTBOUND 0
@@ -48,6 +50,19 @@ static void map_bar4_to_system_registers(struct wormhole_device *wh_dev) {
 	WRITE_IATU_REG(wh_dev, INBOUND, 1, REGION_CTRL_2, region_ctrl_2);
 }
 
+static u8 __iomem *reset_unit_regs(struct wormhole_device *wh_dev) {
+	return wh_dev->bar4_mapping + RESET_UNIT_START;
+}
+
+static void update_device_index(struct wormhole_device *wh_dev) {
+	static const u8 INDEX_VALID = 0x80;
+
+	grayskull_send_arc_fw_message_with_args(reset_unit_regs(wh_dev),
+						WH_FW_MSG_PCIE_INDEX,
+						wh_dev->tt.ordinal | INDEX_VALID, 0,
+						10*1000);
+}
+
 static bool wormhole_init(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
@@ -69,12 +84,9 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
 	map_bar4_to_system_registers(wh_dev);
+	update_device_index(wh_dev);
 
 	return true;
-}
-
-static u8 __iomem *reset_unit_regs(struct wormhole_device *wh_dev) {
-	return wh_dev->bar4_mapping + RESET_UNIT_START;
 }
 
 static void wormhole_cleanup(struct tenstorrent_device *tt_dev) {

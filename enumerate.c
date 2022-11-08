@@ -13,6 +13,16 @@
 DEFINE_IDR(tenstorrent_dev_idr);
 DEFINE_MUTEX(tenstorrent_dev_idr_mutex);
 
+static int tenstorrent_reboot_notifier(struct notifier_block *nb,
+                        	       unsigned long action, void *data) {
+	struct tenstorrent_device *tt_dev = container_of(nb, struct tenstorrent_device, reboot_notifier);
+
+	if (action != SYS_POWER_OFF)
+		tt_dev->dev_class->reboot(tt_dev);
+
+	return NOTIFY_DONE;
+}
+
 static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	struct tenstorrent_device *tt_dev = NULL;
@@ -59,12 +69,20 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	tenstorrent_register_device(tt_dev);
 
+	if (device_class->reboot) {
+		tt_dev->reboot_notifier.notifier_call = tenstorrent_reboot_notifier;
+		register_reboot_notifier(&tt_dev->reboot_notifier);
+	}
+
 	return 0;
 }
 
 static void tenstorrent_pci_remove(struct pci_dev *dev)
 {
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(dev);
+
+	if (tt_dev->dev_class->reboot)
+		unregister_reboot_notifier(&tt_dev->reboot_notifier);
 
 	tenstorrent_unregister_device(tt_dev);
 

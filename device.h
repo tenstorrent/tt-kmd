@@ -5,6 +5,7 @@
 #include <linux/device.h>
 #include <linux/pci.h>
 #include <linux/cdev.h>
+#include <linux/reboot.h>
 
 struct tenstorrent_device_class;
 
@@ -23,6 +24,8 @@ struct tenstorrent_device {
 
 	u32 watchdog_fw_reset_vec;
 	u32 smbus_fw_reset_vec;
+
+	struct notifier_block reboot_notifier;
 };
 
 struct tenstorrent_device_class {
@@ -33,6 +36,7 @@ struct tenstorrent_device_class {
 	void (*cleanup_device)(struct tenstorrent_device *ttdev);
 	void (*first_open_cb)(struct tenstorrent_device *ttdev);
 	void (*last_release_cb)(struct tenstorrent_device *ttdev);
+	void (*reboot)(struct tenstorrent_device *ttdev);
 };
 
 #endif

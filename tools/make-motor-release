@@ -1,0 +1,54 @@
+#! /bin/bash
+
+set -e
+
+if [ $# -ne 0 ]; then
+    echo "No command-line parameters are accepted."
+    exit 1
+fi
+
+TTDRIVER_REL="/mnt/motor/syseng/ttdriver-rel"
+
+if [ ! -d "$TTDRIVER_REL" ]; then
+    echo "No access to $TTDRIVER_REL, is motor mounted?"
+    exit 1
+fi
+
+PACKAGE_VERSION=$(sed -nE "s/^[[:space:]]*PACKAGE_VERSION[[:space:]]*=[[:space:]]*\"([^\"]+)\"/\\1/p" dkms.conf)
+ARCHIVE=$(tools/make-source-release -m)
+ARCHIVE_BASENAME=$(basename "$ARCHIVE")
+
+TARGET="$TTDRIVER_REL/$PACKAGE_VERSION"
+
+mkdir -p "$TARGET"
+cp "$ARCHIVE" "$TARGET/$ARCHIVE_BASENAME"
+
+INSTALL_SCRIPT="$TARGET/install_ttkmd_$PACKAGE_VERSION.bash"
+
+sed "s/PACKAGE_VERSION/$PACKAGE_VERSION/g;s/ARCHIVE/$ARCHIVE_BASENAME/g" <<"EOF" > "$INSTALL_SCRIPT"
+#!/bin/bash
+
+if (( $EUID != 0 )); then
+    echo "Run as root!"
+    exit -1
+fi
+
+installed=($(sudo dkms status | awk -F "," '{ print $2 }'))
+
+# Uninstall previous installations
+for ver in "${installed[@]}"
+do
+	dkms remove tenstorrent/$ver --all
+done
+
+dkms ldtarball `dirname $0`/ARCHIVE
+dkms install tenstorrent/PACKAGE_VERSION
+
+echo "Reloading tenstorrent module"
+modprobe -r tenstorrent
+modprobe tenstorrent
+EOF
+
+chmod a+x "$INSTALL_SCRIPT"
+
+echo "Deployed to $TARGET."

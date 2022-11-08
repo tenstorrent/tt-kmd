@@ -1,0 +1,54 @@
+#! /bin/bash
+
+set -e
+
+MACHINE_READABLE_OUTPUT=0
+HELP=0
+
+while getopts m ARG; do
+    case $ARG in
+        m) MACHINE_READABLE_OUTPUT=1;;
+        *) exit 1;
+    esac
+done
+shift $(($OPTIND-1))
+
+if [ $# -ne 0 ]; then
+    echo "Additional command-line parameters are not accepted."
+    exit 1
+fi
+
+if ! dkms status &> /dev/null; then
+    echo "DKMS not found. Run on a system with DKMS installed."
+    exit 1
+fi
+
+if [ ! -e dkms.conf ]; then
+    echo "dkms.conf not found. Run from the ttkmd directory."
+    exit 1
+fi
+
+if [ $MACHINE_READABLE_OUTPUT -eq 1 ]; then
+    exec 3>&1 >/dev/null
+fi
+
+PACKAGE_VERSION=$(sed -nE "s/^[[:space:]]*PACKAGE_VERSION[[:space:]]*=[[:space:]]*\"([^\"]+)\"/\\1/p" dkms.conf)
+
+sudo dkms remove tenstorrent/$PACKAGE_VERSION --all &> /dev/null || true
+
+TEMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TEMP_DIR"' EXIT
+
+tar -X tools/exclude-from-release -cf - . |tar -C "$TEMP_DIR" -xf -
+
+ARCHIVE="ttkmd_$PACKAGE_VERSION.tar"
+
+sudo dkms add "$TEMP_DIR"
+dkms mktarball tenstorrent/$PACKAGE_VERSION --archive "$PWD/$ARCHIVE" --source-only
+sudo dkms remove tenstorrent/$PACKAGE_VERSION --all
+
+echo "DKMS source release in $ARCHIVE"
+
+if [ $MACHINE_READABLE_OUTPUT -eq 1 ]; then
+    echo $ARCHIVE >&3
+fi

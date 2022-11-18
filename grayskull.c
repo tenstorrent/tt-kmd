@@ -8,6 +8,7 @@
 #include "module.h"
 #include "grayskull.h"
 #include "ttkmd_arc_if.h"
+#include "enumerate.h"
 
 #define GRID_SIZE_X 13
 #define GRID_SIZE_Y 12
@@ -123,7 +124,14 @@ struct TLB_16M_REG {
 
 #define TLB_16M_SIZE_SHIFT 24
 
-static bool is_hardware_hung(u8 __iomem *reset_unit_regs) {
+static bool is_hardware_hung(struct pci_dev *pdev, u8 __iomem *reset_unit_regs) {
+	u16 vendor_id;
+
+	if (pdev != NULL
+	    && (pci_read_config_word(pdev, PCI_VENDOR_ID, &vendor_id) != PCIBIOS_SUCCESSFUL
+		|| vendor_id != PCI_VENDOR_ID_TENSTORRENT))
+		return true;
+
 	return (ioread32(reset_unit_regs + SCRATCH_REG(6)) == 0xFFFFFFFF);
 }
 
@@ -139,7 +147,7 @@ int wait_reg32_with_timeout(u8 __iomem* reset_unit_regs, u8 __iomem* reg,
 		if (read_val == expected_val)
 			return 0;
 
-		if (read_val == 0xFFFFFFFFu && is_hardware_hung(reset_unit_regs))
+		if (read_val == 0xFFFFFFFFu && is_hardware_hung(NULL, reset_unit_regs))
 			return -2;
 
 		if (ktime_after(ktime_get(), end_time))
@@ -563,8 +571,8 @@ static void grayskull_noc_init(struct grayskull_device *gs_dev) {
 }
 
 // This is shared with wormhole.
-bool grayskull_shutdown_firmware(u8 __iomem* reset_unit_regs) {
-	if (is_hardware_hung(reset_unit_regs))
+bool grayskull_shutdown_firmware(struct pci_dev *pdev, u8 __iomem* reset_unit_regs) {
+	if (is_hardware_hung(pdev, reset_unit_regs))
 		return false;
 
 	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_ASTATE3, 10000))
@@ -615,7 +623,7 @@ void grayskull_cleanup(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
 	if (gs_dev->reset_unit_regs != NULL)
-		grayskull_shutdown_firmware(gs_dev->reset_unit_regs);
+		grayskull_shutdown_firmware(tt_dev->pdev, gs_dev->reset_unit_regs);
 
 	if (gs_dev->reg_iomap != NULL)
 		pci_iounmap(gs_dev->tt.pdev, gs_dev->reg_iomap);

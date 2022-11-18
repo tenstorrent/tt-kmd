@@ -15,7 +15,7 @@ struct grayskull_device {
 #define tt_dev_to_gs_dev(ttdev) \
 	container_of((tt_dev), struct grayskull_device, tt)
 
-bool grayskull_shutdown_firmware(u8 __iomem* reset_unit_regs);
+bool grayskull_shutdown_firmware(struct pci_dev *pdev, u8 __iomem* reset_unit_regs);
 
 bool grayskull_send_arc_fw_message_with_args(u8 __iomem* reset_unit_regs,
 					     u8 message_id, u16 arg0, u16 arg1,

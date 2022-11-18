@@ -1,2 +1,3 @@
-tools/*
+tools
+ttkmd_*.tar
 modprobe.d-tenstorrent.conf

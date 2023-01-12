@@ -31,6 +31,13 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	printk(KERN_INFO "Found a Tenstorrent %s device at bus %d.\n", device_class->name, (int)dev->bus->number);
 
+	// During pre-test, unflashed boards have no class code which trips up __dev_sort_resources.
+	// Assign the proper class code and rerun resource assignment to clear things up.
+	if (dev->class >> 8 == PCI_CLASS_NOT_DEFINED) {
+		dev->class = 0x120000;	// Processing Accelerator - vendor-specific interface
+		pci_assign_unassigned_bus_resources(dev->bus);
+	}
+
 	if (pci_enable_device(dev) < 0)
 		return -EIO;
 

@@ -6,7 +6,7 @@
 #include "chardev.h"
 #include "enumerate.h"
 
-#define TTDRIVER_VER "1.19"
+#define TTDRIVER_VER "1.18"
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Tenstorrent AI kernel driver");
@@ -79,11 +79,6 @@ MODULE_PARM_DESC(tensix_harvest_override, "Tensix row harvesting override, 0xFFF
 uint dma_address_bits = 0;
 module_param(dma_address_bits, uint, 0444);
 MODULE_PARM_DESC(dma_address_bits, "DMA address bits, 0 for automatic.");
-
-uint reset_limit = 10;
-module_param(reset_limit, uint, 0444);
-MODULE_PARM_DESC(reset_limit, "Maximum number of times to reset device during boot.");
-
 
 struct tenstorrent_device_class;
 extern struct tenstorrent_device_class grayskull_class;

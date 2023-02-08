@@ -68,7 +68,6 @@
 #define GS_FW_MSG_ASTATE1 0xA1
 #define GS_FW_MSG_ASTATE3 0xA3
 #define GS_FW_MSG_ASTATE5 0xA5
-#define GS_FW_MSG_PCIE_RETRAIN 0xA7
 
 #define GS_ARC_L2_FW_NAME "tenstorrent_gs_arc_l2_fw.bin"
 #define GS_ARC_L2_FW_SIZE_BYTES 0xF000
@@ -158,42 +157,6 @@ int wait_reg32_with_timeout(u8 __iomem* reset_unit_regs, u8 __iomem* reg,
 	}
 }
 
-int arc_msg_poll_completion(u8 __iomem* reset_unit_regs, u8 __iomem* msg_reg,
-			    u32 msg_code, u32 timeout_us, u16* exit_code) {
-	// Scale poll_period for around 100 polls, and at least 10 us
-	u32 poll_period_us = max((u32)10, timeout_us / 100);
-
-	ktime_t end_time = ktime_add_us(ktime_get(), timeout_us);
-
-	while (1) {
-		u32 read_val = ioread32(msg_reg);
-
-		if ((read_val & 0xffff) == msg_code){
-			if(exit_code){
-				*exit_code = read_val >> 16;
-			}
-			return 0;
-		}
-
-		if (read_val == 0xFFFFFFFFu && is_hardware_hung(NULL, reset_unit_regs)){
-			pr_debug("Tenstorrent Device is hung executing message: %08X.", msg_code);
-			return -3;
-		}
-		
-		if(read_val == 0xFFFFFFFFu){
-			pr_debug("Tenstorrent FW message unrecognized: %08X.", msg_code);
-			return -2;
-		}
-
-		if (ktime_after(ktime_get(), end_time)){
-			pr_debug("Tenstorrent FW message timeout: %08X.", msg_code);
-			return -1;
-		}
-
-		usleep_range(poll_period_us, 2 * poll_period_us);
-	}
-}
-
 static bool arc_l2_is_running(u8 __iomem* reset_unit_regs) {
 	u32 post_code = ioread32(reset_unit_regs + POST_CODE_REG);
 	return ((post_code & POST_CODE_ARC_L2_MASK) == POST_CODE_ARC_L2);
@@ -201,7 +164,7 @@ static bool arc_l2_is_running(u8 __iomem* reset_unit_regs) {
 
 bool grayskull_send_arc_fw_message_with_args(u8 __iomem* reset_unit_regs,
 					    u8 message_id, u16 arg0, u16 arg1,
-					    u32 timeout_us, u16* exit_code) {
+					    u32 timeout_us) {
 	void __iomem *args_reg = reset_unit_regs + SCRATCH_REG(3);
 	void __iomem *message_reg = reset_unit_regs + SCRATCH_REG(5);
 	void __iomem *arc_misc_cntl_reg = reset_unit_regs + ARC_MISC_CNTL_REG;
@@ -221,15 +184,16 @@ bool grayskull_send_arc_fw_message_with_args(u8 __iomem* reset_unit_regs,
 	arc_misc_cntl = ioread32(arc_misc_cntl_reg);
 	iowrite32(arc_misc_cntl | ARC_MISC_CNTL_IRQ0_MASK, arc_misc_cntl_reg);
 
-	if (arc_msg_poll_completion(reset_unit_regs, message_reg, message_id, timeout_us, exit_code) < 0) {
+	if (wait_reg32_with_timeout(reset_unit_regs, message_reg, message_id, timeout_us) < 0) {
+		pr_warn("Tenstorrent FW message timeout: %08X.\n", (unsigned int)message_id);
 		return false;
 	} else {
 		return true;
 	}
 }
 
-bool grayskull_send_arc_fw_message(u8 __iomem* reset_unit_regs, u8 message_id, u32 timeout_us, u16* exit_code) {
-	return grayskull_send_arc_fw_message_with_args(reset_unit_regs, message_id, 0, 0, timeout_us, exit_code);
+bool grayskull_send_arc_fw_message(u8 __iomem* reset_unit_regs, u8 message_id, u32 timeout_us) {
+	return grayskull_send_arc_fw_message_with_args(reset_unit_regs, message_id, 0, 0, timeout_us);
 }
 
 static int grayskull_load_arc_fw(struct grayskull_device *gs_dev) {
@@ -610,68 +574,10 @@ static void grayskull_noc_init(struct grayskull_device *gs_dev) {
 bool grayskull_shutdown_firmware(struct pci_dev *pdev, u8 __iomem* reset_unit_regs) {
 	if (is_hardware_hung(pdev, reset_unit_regs))
 		return false;
-	
-	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_ASTATE3, 10000, NULL))
+
+	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_ASTATE3, 10000))
 		return false;
 	return true;
-}
-
-static bool reset_device(struct grayskull_device *gs_dev) {
-	struct pci_dev *pdev = gs_dev->tt.pdev;
-	struct pci_dev *bridge_dev = pci_upstream_bridge(pdev);
-
-	unsigned int i;
-
-	if (reset_limit == 0)
-		return true;
-
-	for (i = 0; i < reset_limit; i++) {
-		u16 target_link_speed;
-		u16 subsys_vendor_id;
-		u16 tt_vendor_id;
-		u16 bridge_ctrl;
-		u16 last_retry;
-		u16 exit_code;
-
-		pcie_capability_read_word(bridge_dev, PCI_EXP_LNKCTL2,&target_link_speed);
-		target_link_speed = target_link_speed & PCI_EXP_LNKCTL2_TLS;
-
-		
-		pci_read_config_word(bridge_dev, PCI_SUBSYSTEM_VENDOR_ID, &subsys_vendor_id);
-
-		last_retry = (i == (reset_limit - 1));
-		grayskull_send_arc_fw_message_with_args(gs_dev->reset_unit_regs, GS_FW_MSG_PCIE_RETRAIN, 
-			target_link_speed | (last_retry <<15), subsys_vendor_id, 10000, &exit_code);
-
-		if (exit_code == 0) {
-			pr_debug("device link up successfully after %u iterations.\n", i);
-			return true;
-		} else {
-			pr_debug("device link up unsuccessfully on iteration %u.\n", i);
-		}
-		
-		pci_save_state(gs_dev->tt.pdev);
-
-		// reset link - like pci_reset_secondary_bus, but we don't want the full 1s delay.
-		pci_read_config_word(bridge_dev, PCI_BRIDGE_CONTROL, &bridge_ctrl);
-		pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl | PCI_BRIDGE_CTL_BUS_RESET);
-
-		msleep(2);
-		pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl);
-		msleep(500);
-
-		// wait for link to be ready		
-		pci_read_config_word(pdev, PCI_VENDOR_ID, &tt_vendor_id);
-		while(tt_vendor_id != PCI_VENDOR_ID_TENSTORRENT){
-			pci_read_config_word(pdev, PCI_VENDOR_ID, &tt_vendor_id);
-			msleep(100);	
-		}
-
-		pr_debug("device link up successful\n");
-		pci_restore_state(gs_dev->tt.pdev);
-	}
-
-	return false;
 }
 
 bool grayskull_init(struct tenstorrent_device *tt_dev) {
@@ -698,16 +604,11 @@ bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
 	if (arc_l2_is_running(gs_dev->reset_unit_regs)) {
-		grayskull_send_arc_fw_message(gs_dev->reset_unit_regs, GS_FW_MSG_ASTATE0, 10000, NULL);
+		grayskull_send_arc_fw_message(gs_dev->reset_unit_regs, GS_FW_MSG_ASTATE0, 10000);
 	} else if (!arc_fw_init) {
 		pr_info("ARC initialization skipped.\n");
 		return true;
 	} else if (grayskull_arc_init(gs_dev) != 0) {
-		return false;
-	}
-
-	if(!reset_device(gs_dev)){
-		pr_err("Device failed to reset device.\n");
 		return false;
 	}
 
@@ -735,12 +636,12 @@ static void grayskull_last_release_handler(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 	grayskull_send_arc_fw_message(gs_dev->reset_unit_regs,
 					GS_FW_MSG_GO_LONG_IDLE,
-					10000, NULL);
+					10000);
 
 	// arg0 = 0 => release the PCIE mutex.
 	grayskull_send_arc_fw_message_with_args(gs_dev->reset_unit_regs,
 						GS_FW_MSG_TYPE_PCIE_MUTEX_ACQUIRE,
-						0, 0, 10000, NULL);
+						0, 0, 10000);
 }
 
 struct tenstorrent_device_class grayskull_class = {

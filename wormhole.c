@@ -60,7 +60,7 @@ static void update_device_index(struct wormhole_device *wh_dev) {
 	grayskull_send_arc_fw_message_with_args(reset_unit_regs(wh_dev),
 						WH_FW_MSG_PCIE_INDEX,
 						wh_dev->tt.ordinal | INDEX_VALID, 0,
-						10*1000, NULL);
+						10*1000);
 }
 
 static bool wormhole_init(struct tenstorrent_device *tt_dev) {

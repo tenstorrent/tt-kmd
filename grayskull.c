@@ -103,9 +103,6 @@
 #define ROUTER_CLOCK_GATING_ENABLE	(1u << 0)
 #define ROUTER_MAX_BACKOFF_EXP		(0xFu << 8)
 
-// Define Tentorrent Vendor ID
-#define TT_VENDOR_ID 0x1e52
-
 struct TLB_16M_REG {
 	union {
 		struct {
@@ -665,7 +662,7 @@ static bool reset_device(struct grayskull_device *gs_dev) {
 
 		// wait for link to be ready		
 		pci_read_config_word(pdev, PCI_VENDOR_ID, &tt_vendor_id);
-		while(tt_vendor_id != TT_VENDOR_ID){
+		while(tt_vendor_id != PCI_VENDOR_ID_TENSTORRENT){
 			pci_read_config_word(pdev, PCI_VENDOR_ID, &tt_vendor_id);
 			msleep(100);	
 		}

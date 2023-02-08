@@ -172,7 +172,9 @@ int arc_msg_poll_completion(u8 __iomem* reset_unit_regs, u8 __iomem* msg_reg,
 		u32 read_val = ioread32(msg_reg);
 
 		if ((read_val & 0xffff) == msg_code){
-			*exit_code = read_val >> 16;
+			if(exit_code){
+				*exit_code = read_val >> 16;
+			}
 			return 0;
 		}
 
@@ -609,12 +611,10 @@ static void grayskull_noc_init(struct grayskull_device *gs_dev) {
 
 // This is shared with wormhole.
 bool grayskull_shutdown_firmware(struct pci_dev *pdev, u8 __iomem* reset_unit_regs) {
-	u16 exit_code;
-
 	if (is_hardware_hung(pdev, reset_unit_regs))
 		return false;
 	
-	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_ASTATE3, 10000, &exit_code))
+	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_ASTATE3, 10000, NULL))
 		return false;
 	return true;
 }
@@ -701,8 +701,7 @@ bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
 	if (arc_l2_is_running(gs_dev->reset_unit_regs)) {
-		u16 exit_code;
-		grayskull_send_arc_fw_message(gs_dev->reset_unit_regs, GS_FW_MSG_ASTATE0, 10000, &exit_code);
+		grayskull_send_arc_fw_message(gs_dev->reset_unit_regs, GS_FW_MSG_ASTATE0, 10000, NULL);
 	} else if (!arc_fw_init) {
 		pr_info("ARC initialization skipped.\n");
 		return true;
@@ -737,15 +736,14 @@ void grayskull_cleanup(struct tenstorrent_device *tt_dev) {
 
 static void grayskull_last_release_handler(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
-	u16 exit_code;
 	grayskull_send_arc_fw_message(gs_dev->reset_unit_regs,
 					GS_FW_MSG_GO_LONG_IDLE,
-					10000, &exit_code);
+					10000, NULL);
 
 	// arg0 = 0 => release the PCIE mutex.
 	grayskull_send_arc_fw_message_with_args(gs_dev->reset_unit_regs,
 						GS_FW_MSG_TYPE_PCIE_MUTEX_ACQUIRE,
-						0, 0, 10000, &exit_code);
+						0, 0, 10000, NULL);
 }
 
 struct tenstorrent_device_class grayskull_class = {

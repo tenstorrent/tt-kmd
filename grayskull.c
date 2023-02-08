@@ -177,7 +177,12 @@ int arc_msg_poll_completion(u8 __iomem* reset_unit_regs, u8 __iomem* msg_reg,
 		}
 
 		if (read_val == 0xFFFFFFFFu && is_hardware_hung(NULL, reset_unit_regs)){
-			pr_debug("Tenstorrent FW message unrecognize: %08X.", msg_code);
+			pr_debug("Tenstorrent Device is hung executing message: %08X.", msg_code);
+			return -3;
+		}
+		
+		if(read_val == 0xFFFFFFFFu){
+			pr_debug("Tenstorrent FW message unrecognized: %08X.", msg_code);
 			return -2;
 		}
 

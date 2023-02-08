@@ -1,9 +1,11 @@
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/types.h>
 
 #include "wormhole.h"
 #include "grayskull.h"
 
 #define WH_FW_MSG_PCIE_INDEX 0x51
+#define WH_FW_MSG_PCIE_RETRAIN 0xB6
 
 // The iATU can be used to match & remap PCIE transactions.
 #define IATU_BASE 0x1200	// Relative to the start of BAR2
@@ -60,7 +62,7 @@ static void update_device_index(struct wormhole_device *wh_dev) {
 	grayskull_send_arc_fw_message_with_args(reset_unit_regs(wh_dev),
 						WH_FW_MSG_PCIE_INDEX,
 						wh_dev->tt.ordinal | INDEX_VALID, 0,
-						10*1000);
+						10*1000, NULL);
 }
 
 static bool wormhole_init(struct tenstorrent_device *tt_dev) {
@@ -85,6 +87,9 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 
 	map_bar4_to_system_registers(wh_dev);
 	update_device_index(wh_dev);
+
+	if (arc_l2_is_running(reset_unit_regs(wh_dev)))
+		complete_pcie_init(&wh_dev->tt, reset_unit_regs(wh_dev), WH_FW_MSG_PCIE_RETRAIN);
 
 	return true;
 }

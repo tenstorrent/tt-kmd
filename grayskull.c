@@ -604,10 +604,11 @@ static void grayskull_noc_init(struct grayskull_device *gs_dev) {
 
 // This is shared with wormhole.
 bool grayskull_shutdown_firmware(struct pci_dev *pdev, u8 __iomem* reset_unit_regs) {
+	u16 exit_code;
+
 	if (is_hardware_hung(pdev, reset_unit_regs))
 		return false;
-
-	u16 exit_code;
+	
 	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_ASTATE3, 10000, &exit_code))
 		return false;
 	return true;

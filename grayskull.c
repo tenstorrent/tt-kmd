@@ -68,6 +68,7 @@
 #define GS_FW_MSG_ASTATE1 0xA1
 #define GS_FW_MSG_ASTATE3 0xA3
 #define GS_FW_MSG_ASTATE5 0xA5
+#define GS_FW_MSG_PCIE_RETRAIN 0xA7
 
 #define GS_ARC_L2_FW_NAME "tenstorrent_gs_arc_l2_fw.bin"
 #define GS_ARC_L2_FW_SIZE_BYTES 0xF000
@@ -101,6 +102,9 @@
 // ROUTER_CFG_0
 #define ROUTER_CLOCK_GATING_ENABLE	(1u << 0)
 #define ROUTER_MAX_BACKOFF_EXP		(0xFu << 8)
+
+// Define Tentorrent Vendor ID
+#define TT_VENDOR_ID 0x1e52
 
 struct TLB_16M_REG {
 	union {
@@ -580,6 +584,61 @@ bool grayskull_shutdown_firmware(struct pci_dev *pdev, u8 __iomem* reset_unit_re
 	return true;
 }
 
+static bool reset_device(struct grayskull_device *gs_dev) {
+	struct pci_dev *pdev = gs_dev->tt.pdev;
+	struct pci_dev *bridge_dev = pci_upstream_bridge(pdev);
+
+	unsigned int i;
+
+	if (reset_limit == 0)
+		return true;
+
+	for (i = 0; i < reset_limit; i++) {
+		u16 target_link_speed;
+		u16 subsys_vendor_id;
+		u16 tt_vendor_id;
+		u16 bridge_ctrl;
+
+		pcie_capability_read_word(bridge_dev, PCI_EXP_LNKCTL2,&target_link_speed);
+		target_link_speed = target_link_speed & PCI_EXP_LNKCTL2_TLS;
+
+		
+		pci_read_config_word(bridge_dev, PCI_SUBSYSTEM_VENDOR_ID, &subsys_vendor_id);
+
+		if (grayskull_send_arc_fw_message_with_args(gs_dev->reset_unit_regs,
+						GS_FW_MSG_PCIE_RETRAIN,
+						target_link_speed, subsys_vendor_id, 10000)) {
+			pr_debug("device link up successfully after %u iterations.\n", i);
+			return true;
+			
+		} else {
+			pr_debug("device link up unsuccessfully on iteration %u.\n", i);
+		}
+		
+		pci_save_state(gs_dev->tt.pdev);
+
+		// reset link - like pci_reset_secondary_bus, but we don't want the full 1s delay.
+		pci_read_config_word(bridge_dev, PCI_BRIDGE_CONTROL, &bridge_ctrl);
+		pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl | PCI_BRIDGE_CTL_BUS_RESET);
+
+		msleep(2);
+		pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl);
+		msleep(500);
+
+		// wait for link to be ready		
+		pci_read_config_word(pdev, PCI_VENDOR_ID, &tt_vendor_id);
+		while(tt_vendor_id != TT_VENDOR_ID){
+			pci_read_config_word(pdev, PCI_VENDOR_ID, &tt_vendor_id);
+			msleep(100);	
+		}
+
+		pr_debug("device link up successful\n");
+		pci_restore_state(gs_dev->tt.pdev);
+	}
+
+	return false;
+}
+
 bool grayskull_init(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
@@ -609,6 +668,11 @@ bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 		pr_info("ARC initialization skipped.\n");
 		return true;
 	} else if (grayskull_arc_init(gs_dev) != 0) {
+		return false;
+	}
+
+	if(!reset_device(gs_dev)){
+		pr_err("Device failed to reset device.\n");
 		return false;
 	}
 

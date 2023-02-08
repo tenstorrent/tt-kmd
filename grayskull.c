@@ -616,7 +616,7 @@ bool grayskull_shutdown_firmware(struct pci_dev *pdev, u8 __iomem* reset_unit_re
 	return true;
 }
 
-static bool reset_device(struct grayskull_device *gs_dev) {
+static bool complete_pcie_init(struct grayskull_device *gs_dev) {
 	struct pci_dev *pdev = gs_dev->tt.pdev;
 	struct pci_dev *bridge_dev = pci_upstream_bridge(pdev);
 
@@ -703,6 +703,11 @@ bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 		pr_info("ARC initialization skipped.\n");
 		return true;
 	} else if (grayskull_arc_init(gs_dev) != 0) {
+		return false;
+	}
+
+	if(!complete_pcie_init(gs_dev)){
+		pr_err("Failed to reset Tenstorrent device.\n");
 		return false;
 	}
 

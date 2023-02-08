@@ -56,11 +56,12 @@ static u8 __iomem *reset_unit_regs(struct wormhole_device *wh_dev) {
 
 static void update_device_index(struct wormhole_device *wh_dev) {
 	static const u8 INDEX_VALID = 0x80;
+	u16 exit_code;
 
 	grayskull_send_arc_fw_message_with_args(reset_unit_regs(wh_dev),
 						WH_FW_MSG_PCIE_INDEX,
 						wh_dev->tt.ordinal | INDEX_VALID, 0,
-						10*1000);
+						10*1000, &exit_code);
 }
 
 static bool wormhole_init(struct tenstorrent_device *tt_dev) {

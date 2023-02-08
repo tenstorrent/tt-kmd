@@ -616,6 +616,25 @@ bool grayskull_shutdown_firmware(struct pci_dev *pdev, u8 __iomem* reset_unit_re
 	return true;
 }
 
+bool poll_pcie_link_up_completion(struct pci_dev *pdev, u32 timeout_ms) {
+	u16 tt_vendor_id;
+	ktime_t end_time = ktime_add_ms(ktime_get(), timeout_ms);
+
+	pci_read_config_word(pdev, PCI_VENDOR_ID, &tt_vendor_id);
+	while (tt_vendor_id != PCI_VENDOR_ID_TENSTORRENT) {
+		if (ktime_after(ktime_get(), end_time)){
+			pr_debug("device timeout during link up.\n");
+			return false;
+		}
+
+		pci_read_config_word(pdev, PCI_VENDOR_ID, &tt_vendor_id);
+		msleep(100);
+	}
+
+	pr_debug("device link up successfully.\n");
+	return true;
+}
+
 static bool complete_pcie_init(struct grayskull_device *gs_dev) {
 	struct pci_dev *pdev = gs_dev->tt.pdev;
 	struct pci_dev *bridge_dev = pci_upstream_bridge(pdev);
@@ -628,7 +647,6 @@ static bool complete_pcie_init(struct grayskull_device *gs_dev) {
 	for (i = 0; i < reset_limit; i++) {
 		u16 target_link_speed;
 		u16 subsys_vendor_id;
-		u16 tt_vendor_id;
 		u16 bridge_ctrl;
 		u16 last_retry;
 		u16 exit_code;
@@ -641,7 +659,7 @@ static bool complete_pcie_init(struct grayskull_device *gs_dev) {
 
 		last_retry = (i == reset_limit - 1);
 		grayskull_send_arc_fw_message_with_args(gs_dev->reset_unit_regs, GS_FW_MSG_PCIE_RETRAIN, 
-			target_link_speed | (last_retry <<15), subsys_vendor_id, 10000, &exit_code);
+			target_link_speed | (last_retry << 15), subsys_vendor_id, 10000, &exit_code);
 
 		if (exit_code == 0) {
 			pr_debug("device link up successfully after %u iterations.\n", i);
@@ -660,14 +678,9 @@ static bool complete_pcie_init(struct grayskull_device *gs_dev) {
 		pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl);
 		msleep(500);
 
-		// wait for link to be ready		
-		pci_read_config_word(pdev, PCI_VENDOR_ID, &tt_vendor_id);
-		while(tt_vendor_id != PCI_VENDOR_ID_TENSTORRENT){
-			pci_read_config_word(pdev, PCI_VENDOR_ID, &tt_vendor_id);
-			msleep(100);	
-		}
+		if (!poll_pcie_link_up_completion(pdev, 10000))
+			return false;
 
-		pr_debug("device link up successful\n");
 		pci_restore_state(gs_dev->tt.pdev);
 	}
 

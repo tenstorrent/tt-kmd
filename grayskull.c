@@ -622,7 +622,7 @@ bool poll_pcie_link_up_completion(struct pci_dev *pdev, u32 timeout_ms) {
 
 	pci_read_config_word(pdev, PCI_VENDOR_ID, &tt_vendor_id);
 	while (tt_vendor_id != PCI_VENDOR_ID_TENSTORRENT) {
-		if (ktime_after(ktime_get(), end_time)){
+		if (ktime_after(ktime_get(), end_time)) {
 			pr_debug("device timeout during link up.\n");
 			return false;
 		}

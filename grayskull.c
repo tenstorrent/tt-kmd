@@ -598,6 +598,7 @@ static bool reset_device(struct grayskull_device *gs_dev) {
 		u16 subsys_vendor_id;
 		u16 tt_vendor_id;
 		u16 bridge_ctrl;
+		u16 last_retry;
 
 		pcie_capability_read_word(bridge_dev, PCI_EXP_LNKCTL2,&target_link_speed);
 		target_link_speed = target_link_speed & PCI_EXP_LNKCTL2_TLS;
@@ -605,9 +606,10 @@ static bool reset_device(struct grayskull_device *gs_dev) {
 		
 		pci_read_config_word(bridge_dev, PCI_SUBSYSTEM_VENDOR_ID, &subsys_vendor_id);
 
+		last_retry = i == (reset_limit - 1);
 		if (grayskull_send_arc_fw_message_with_args(gs_dev->reset_unit_regs,
 						GS_FW_MSG_PCIE_RETRAIN,
-						target_link_speed, subsys_vendor_id, 10000)) {
+						target_link_speed | (last_retry <<15), subsys_vendor_id, 10000)) {
 			pr_debug("device link up successfully after %u iterations.\n", i);
 			return true;
 			

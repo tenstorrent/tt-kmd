@@ -157,6 +157,42 @@ int wait_reg32_with_timeout(u8 __iomem* reset_unit_regs, u8 __iomem* reg,
 	}
 }
 
+int arc_msg_poll_completion(u8 __iomem* reset_unit_regs, u8 __iomem* msg_reg,
+			    u32 msg_code, u32 timeout_us, u16* exit_code) {
+	// Scale poll_period for around 100 polls, and at least 10 us
+	u32 poll_period_us = max((u32)10, timeout_us / 100);
+
+	ktime_t end_time = ktime_add_us(ktime_get(), timeout_us);
+
+	while (1) {
+		u32 read_val = ioread32(msg_reg);
+
+		if ((read_val & 0xffff) == msg_code) {
+			if (exit_code) {
+				*exit_code = read_val >> 16;
+			}
+			return 0;
+		}
+
+		if (read_val == 0xFFFFFFFFu && is_hardware_hung(NULL, reset_unit_regs)) {
+			pr_debug("Tenstorrent Device is hung executing message: %08X.", msg_code);
+			return -3;
+		}
+		
+		if (read_val == 0xFFFFFFFFu) {
+			pr_debug("Tenstorrent FW message unrecognized: %08X.", msg_code);
+			return -2;
+		}
+
+		if (ktime_after(ktime_get(), end_time)) {
+			pr_debug("Tenstorrent FW message timeout: %08X.", msg_code);
+			return -1;
+		}
+
+		usleep_range(poll_period_us, 2 * poll_period_us);
+	}
+}
+
 static bool arc_l2_is_running(u8 __iomem* reset_unit_regs) {
 	u32 post_code = ioread32(reset_unit_regs + POST_CODE_REG);
 	return ((post_code & POST_CODE_ARC_L2_MASK) == POST_CODE_ARC_L2);
@@ -578,6 +614,64 @@ bool grayskull_shutdown_firmware(struct pci_dev *pdev, u8 __iomem* reset_unit_re
 	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_ASTATE3, 10000))
 		return false;
 	return true;
+}
+
+static bool reset_device(struct grayskull_device *gs_dev) {
+	struct pci_dev *pdev = gs_dev->tt.pdev;
+	struct pci_dev *bridge_dev = pci_upstream_bridge(pdev);
+
+	unsigned int i;
+
+	if (reset_limit == 0)
+		return true;
+
+	for (i = 0; i < reset_limit; i++) {
+		u16 target_link_speed;
+		u16 subsys_vendor_id;
+		u16 tt_vendor_id;
+		u16 bridge_ctrl;
+		u16 last_retry;
+		u16 exit_code;
+
+		pcie_capability_read_word(bridge_dev, PCI_EXP_LNKCTL2,&target_link_speed);
+		target_link_speed = target_link_speed & PCI_EXP_LNKCTL2_TLS;
+
+		
+		pci_read_config_word(bridge_dev, PCI_SUBSYSTEM_VENDOR_ID, &subsys_vendor_id);
+
+		last_retry = (i == reset_limit - 1);
+		grayskull_send_arc_fw_message_with_args(gs_dev->reset_unit_regs, GS_FW_MSG_PCIE_RETRAIN, 
+			target_link_speed | (last_retry <<15), subsys_vendor_id, 10000, &exit_code);
+
+		if (exit_code == 0) {
+			pr_debug("device link up successfully after %u iterations.\n", i);
+			return true;
+		} else {
+			pr_debug("device link up unsuccessfully on iteration %u.\n", i);
+		}
+		
+		pci_save_state(gs_dev->tt.pdev);
+
+		// reset link - like pci_reset_secondary_bus, but we don't want the full 1s delay.
+		pci_read_config_word(bridge_dev, PCI_BRIDGE_CONTROL, &bridge_ctrl);
+		pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl | PCI_BRIDGE_CTL_BUS_RESET);
+
+		msleep(2);
+		pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl);
+		msleep(500);
+
+		// wait for link to be ready		
+		pci_read_config_word(pdev, PCI_VENDOR_ID, &tt_vendor_id);
+		while(tt_vendor_id != PCI_VENDOR_ID_TENSTORRENT){
+			pci_read_config_word(pdev, PCI_VENDOR_ID, &tt_vendor_id);
+			msleep(100);	
+		}
+
+		pr_debug("device link up successful\n");
+		pci_restore_state(gs_dev->tt.pdev);
+	}
+
+	return false;
 }
 
 bool grayskull_init(struct tenstorrent_device *tt_dev) {

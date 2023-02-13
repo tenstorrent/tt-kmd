@@ -25,29 +25,8 @@ cp "$ARCHIVE" "$TARGET/$ARCHIVE_BASENAME"
 
 INSTALL_SCRIPT="$TARGET/install_ttkmd_$PACKAGE_VERSION.bash"
 
-sed "s/PACKAGE_VERSION/$PACKAGE_VERSION/g;s/ARCHIVE/$ARCHIVE_BASENAME/g" <<"EOF" > "$INSTALL_SCRIPT"
-#!/bin/bash
-
-if (( $EUID != 0 )); then
-    echo "Run as root!"
-    exit -1
-fi
-
-installed=($(sudo dkms status | awk -F "," '{ print $2 }'))
-
-# Uninstall previous installations
-for ver in "${installed[@]}"
-do
-	dkms remove tenstorrent/$ver --all
-done
-
-dkms ldtarball `dirname $0`/ARCHIVE
-dkms install tenstorrent/PACKAGE_VERSION
-
-echo "Reloading tenstorrent module"
-modprobe -r tenstorrent
-modprobe tenstorrent
-EOF
+cat tools/installer-header.sh > "$INSTALL_SCRIPT"
+gzip -cn9 "$ARCHIVE" >> "$INSTALL_SCRIPT"
 
 chmod a+x "$INSTALL_SCRIPT"
 

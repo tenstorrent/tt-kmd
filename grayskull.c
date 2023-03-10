@@ -68,7 +68,7 @@
 #define GS_FW_MSG_ASTATE1 0xA1
 #define GS_FW_MSG_ASTATE3 0xA3
 #define GS_FW_MSG_ASTATE5 0xA5
-#define GS_FW_MSG_PCIE_RETRAIN 0xA7
+#define GS_FW_MSG_PCIE_RETRAIN 0xB6
 
 #define GS_ARC_L2_FW_NAME "tenstorrent_gs_arc_l2_fw.bin"
 #define GS_ARC_L2_FW_SIZE_BYTES 0xF000

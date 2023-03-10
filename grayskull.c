@@ -68,7 +68,7 @@
 #define GS_FW_MSG_ASTATE1 0xA1
 #define GS_FW_MSG_ASTATE3 0xA3
 #define GS_FW_MSG_ASTATE5 0xA5
-#define GS_FW_MSG_PCIE_RETRAIN 0xB6
+#define FW_MSG_PCIE_RETRAIN 0xB6
 
 #define GS_ARC_L2_FW_NAME "tenstorrent_gs_arc_l2_fw.bin"
 #define GS_ARC_L2_FW_SIZE_BYTES 0xF000
@@ -634,7 +634,7 @@ bool poll_pcie_link_up(struct pci_dev *pdev, u32 timeout_ms) {
 	return true;
 }
 
-bool complete_pcie_init(struct tenstorrent_device *tt_dev, u8 __iomem* reset_unit_regs, u32 msg_code) {
+bool complete_pcie_init(struct tenstorrent_device *tt_dev, u8 __iomem* reset_unit_regs) {
 	struct pci_dev *pdev = tt_dev->pdev;
 	struct pci_dev *bridge_dev = pci_upstream_bridge(pdev);
 
@@ -655,7 +655,7 @@ bool complete_pcie_init(struct tenstorrent_device *tt_dev, u8 __iomem* reset_uni
 		
 		pci_read_config_word(bridge_dev, PCI_SUBSYSTEM_VENDOR_ID, &subsys_vendor_id);
 
-		if (!grayskull_send_arc_fw_message_with_args(reset_unit_regs, msg_code, 
+		if (!grayskull_send_arc_fw_message_with_args(reset_unit_regs, FW_MSG_PCIE_RETRAIN, 
 			target_link_speed | (last_retry << 15), subsys_vendor_id, 200000, &exit_code)) 
 			return false;
 
@@ -719,7 +719,7 @@ bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 		return false;
 	}
 
-	complete_pcie_init(&gs_dev->tt, gs_dev->reset_unit_regs, GS_FW_MSG_PCIE_RETRAIN);
+	complete_pcie_init(&gs_dev->tt, gs_dev->reset_unit_regs);
 
 	grayskull_harvesting_init(gs_dev);
 

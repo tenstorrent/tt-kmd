@@ -86,10 +86,11 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
 	map_bar4_to_system_registers(wh_dev);
-	update_device_index(wh_dev);
 
-	if (arc_l2_is_running(reset_unit_regs(wh_dev)))
+	if (arc_l2_is_running(reset_unit_regs(wh_dev))) {
+		update_device_index(wh_dev);
 		complete_pcie_init(&wh_dev->tt, reset_unit_regs(wh_dev));
+	}
 
 	return true;
 }

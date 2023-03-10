@@ -17,6 +17,7 @@ struct grayskull_device {
 
 bool grayskull_shutdown_firmware(struct pci_dev *pdev, u8 __iomem* reset_unit_regs);
 
+bool grayskull_send_arc_fw_message(u8 __iomem* reset_unit_regs, u8 message_id, u32 timeout_us, u16* exit_code);
 bool grayskull_send_arc_fw_message_with_args(u8 __iomem* reset_unit_regs,
 					     u8 message_id, u16 arg0, u16 arg1,
 					     u32 timeout_us, u16* exit_code);

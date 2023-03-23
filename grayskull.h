@@ -24,5 +24,6 @@ bool grayskull_send_arc_fw_message_with_args(u8 __iomem* reset_unit_regs,
 bool poll_pcie_link_up_completion(struct pci_dev *pdev, u32 timeout_ms);
 bool complete_pcie_init(struct tenstorrent_device *tt_dev, u8 __iomem* reset_unit_regs);
 bool arc_l2_is_running(u8 __iomem* reset_unit_regs);
+void grayskull_send_curr_date(u8 __iomem* reset_unit_regs);
 
 #endif

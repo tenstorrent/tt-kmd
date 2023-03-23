@@ -3,6 +3,7 @@
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/firmware.h>
+#include <linux/timekeeping.h>
 #include <asm/io.h>
 
 #include "module.h"
@@ -69,6 +70,7 @@
 #define GS_FW_MSG_ASTATE3 0xA3
 #define GS_FW_MSG_ASTATE5 0xA5
 #define FW_MSG_PCIE_RETRAIN 0xB6
+#define GS_FW_MSG_CURR_DATE 0xB7
 
 #define GS_ARC_L2_FW_NAME "tenstorrent_gs_arc_l2_fw.bin"
 #define GS_ARC_L2_FW_SIZE_BYTES 0xF000
@@ -687,6 +689,63 @@ bool complete_pcie_init(struct tenstorrent_device *tt_dev, u8 __iomem* reset_uni
 	return false;
 }
 
+static void month_lookup(u32 days_into_year, u32* day, u32* month) {
+    static const u8 days_in_month[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    u32 i;
+
+    u32 d_tmp = days_into_year;
+
+    for (i = 0; i < ARRAY_SIZE(days_in_month); i++) {
+	if (d_tmp < days_in_month[i])
+		break;
+
+	d_tmp -= days_in_month[i];
+    }
+
+    *day = d_tmp;
+    *month = i;
+}
+
+void grayskull_send_curr_date(u8 __iomem* reset_unit_regs) {
+	const u32 SECONDS_TO_2020 = 1577836800; // date -d "Jan 1, 2020 UTC" +"%s"
+	const u32 DAYS_PER_FOUR_YEARS = 4*365 + 1;
+	const u32 DAYS_TO_FEB_29 = 31 + 28;
+	const u32 SECONDS_PER_DAY = 86400;
+
+	u32 day, month;
+	u32 days_into_year;
+	u32 Y, M, DD, HH, MM, packed_datetime_low, packed_datetime_high;
+
+	u32 seconds_since_2020 = ktime_get_real_seconds() - SECONDS_TO_2020;
+
+	u32 seconds_into_day = seconds_since_2020 % SECONDS_PER_DAY;
+	u32 days_since_2020 = (seconds_since_2020 - seconds_into_day) / SECONDS_PER_DAY;
+
+	u32 four_years = days_since_2020 / DAYS_PER_FOUR_YEARS;
+	u32 days_into_four_years = days_since_2020 % DAYS_PER_FOUR_YEARS;
+
+	bool leap_day = (days_into_four_years == DAYS_TO_FEB_29);
+	days_into_four_years -= (days_into_four_years >= DAYS_TO_FEB_29);
+	days_into_year = days_into_four_years % 365;
+
+	month_lookup(days_into_year, &day, &month);
+
+	day += leap_day;
+
+	Y = 4 * four_years + days_into_four_years / 365;
+	M = month + 1;
+	DD = day + 1;
+
+	HH = seconds_into_day / 3600;
+	MM = seconds_into_day / 60 % 60;
+
+	packed_datetime_low = (HH << 8) | MM;
+	packed_datetime_high = (Y << 12) | (M << 8) | DD;
+
+	grayskull_send_arc_fw_message_with_args(reset_unit_regs, GS_FW_MSG_CURR_DATE,
+						packed_datetime_low, packed_datetime_high, 1000, NULL);
+}
+
 bool grayskull_init(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
@@ -718,6 +777,8 @@ bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 	} else if (grayskull_arc_init(gs_dev) != 0) {
 		return false;
 	}
+
+	grayskull_send_curr_date(gs_dev->reset_unit_regs);
 
 	complete_pcie_init(&gs_dev->tt, gs_dev->reset_unit_regs);
 

@@ -89,6 +89,7 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 	map_bar4_to_system_registers(wh_dev);
 
 	if (arc_l2_is_running(reset_unit_regs(wh_dev))) {
+		grayskull_send_curr_date(reset_unit_regs(wh_dev));
 		grayskull_send_arc_fw_message(reset_unit_regs(wh_dev), WH_FW_MSG_ASTATE0, 10000, NULL);
 		update_device_index(wh_dev);
 		complete_pcie_init(&wh_dev->tt, reset_unit_regs(wh_dev));

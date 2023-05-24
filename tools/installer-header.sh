@@ -16,7 +16,7 @@ dd "if=$0" iflag=skip_bytes skip=$embedded_file_offset 2> /dev/null | gzip -cd >
 
 driver_version=$(tar -xOf "$tmptar" ./dkms_source_tree/dkms.conf | sed -nE "s/^[[:space:]]*PACKAGE_VERSION[[:space:]]*=[[:space:]]*\"([^\"]+)\"/\\1/p")
 
-installed=($(dkms status | awk -F "," '{ print $2 }'))
+installed=($(dkms status | awk -F "[,:][[:blank:]]*" '$1 == "tenstorrent" { print $2 }'))
 
 # Uninstall previous installations
 for ver in "${installed[@]}"

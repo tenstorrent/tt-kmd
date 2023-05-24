@@ -2,15 +2,11 @@
 
 set -e
 
-if [ $# -ne 0 ]; then
-    echo "No command-line parameters are accepted."
-    exit 1
-fi
-
 TTDRIVER_REL="/mnt/motor/syseng/ttdriver-rel"
 
-if [ ! -d "$TTDRIVER_REL" ]; then
-    echo "No access to $TTDRIVER_REL, is motor mounted?"
+if [ $# -gt 1 ]; then
+    echo "Usage: make-motor-release [target-dir]"
+    echo "Default target-dir is ${TTDRIVER_REL}/DRIVER_VERSION."
     exit 1
 fi
 
@@ -18,7 +14,16 @@ PACKAGE_VERSION=$(sed -nE "s/^[[:space:]]*PACKAGE_VERSION[[:space:]]*=[[:space:]
 ARCHIVE=$(tools/make-source-release -m)
 ARCHIVE_BASENAME=$(basename "$ARCHIVE")
 
-TARGET="$TTDRIVER_REL/$PACKAGE_VERSION"
+if [ $# -eq 1 ]; then
+    TARGET="$1"
+else
+    if [ ! -d "$TTDRIVER_REL" ]; then
+        echo "No access to $TTDRIVER_REL, is motor mounted?"
+        exit 1
+    fi
+
+    TARGET="$TTDRIVER_REL/$PACKAGE_VERSION"
+fi
 
 mkdir -p "$TARGET"
 cp "$ARCHIVE" "$TARGET/$ARCHIVE_BASENAME"

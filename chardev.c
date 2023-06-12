@@ -169,7 +169,11 @@ int init_char_driver(unsigned int max_devices)
 	if (res < 0)
 		goto alloc_chrdev_region_failed;
 
+#if LINUX_VERSION_CODE >= 0x60400
+	tt_dev_class = class_create(TENSTORRENT);
+#else
 	tt_dev_class = class_create(THIS_MODULE, TENSTORRENT);
+#endif
 	if (IS_ERR(tt_dev_class)) {
 		tt_dev_class = NULL;
 		goto class_create_failed;

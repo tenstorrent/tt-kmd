@@ -16,11 +16,11 @@
 
 // In Linux 5.0, dma_alloc_coherent always zeroes memory and dma_zalloc_coherent
 // was removed.
-#if LINUX_VERSION_CODE < 0x50000
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
 #define dma_alloc_coherent dma_zalloc_coherent
 #endif
 
-#if LINUX_VERSION_CODE >= 0x050600
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
 static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsigned int gup_flags, struct page **pages)
 {
 	// Can't use pin_user_pages_fast(FOLL_LONGTERM) because it calls __gup_longterm_locked with vmas = NULL
@@ -37,7 +37,7 @@ static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsig
 	kvfree(vmas);
 	return ret;
 }
-#elif LINUX_VERSION_CODE >= 0x050200
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0)
 static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsigned int gup_flags, struct page **pages)
 {
 	// Can't use get_user_pages_fast(FOLL_LONGTERM) because it calls __gup_longterm_locked with vmas = NULL
@@ -54,7 +54,7 @@ static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsig
 	kvfree(vmas);
 	return ret;
 }
-#elif LINUX_VERSION_CODE >= 0x041404
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 4)
 static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsigned int gup_flags, struct page **pages)
 {
 	int ret;
@@ -79,14 +79,14 @@ static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsig
 }
 #endif
 
-#if LINUX_VERSION_CODE >= 0x050600
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
 // unpin_user_pages_dirty_lock is provided by the kernel.
-#elif LINUX_VERSION_CODE >= 0x050400
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
 static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npages, bool make_dirty)
 {
 	put_user_pages_dirty_lock(pages, npages, make_dirty);
 }
-#elif LINUX_VERSION_CODE >= 0x050200
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0)
 static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npages, bool make_dirty)
 {
 	if (make_dirty)
@@ -169,7 +169,7 @@ int init_char_driver(unsigned int max_devices)
 	if (res < 0)
 		goto alloc_chrdev_region_failed;
 
-#if LINUX_VERSION_CODE >= 0x60400
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 	tt_dev_class = class_create(TENSTORRENT);
 #else
 	tt_dev_class = class_create(THIS_MODULE, TENSTORRENT);

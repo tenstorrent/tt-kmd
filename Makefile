@@ -9,19 +9,19 @@ all: modules
 
 .PHONY: modules
 modules:
-	$(KMAKE) modules
+	+$(KMAKE) modules
 
 .PHONY: modules_install
 modules_install:
-	$(KMAKE) modules_install
+	+$(KMAKE) modules_install
 
 .PHONY: clean
 clean:
-	$(KMAKE) clean
+	+$(KMAKE) clean
 
 .PHONY: help
 help:
-	$(KMAKE) help
+	+$(KMAKE) help
 
 
 ifeq ($(VER),HEAD)

@@ -2,7 +2,7 @@ obj-m += tenstorrent.o
 tenstorrent-y := module.o chardev.o enumerate.o interrupt.o grayskull.o wormhole.o
 
 KDIR := /lib/modules/$(shell uname -r)/build
-KMAKE := $(MAKE) -C $(KDIR) M=$(PWD)
+KMAKE := $(MAKE) -C $(KDIR) M=$(CURDIR)
 
 .PHONY: all
 all: modules

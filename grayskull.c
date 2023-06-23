@@ -642,7 +642,7 @@ bool complete_pcie_init(struct tenstorrent_device *tt_dev, u8 __iomem* reset_uni
 
 	unsigned int i;
 
-	if (reset_limit == 0)
+	if (!bridge_dev || reset_limit == 0)
 		return true;
 
 	for (i = 0; i < reset_limit; i++) {

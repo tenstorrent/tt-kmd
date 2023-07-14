@@ -4,6 +4,7 @@
 void TestGetDeviceInfo(const EnumeratedDevice &dev);
 void TestQueryMappings(const EnumeratedDevice &dev);
 void TestDmaBuf(const EnumeratedDevice &dev);
+void TestPinPages(const EnumeratedDevice &dev);
 
 int main(int argc, char *argv[])
 {
@@ -13,6 +14,7 @@ int main(int argc, char *argv[])
         TestGetDeviceInfo(d);
         TestQueryMappings(d);
         TestDmaBuf(d);
+        TestPinPages(d);
     }
 
     return 0;

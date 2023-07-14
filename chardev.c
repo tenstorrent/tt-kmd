@@ -136,15 +136,20 @@ struct dmabuf {
 	u64 size;	// always a multiple of PAGE_SIZE
 };
 
+struct pinned_page_range {
+	struct list_head list;
+
+	unsigned long page_count;
+	struct page **pages;	// vmalloc/vfree
+};
+
 // This is our device-private data assocated with each open character device fd.
 // Accessed through struct file::private_data.
 struct chardev_private {
 	struct tenstorrent_device *device;
 	struct mutex mutex;
 	struct dmabuf dmabufs[TENSTORRENT_MAX_DMA_BUFS];
-
-	unsigned long pinned_page_count;
-	struct page **pinned_pages;
+	struct list_head pinnings;	// struct pinned_page_range.list
 };
 
 static dev_t tt_device_id;
@@ -493,6 +498,7 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 	unsigned long nr_pages;
 	struct page **pages;
 	int pages_pinned;
+	struct pinned_page_range *pinning;
 	long ret;
 	int i;
 	u32 bytes_to_copy;
@@ -511,13 +517,16 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 	if (!(in.flags & TENSTORRENT_PIN_PAGES_CONTIGUOUS))
 		return -EINVAL;
 
-	if (priv->pinned_page_count != 0)
-		return -EINVAL;
+	pinning = kmalloc(sizeof(*pinning), GFP_KERNEL);
+	if (!pinning)
+		return -ENOMEM;
 
 	nr_pages = PAGE_ALIGN(in.size) >> PAGE_SHIFT;
 	pages = vzalloc(nr_pages * sizeof(struct page *));
 	if (!pages) {
 		pr_err("vzalloc failed for %lu page pointers\n", nr_pages);
+		ret = -ENOMEM;
+		goto err_free_pinning;
 		return -ENOMEM;
 	}
 
@@ -525,7 +534,7 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 	if (pages_pinned < 0) {
 		pr_warn("pin_user_pages_longterm failed: %d\n", pages_pinned);
 		ret = pages_pinned;
-		goto err_vfree;
+		goto err_vfree_pages;
 	}
 
 	if (pages_pinned != nr_pages) {
@@ -542,19 +551,13 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 		}
 	}
 
-	mutex_lock(&priv->mutex);
-
-	if (priv->pinned_page_count != 0) {
-		mutex_unlock(&priv->mutex);
-		ret = -EINVAL;
-		goto err_unpin_pages;
-	}
-
-	priv->pinned_page_count = pages_pinned;
-	priv->pinned_pages = pages;
+	pinning->page_count = nr_pages;
+	pinning->pages = pages;
 
 	out.physical_address = page_to_phys(pages[0]);
 
+	mutex_lock(&priv->mutex);
+	list_add(&pinning->list, &priv->pinnings);
 	mutex_unlock(&priv->mutex);
 
 	if (clear_user(&arg->out, in.output_size_bytes) != 0)
@@ -569,8 +572,10 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 
 err_unpin_pages:
 	unpin_user_pages_dirty_lock(pages, pages_pinned, false);
-err_vfree:
+err_vfree_pages:
 	vfree(pages);
+err_free_pinning:
+	kfree(pinning);
 	return ret;
 }
 
@@ -736,6 +741,8 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 
 	mutex_init(&private_data->mutex);
 
+	INIT_LIST_HEAD(&private_data->pinnings);
+
 	private_data->device = tt_dev;
 	file->private_data = private_data;
 
@@ -748,6 +755,7 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 {
 	struct tenstorrent_device *tt_dev = inode_to_tt_dev(inode);
 	struct chardev_private *priv = file->private_data;
+	struct pinned_page_range *pinning, *tmp_pinning;
 	unsigned int i;
 
 	decrement_cdev_open_count(tt_dev);
@@ -760,9 +768,12 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 					  dmabuf->size, dmabuf->ptr, dmabuf->phys);
 	}
 
-	if (priv->pinned_page_count != 0) {
-		unpin_user_pages_dirty_lock(priv->pinned_pages, priv->pinned_page_count, true);
-		vfree(priv->pinned_pages);
+	list_for_each_entry_safe(pinning, tmp_pinning, &priv->pinnings, list) {
+		unpin_user_pages_dirty_lock(pinning->pages, pinning->page_count, true);
+		vfree(pinning->pages);
+
+		list_del(&pinning->list);
+		kfree(pinning);
 	}
 
 	kfree(file->private_data);

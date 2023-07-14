@@ -11,7 +11,7 @@ BUILDDIR := build
 OBJS := $(patsubst %.cpp,$(BUILDDIR)/%.o,$(SOURCES))
 
 OPT_FLAGS := -O2
-CXXFLAGS := -std=c++17 -Wall $(OPT_FLAGS)
+CXXFLAGS := -std=c++17 -Wall -Wno-narrowing $(OPT_FLAGS)
 
 .PHONY: all
 all:: $(PROG)

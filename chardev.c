@@ -505,7 +505,7 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
 		return -EFAULT;
 
-	if (!PAGE_ALIGNED(in.virtual_address) || !PAGE_ALIGNED(in.size))
+	if (!PAGE_ALIGNED(in.virtual_address) || !PAGE_ALIGNED(in.size) || in.size == 0)
 		return -EINVAL;
 
 	if (!(in.flags & TENSTORRENT_PIN_PAGES_CONTIGUOUS))

@@ -684,6 +684,7 @@ bool complete_pcie_init(struct tenstorrent_device *tt_dev, u8 __iomem* reset_uni
 			return false;
 
 		pci_restore_state(pdev);
+		pci_save_state(pdev);
 	}
 
 	return false;

@@ -20,6 +20,7 @@
 #define TENSTORRENT_IOCTL_RESET_DEVICE		_IO(TENSTORRENT_IOCTL_MAGIC, 6)
 #define TENSTORRENT_IOCTL_PIN_PAGES		_IO(TENSTORRENT_IOCTL_MAGIC, 7)
 #define TENSTORRENT_IOCTL_LOCK_CTL		_IO(TENSTORRENT_IOCTL_MAGIC, 8)
+#define TENSTORRENT_IOCTL_MAP_PEER_BAR		_IO(TENSTORRENT_IOCTL_MAGIC, 9)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -176,6 +177,24 @@ struct tenstorrent_lock_ctl_out {
 struct tenstorrent_lock_ctl {
 	struct tenstorrent_lock_ctl_in in;
 	struct tenstorrent_lock_ctl_out out;
+};
+
+struct tenstorrent_map_peer_bar_in {
+	__u32 peer_fd;
+	__u32 peer_bar_index;
+	__u32 peer_bar_offset;
+	__u32 peer_bar_length;
+	__u32 flags;
+};
+
+struct tenstorrent_map_peer_bar_out {
+	__u64 dma_address;
+	__u64 reserved;
+};
+
+struct tenstorrent_map_peer_bar {
+	struct tenstorrent_map_peer_bar_in in;
+	struct tenstorrent_map_peer_bar_out out;
 };
 
 #endif

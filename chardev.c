@@ -20,7 +20,13 @@
 #define dma_alloc_coherent dma_zalloc_coherent
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsigned int gup_flags, struct page **pages)
+{
+	// vma array allocation removed in 52650c8b466bac399aec213c61d74bfe6f7af1a4.
+	return pin_user_pages_fast(start, nr_pages, gup_flags | FOLL_LONGTERM, pages);
+}
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
 static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsigned int gup_flags, struct page **pages)
 {
 	// Can't use pin_user_pages_fast(FOLL_LONGTERM) because it calls __gup_longterm_locked with vmas = NULL

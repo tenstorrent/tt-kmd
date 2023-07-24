@@ -18,11 +18,13 @@
 #include <linux/hashtable.h>
 #include <linux/vmalloc.h>
 #include <linux/file.h>
+#include <linux/iommu.h>
 
 #include "device.h"
 #include "enumerate.h"
 #include "ioctl.h"
 #include "pcie.h"
+#include "sg_helpers.h"
 
 // In Linux 5.0, dma_alloc_coherent always zeroes memory and dma_zalloc_coherent
 // was removed.
@@ -158,6 +160,8 @@ struct pinned_page_range {
 
 	unsigned long page_count;
 	struct page **pages;	// vmalloc/vfree
+
+	struct sg_table dma_mapping;	// alloc_chained_sgt_for_pages / free_chained_sgt
 };
 
 struct peer_resource_mapping {
@@ -548,6 +552,12 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	return 0;
 }
 
+static bool is_iommu_translated(struct device *dev)
+{
+	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
+	return domain && domain->type != IOMMU_DOMAIN_IDENTITY;
+}
+
 static long ioctl_pin_pages(struct chardev_private *priv,
 			    struct tenstorrent_pin_pages __user *arg)
 {
@@ -555,8 +565,8 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 	struct page **pages;
 	int pages_pinned;
 	struct pinned_page_range *pinning;
+	struct sg_table dma_mapping = {0};
 	long ret;
-	int i;
 	u32 bytes_to_copy;
 
 	struct tenstorrent_pin_pages_in in;
@@ -570,7 +580,7 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 	if (!PAGE_ALIGNED(in.virtual_address) || !PAGE_ALIGNED(in.size) || in.size == 0)
 		return -EINVAL;
 
-	if (!(in.flags & TENSTORRENT_PIN_PAGES_CONTIGUOUS))
+	if (in.flags != 0 && in.flags != TENSTORRENT_PIN_PAGES_CONTIGUOUS)
 		return -EINVAL;
 
 	pinning = kmalloc(sizeof(*pinning), GFP_KERNEL);
@@ -598,20 +608,69 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 		goto err_unpin_pages;
 	}
 
-	for (i = 1; i < pages_pinned; i++) {
-		if (page_to_pfn(pages[i]) != page_to_pfn(pages[i-1]) + 1) {
-			pr_err("pages discontiguous at %d\n", i);
-			ret = -EINVAL;
+	if (is_iommu_translated(&priv->device->pdev->dev)) {
+		struct scatterlist *sg;
+		unsigned int i;
+		dma_addr_t expected_next_address;
+		unsigned long total_dma_len = 0;
+
+		if (!alloc_chained_sgt_for_pages(&dma_mapping, pages, nr_pages)) {
+			pr_warn("alloc_chained_sgt_for_pages failed for %lu pages, probably out of memory.\n", nr_pages);
+			ret = -ENOMEM;
 			goto err_unpin_pages;
 		}
+
+		mutex_lock(&priv->mutex);
+
+		ret = dma_map_sgtable(&priv->device->pdev->dev, &dma_mapping, DMA_BIDIRECTIONAL, 0);
+
+		if (ret != 0) {
+			pr_err("dma_map_sg failed.\n");
+			goto err_unlock_priv;
+		}
+
+		// This can only happen due to a misconfiguration or a bug.
+		for_each_sgtable_dma_sg(&dma_mapping, sg, i) {
+			if (i > 0 && sg_dma_address(sg) != expected_next_address) {
+				pr_err("discontiguous mapping\n");
+				ret = -EINVAL;
+			}
+
+			expected_next_address = sg_dma_address(sg) + sg_dma_len(sg);
+			total_dma_len += sg_dma_len(sg);
+		}
+
+		if (total_dma_len != nr_pages * PAGE_SIZE) {
+			pr_err("dma-mapped (%lX) != original length (%lX).\n", total_dma_len, nr_pages * PAGE_SIZE);
+			ret = -EINVAL;
+		}
+
+		if (ret != 0) {
+			debug_print_sgtable(&dma_mapping);
+			goto err_dma_unmap;
+		}
+
+		out.physical_address = sg_dma_address(dma_mapping.sgl);
+	} else {
+		int i;
+
+		for (i = 1; i < pages_pinned; i++) {
+			if (page_to_pfn(pages[i]) != page_to_pfn(pages[i-1]) + 1) {
+				pr_err("pages discontiguous at %d\n", i);
+				ret = -EINVAL;
+				goto err_unpin_pages;
+			}
+		}
+
+		out.physical_address = page_to_phys(pages[0]);
+
+		mutex_lock(&priv->mutex);
 	}
 
 	pinning->page_count = nr_pages;
 	pinning->pages = pages;
+	pinning->dma_mapping = dma_mapping;
 
-	out.physical_address = page_to_phys(pages[0]);
-
-	mutex_lock(&priv->mutex);
 	list_add(&pinning->list, &priv->pinnings);
 	mutex_unlock(&priv->mutex);
 
@@ -625,6 +684,11 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 
 	return 0;
 
+err_dma_unmap:
+	dma_unmap_sgtable(&priv->device->pdev->dev, &dma_mapping, DMA_BIDIRECTIONAL, 0);
+err_unlock_priv:
+	free_chained_sgt(&dma_mapping);
+	mutex_unlock(&priv->mutex);
 err_unpin_pages:
 	unpin_user_pages_dirty_lock(pages, pages_pinned, false);
 err_vfree_pages:
@@ -1023,6 +1087,9 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	}
 
 	list_for_each_entry_safe(pinning, tmp_pinning, &priv->pinnings, list) {
+		dma_unmap_sgtable(&priv->device->pdev->dev, &pinning->dma_mapping, DMA_BIDIRECTIONAL, 0);
+		free_chained_sgt(&pinning->dma_mapping);
+
 		unpin_user_pages_dirty_lock(pinning->pages, pinning->page_count, true);
 		vfree(pinning->pages);
 

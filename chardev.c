@@ -630,7 +630,7 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 		}
 
 		// This can only happen due to a misconfiguration or a bug.
-		for_each_sgtable_dma_sg(&dma_mapping, sg, i) {
+		for_each_sgtable_dma_sg((&dma_mapping), sg, i) {
 			if (i > 0 && sg_dma_address(sg) != expected_next_address) {
 				pr_err("discontiguous mapping\n");
 				ret = -EINVAL;

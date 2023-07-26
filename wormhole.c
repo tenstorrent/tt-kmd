@@ -3,10 +3,10 @@
 
 #include "wormhole.h"
 #include "grayskull.h"
+#include "pcie.h"
 
 #define WH_FW_MSG_PCIE_INDEX 0x51
 #define WH_FW_MSG_ASTATE0 0xA0
-#define WH_FW_MSG_PCIE_RETRAIN 0xB6
 
 // The iATU can be used to match & remap PCIE transactions.
 #define IATU_BASE 0x1200	// Relative to the start of BAR2

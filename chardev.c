@@ -527,7 +527,6 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 		pr_err("vzalloc failed for %lu page pointers\n", nr_pages);
 		ret = -ENOMEM;
 		goto err_free_pinning;
-		return -ENOMEM;
 	}
 
 	pages_pinned = pin_user_pages_fast_longterm(in.virtual_address, nr_pages, FOLL_WRITE, pages);

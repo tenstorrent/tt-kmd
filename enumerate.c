@@ -77,7 +77,8 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	mutex_init(&tt_dev->chardev_mutex);
 
-	tt_dev->dma_capable = (dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(dma_address_bits ?: 32)) == 0);
+	tt_dev->dma_capable = (dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(dma_address_bits ?: device_class->dma_address_bits)) == 0);
+
 	// Max these to ensure the IOVA allocator will not split large pinned regions.
 	dma_set_max_seg_size(&dev->dev, UINT_MAX);
 	dma_set_seg_boundary(&dev->dev, ULONG_MAX);

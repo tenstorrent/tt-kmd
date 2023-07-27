@@ -29,6 +29,7 @@ static void blackhole_cleanup(struct tenstorrent_device *tt_dev) {
 struct tenstorrent_device_class blackhole_class = {
 	.name = "Blackhole",
 	.instance_size = sizeof(struct blackhole_device),
+	.dma_address_bits = 58,
 	.init_device = blackhole_init,
 	.init_hardware = blackhole_init_hardware,
 	.post_hardware_init = blackhole_post_hardware_init,

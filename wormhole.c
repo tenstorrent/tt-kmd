@@ -211,6 +211,7 @@ static void wormhole_cleanup(struct tenstorrent_device *tt_dev) {
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
+	.dma_address_bits = 32,
 	.init_device = wormhole_init,
 	.init_hardware = wormhole_init_hardware,
 	.post_hardware_init = wormhole_post_hardware_init,

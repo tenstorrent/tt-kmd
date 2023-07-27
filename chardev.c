@@ -13,6 +13,7 @@
 #include "device.h"
 #include "enumerate.h"
 #include "ioctl.h"
+#include "pcie.h"
 
 // In Linux 5.0, dma_alloc_coherent always zeroes memory and dma_zalloc_coherent
 // was removed.
@@ -448,7 +449,6 @@ static long ioctl_reset_device(struct chardev_private *priv,
 			       struct tenstorrent_reset_device __user *arg)
 {
 	struct pci_dev *pdev = priv->device->pdev;
-	u16 vendor_id;
 	bool ok;
 	u32 bytes_to_copy;
 
@@ -460,22 +460,16 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
 		return -EFAULT;
 
-	if (in.flags != 0)
-		return -EINVAL;
+	if (in.flags == TENSTORRENT_RESET_DEVICE_RESTORE_STATE) {
+		if (safe_pci_restore_state(pdev))
+			ok = priv->device->dev_class->init_hardware(priv->device);	
+		else
+			ok = false;
 
-	// Start with a test read. pci_restore_state calls pci_find_next_ext_capability which has
-	// a bounded loop that is still long enough to trigger a soft lockup warning if hardware
-	// is extremely misbehaving.
-	if (pci_read_config_word(pdev, PCI_VENDOR_ID, &vendor_id) != PCIBIOS_SUCCESSFUL
-	    || vendor_id != PCI_VENDOR_ID_TENSTORRENT) {
-		ok = false;
-	} else if (pdev->state_saved) {
-		pci_restore_state(pdev);
-		pci_save_state(pdev);
-
-		ok = priv->device->dev_class->init_hardware(priv->device);
+	} else if (in.flags == TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK) {
+		ok = pcie_hot_reset_and_restore_state(pdev);		
 	} else {
-		ok = false;
+		return -EINVAL;
 	}
 
 	out.output_size_bytes = sizeof(out);

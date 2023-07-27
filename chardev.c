@@ -558,6 +558,18 @@ static bool is_iommu_translated(struct device *dev)
 	return domain && domain->type != IOMMU_DOMAIN_IDENTITY;
 }
 
+static bool is_pin_pages_size_safe(u64 size)
+{
+	// With IOMMU enabled on 5.4, 2GB pinnings may succeed, but then soft lockup on process exit.
+	// (tt_cdev_release -> unmap_sg -> __unmap_single -> iommu_unmap_page)
+	// This doesn't happen in 5.15, but I don't know exactly when it was fixed.
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 4, 0)
+	return size <= 1 << 30;
+#else
+	return true;
+#endif
+}
+
 static long ioctl_pin_pages(struct chardev_private *priv,
 			    struct tenstorrent_pin_pages __user *arg)
 {
@@ -578,6 +590,9 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 		return -EFAULT;
 
 	if (!PAGE_ALIGNED(in.virtual_address) || !PAGE_ALIGNED(in.size) || in.size == 0)
+		return -EINVAL;
+
+	if (!is_pin_pages_size_safe(in.size))
 		return -EINVAL;
 
 	if (in.flags != 0 && in.flags != TENSTORRENT_PIN_PAGES_CONTIGUOUS)

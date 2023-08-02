@@ -14,17 +14,17 @@ done
 shift $(($OPTIND-1))
 
 if [ $# -ne 0 ]; then
-    echo "Additional command-line parameters are not accepted."
+    echo "Additional command-line parameters are not accepted." 1>&2
     exit 1
 fi
 
 if ! dkms status &> /dev/null; then
-    echo "DKMS not found. Run on a system with DKMS installed."
+    echo "DKMS not found. Run on a system with DKMS installed." 1>&2
     exit 1
 fi
 
 if [ ! -e dkms.conf ]; then
-    echo "dkms.conf not found. Run from the ttkmd directory."
+    echo "dkms.conf not found. Run from the ttkmd directory." 1>&2
     exit 1
 fi
 

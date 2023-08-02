@@ -87,11 +87,11 @@ bool complete_pcie_init(struct tenstorrent_device *tt_dev, u8 __iomem* reset_uni
 
 		pcie_capability_read_word(bridge_dev, PCI_EXP_LNKCTL2, &target_link_speed);
 		target_link_speed &= PCI_EXP_LNKCTL2_TLS;
-		
+
 		pci_read_config_word(bridge_dev, PCI_SUBSYSTEM_VENDOR_ID, &subsys_vendor_id);
 
-		if (!grayskull_send_arc_fw_message_with_args(reset_unit_regs, FW_MSG_PCIE_RETRAIN, 
-			target_link_speed | (last_retry << 15), subsys_vendor_id, 200000, &exit_code)) 
+		if (!grayskull_send_arc_fw_message_with_args(reset_unit_regs, FW_MSG_PCIE_RETRAIN,
+			target_link_speed | (last_retry << 15), subsys_vendor_id, 200000, &exit_code))
 			return false;
 
 		if (exit_code == 0) {
@@ -102,7 +102,7 @@ bool complete_pcie_init(struct tenstorrent_device *tt_dev, u8 __iomem* reset_uni
 			if (last_retry)
 				return false;
 		}
-		
+
 		pci_save_state(pdev);
 		if (!pcie_hot_reset_and_restore_state(pdev))
 			return false;

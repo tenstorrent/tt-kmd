@@ -10,6 +10,8 @@ struct PciBusDeviceFunction
     unsigned int bus;
     unsigned int device;
     unsigned int function;
+
+    std::string format() const;
 };
 
 template <class T>

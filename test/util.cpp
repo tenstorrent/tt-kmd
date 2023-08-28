@@ -132,3 +132,14 @@ unsigned page_size()
 {
     return static_cast<unsigned>(sysconf(_SC_PAGE_SIZE));
 }
+
+std::string PciBusDeviceFunction::format() const
+{
+    static const char format[] = "%04x:%02x:%02x.%u";
+
+    char buf[sizeof(format)];
+
+    snprintf(buf, sizeof(buf), format, domain, bus, device, function);
+
+    return buf;
+}

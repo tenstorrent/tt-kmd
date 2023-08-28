@@ -1,3 +1,5 @@
+#include <iostream>
+
 #include "util.h"
 #include "enumeration.h"
 
@@ -11,6 +13,8 @@ int main(int argc, char *argv[])
     auto devs = EnumerateDevices();
     for (const auto &d : devs)
     {
+        std::cout << "Testing " << d.path << " @ " << d.location.format() << '\n';
+
         TestGetDeviceInfo(d);
         TestQueryMappings(d);
         TestDmaBuf(d);

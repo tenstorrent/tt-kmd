@@ -61,14 +61,15 @@ std::map<dev_t, std::string> EnumerateDriverDevices(void)
 
 PciBusDeviceFunction ParseBdfFromSysfsPath(const std::string &device_path)
 {
-    static const std::regex bdf_parse_re("0000:([0-9a-f]{2}):([0-9a-f]{2}).([0-7])");
+    static const std::regex bdf_parse_re("([0-9a-f]{4}):([0-9a-f]{2}):([0-9a-f]{2}).([0-7])");
 
     std::smatch m;
     auto base = basename(device_path);
     if (!std::regex_match(base, m, bdf_parse_re))
         THROW_TEST_FAILURE("PCI device " + base + " has an unparseable bdf in name.");
 
-    return PciBusDeviceFunction{ std::stoul(m[1], nullptr, 16), std::stoul(m[2], nullptr, 16), std::stoul(m[3]) };
+    return PciBusDeviceFunction{ std::stoul(m[1], nullptr, 16), std::stoul(m[2], nullptr, 16),
+                                 std::stoul(m[3], nullptr, 16), std::stoul(m[4]) };
 }
 
 // For each tenstorrent device, return pair of PCI BDF and dev_t.

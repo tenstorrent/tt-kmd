@@ -119,11 +119,11 @@ std::string readlink_str(const std::string &link_name)
 
 std::string sysfs_dir_for_bdf(PciBusDeviceFunction bdf)
 {
-    static const char format[] = "/sys/bus/pci/devices/0000:%02x:%02x.%u";
+    static const char format[] = "/sys/bus/pci/devices/%04x:%02x:%02x.%u";
 
     char buf[sizeof(format)];
 
-    snprintf(buf, sizeof(buf), format, bdf.bus, bdf.device, bdf.function);
+    snprintf(buf, sizeof(buf), format, bdf.domain, bdf.bus, bdf.device, bdf.function);
 
     return buf;
 }

@@ -20,10 +20,10 @@ void TestGetDeviceInfo(const EnumeratedDevice &dev)
     if (ioctl(dev_fd.get(), TENSTORRENT_IOCTL_GET_DEVICE_INFO, &get_device_info) != 0)
         THROW_TEST_FAILURE("TENSTORRENT_IOCTL_GET_DEVICE_INFO failed on " + dev.path);
 
-    // max_dma_buf_size_log2 has been present since 1.0.
+    // pci_domain has been present since 1.23.
     std::size_t min_get_device_info_out
-        = offsetof(tenstorrent_get_device_info_out, max_dma_buf_size_log2)
-          + sizeof(get_device_info.out.max_dma_buf_size_log2);
+        = offsetof(tenstorrent_get_device_info_out, pci_domain)
+          + sizeof(get_device_info.out.pci_domain);
 
     if (get_device_info.out.output_size_bytes < min_get_device_info_out)
         THROW_TEST_FAILURE("GET_DEVICE_INFO output is too small.");
@@ -49,8 +49,10 @@ void TestGetDeviceInfo(const EnumeratedDevice &dev)
     unsigned bus = (get_device_info.out.bus_dev_fn >> 8) & 0xFF;
     unsigned device = (get_device_info.out.bus_dev_fn >> 3) & 0x1F;
     unsigned function = get_device_info.out.bus_dev_fn & 0x7;
+    unsigned domain = get_device_info.out.pci_domain;
 
-    if (bus != dev.location.bus || device != dev.location.device || function != dev.location.function)
+    if (domain != dev.location.domain || bus != dev.location.bus
+        || device != dev.location.device || function != dev.location.function)
         THROW_TEST_FAILURE("Wrong BDF for " + dev.path);
 
     if (get_device_info.out.max_dma_buf_size_log2 < 12)

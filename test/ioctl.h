@@ -27,7 +27,6 @@
 #define TENSTORRENT_MAPPING_RESOURCE2_WC	6
 
 #define TENSTORRENT_MAX_DMA_BUFS	8
-#define TENSTORRENT_MAX_PINNED_RANGES 8
 
 struct tenstorrent_get_device_info_in {
 	__u32 output_size_bytes;
@@ -40,7 +39,8 @@ struct tenstorrent_get_device_info_out {
 	__u16 subsystem_vendor_id;
 	__u16 subsystem_id;
 	__u16 bus_dev_fn;	// [0:2] function, [3:7] device, [8:15] bus
-	__u16 max_dma_buf_size_log2;
+	__u16 max_dma_buf_size_log2;	// Since 1.0
+	__u16 pci_domain;		// Since 1.23
 };
 
 struct tenstorrent_get_device_info {
@@ -113,6 +113,10 @@ struct tenstorrent_get_driver_info {
 	struct tenstorrent_get_driver_info_in in;
 	struct tenstorrent_get_driver_info_out out;
 };
+
+// tenstorrent_reset_device_in.flags
+#define TENSTORRENT_RESET_DEVICE_RESTORE_STATE 0
+#define TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK 1
 
 struct tenstorrent_reset_device_in {
 	__u32 output_size_bytes;

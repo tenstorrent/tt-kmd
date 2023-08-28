@@ -6,6 +6,7 @@
 
 struct PciBusDeviceFunction
 {
+    unsigned int domain;
     unsigned int bus;
     unsigned int device;
     unsigned int function;

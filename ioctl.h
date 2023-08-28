@@ -39,7 +39,8 @@ struct tenstorrent_get_device_info_out {
 	__u16 subsystem_vendor_id;
 	__u16 subsystem_id;
 	__u16 bus_dev_fn;	// [0:2] function, [3:7] device, [8:15] bus
-	__u16 max_dma_buf_size_log2;
+	__u16 max_dma_buf_size_log2;	// Since 1.0
+	__u16 pci_domain;		// Since 1.23
 };
 
 struct tenstorrent_get_device_info {

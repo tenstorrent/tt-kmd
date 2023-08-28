@@ -256,6 +256,7 @@ static long ioctl_get_device_info(struct chardev_private *priv,
 	out.subsystem_id = pdev->subsystem_device;
 	out.bus_dev_fn = PCI_DEVID(pdev->bus->number, pdev->devfn);
 	out.max_dma_buf_size_log2 = MAX_DMA_BUF_SIZE_LOG2;
+	out.pci_domain = pci_domain_nr(pdev->bus);
 
 	if (clear_user(&arg->out, in.output_size_bytes) != 0)
 		return -EFAULT;

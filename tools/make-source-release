@@ -47,6 +47,17 @@ sudo dkms add "$TEMP_DIR"
 dkms mktarball tenstorrent/$PACKAGE_VERSION --archive "$PWD/$ARCHIVE" --source-only
 sudo dkms remove tenstorrent/$PACKAGE_VERSION --all
 
+if tar -tf "$ARCHIVE" |grep -q "\\.o$"; then
+    rm "$ARCHIVE"
+
+    echo "ERROR: Archive contains built objects." 1>&2
+    echo "This happens when the source tree or dkms-managed copy in /usr/src/tenstorrent-* is unclean." 1>&2
+    echo "Remove all tenstorrent modules from dkms, remove /usr/src/tenstorrent-* and try again." 1>&2
+    echo "No source archive has been created." 1>&2
+
+    exit 1
+fi
+
 echo "DKMS source release in $ARCHIVE"
 
 if [ $MACHINE_READABLE_OUTPUT -eq 1 ]; then

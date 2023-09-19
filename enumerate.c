@@ -1,14 +1,21 @@
 #include <linux/pci.h>
-#include <linux/aer.h>
 #include <linux/slab.h>
 #include <linux/idr.h>
 #include <linux/mutex.h>
+#include <linux/version.h>
 
 #include "enumerate.h"
 #include "interrupt.h"
 #include "chardev.h"
 #include "grayskull.h"
 #include "module.h"
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+#define pci_enable_pcie_error_reporting(dev) do { } while (0)
+#define pci_disable_pcie_error_reporting(dev) do { } while (0)
+#else
+#include <linux/aer.h>
+#endif
 
 DEFINE_IDR(tenstorrent_dev_idr);
 DEFINE_MUTEX(tenstorrent_dev_idr_mutex);

@@ -9,32 +9,34 @@ Stops on first build failure.
 """
 
 import argparse
+import contextlib
 from functools import lru_cache
 import os
 from pathlib import Path
 import re
-import stat
 import subprocess
 import sys
 from typing import Optional, List
 
-def owner_exec(path: Path) -> bool:
-    return bool(path.stat().st_mode & stat.S_IXUSR)
-
 def path_search(name: str) -> Optional[Path]:
-    path = os.getenv("PATH")
-    if path is None:
-        path = os.getcwd()
+    path = os.getenv("PATH", ".")
 
     for path_dir in map(Path, path.split(":")):
         candidate = path_dir / name
-        if candidate.is_file() and owner_exec(candidate):
-            return candidate.absolute()
+        with contextlib.suppress(OSError):
+            if candidate.is_file() and os.access(candidate, os.X_OK, effective_ids=os.supports_effective_ids):
+                return candidate.absolute()
 
     return None
 
-git = path_search("git")
-make = path_search("make")
+def path_search_or_else(name: str) -> Path:
+    p = path_search(name)
+    if p is None:
+        raise FileNotFoundError(f"Could not find {name} in PATH.")
+    return p
+
+git = path_search_or_else("git")
+make = path_search_or_else("make")
 
 @lru_cache(1)
 def make_j() -> str:

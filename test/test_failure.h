@@ -13,7 +13,7 @@ public:
           file(file), line(line), func(func)
           {}
 
-    static void throw_new(const std::string &msg, const char *file, unsigned int line, const char *func);
+    [[noreturn]] static void throw_new(const std::string &msg, const char *file, unsigned int line, const char *func);
 
 private:
     const char *file;

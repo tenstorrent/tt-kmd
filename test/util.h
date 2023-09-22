@@ -20,7 +20,7 @@ static inline void zero(T* p)
     std::memset(p, 0, sizeof(*p));
 }
 
-void throw_system_error(const std::string &msg);
+[[noreturn]] void throw_system_error(const std::string &msg);
 
 std::string read_file(std::string filename);
 

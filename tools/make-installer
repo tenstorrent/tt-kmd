@@ -4,9 +4,28 @@ set -e
 
 TTDRIVER_REL="/mnt/motor/syseng/ttdriver-rel"
 
-if [ $# -gt 1 ]; then
-    echo "Usage: make-motor-release [target-dir]"
-    echo "Default target-dir is ${TTDRIVER_REL}/DRIVER_VERSION."
+opts=$(/usr/bin/getopt -n make-installer -l deploy-motor,help "h" "$@")
+eval set -- "$opts"
+
+print_usage() {
+    echo "Usage: make-installer --motor-deploy | target-dir"
+    echo "--motor-deploy automatically deploys to /mnt/motor."
+    echo "Otherwise a target directory must be given."
+}
+
+deploy_motor=0
+
+while (($#)); do
+    case "$1" in
+        -h|--help) print_usage; exit 0;;
+        --deploy-motor) deploy_motor=1;;
+        --) shift; break;;
+    esac
+    shift
+done
+
+if (( ($deploy_motor && $# > 0) || (!$deploy_motor && $# != 1) )); then
+    print_usage
     exit 1
 fi
 
@@ -14,18 +33,18 @@ PACKAGE_VERSION=$(sed -nE "s/^[[:space:]]*PACKAGE_VERSION[[:space:]]*=[[:space:]
 ARCHIVE=$(tools/make-source-release -m)
 ARCHIVE_BASENAME=$(basename "$ARCHIVE")
 
-if [ $# -eq 1 ]; then
-    TARGET="$1"
-else
+if (($deploy_motor)); then
     if [ ! -d "$TTDRIVER_REL" ]; then
         echo "No access to $TTDRIVER_REL, is motor mounted?"
         exit 1
     fi
 
     TARGET="$TTDRIVER_REL/$PACKAGE_VERSION"
+    mkdir -p "$TARGET"
+else
+    TARGET="$1"
 fi
 
-mkdir -p "$TARGET"
 cp "$ARCHIVE" "$TARGET/$ARCHIVE_BASENAME"
 
 INSTALL_SCRIPT="$TARGET/install_ttkmd_$PACKAGE_VERSION.bash"

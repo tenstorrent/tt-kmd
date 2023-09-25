@@ -2,12 +2,12 @@
 
 set -e
 
-MACHINE_READABLE_OUTPUT=0
-HELP=0
+machine_readable_output=0
+help=0
 
-while getopts m ARG; do
-    case $ARG in
-        m) MACHINE_READABLE_OUTPUT=1;;
+while getopts m arg; do
+    case $arg in
+        m) machine_readable_output=1;;
         *) exit 1;
     esac
 done
@@ -28,27 +28,27 @@ if [ ! -e dkms.conf ]; then
     exit 1
 fi
 
-if [ $MACHINE_READABLE_OUTPUT -eq 1 ]; then
+if [ $machine_readable_output -eq 1 ]; then
     exec 3>&1 >/dev/null
 fi
 
-PACKAGE_VERSION=$(sed -nE "s/^[[:space:]]*PACKAGE_VERSION[[:space:]]*=[[:space:]]*\"([^\"]+)\"/\\1/p" dkms.conf)
+package_version=$(sed -nE "s/^[[:space:]]*PACKAGE_VERSION[[:space:]]*=[[:space:]]*\"([^\"]+)\"/\\1/p" dkms.conf)
 
-sudo dkms remove tenstorrent/$PACKAGE_VERSION --all &> /dev/null || true
+sudo dkms remove tenstorrent/$package_version --all &> /dev/null || true
 
-TEMP_DIR=$(mktemp -d)
-trap 'rm -rf "$TEMP_DIR"' EXIT
+temp_dir=$(mktemp -d)
+trap 'rm -rf "$temp_dir"' EXIT
 
-tar -X tools/exclude-from-release -cf - . |tar -C "$TEMP_DIR" -xf -
+tar -X tools/exclude-from-release -cf - . |tar -C "$temp_dir" -xf -
 
-ARCHIVE="ttkmd_$PACKAGE_VERSION.tar"
+archive="ttkmd_$package_version.tar"
 
-sudo dkms add "$TEMP_DIR"
-dkms mktarball tenstorrent/$PACKAGE_VERSION --archive "$PWD/$ARCHIVE" --source-only
-sudo dkms remove tenstorrent/$PACKAGE_VERSION --all
+sudo dkms add "$temp_dir"
+dkms mktarball tenstorrent/$package_version --archive "$PWD/$archive" --source-only
+sudo dkms remove tenstorrent/$package_version --all
 
-if tar -tf "$ARCHIVE" |grep -q "\\.o$"; then
-    rm "$ARCHIVE"
+if tar -tf "$archive" |grep -q "\\.o$"; then
+    rm "$archive"
 
     echo "ERROR: Archive contains built objects." 1>&2
     echo "This happens when the source tree or dkms-managed copy in /usr/src/tenstorrent-* is unclean." 1>&2
@@ -58,8 +58,8 @@ if tar -tf "$ARCHIVE" |grep -q "\\.o$"; then
     exit 1
 fi
 
-echo "DKMS source release in $ARCHIVE"
+echo "DKMS source release in $archive"
 
-if [ $MACHINE_READABLE_OUTPUT -eq 1 ]; then
-    echo $ARCHIVE >&3
+if [ $machine_readable_output -eq 1 ]; then
+    echo $archive >&3
 fi

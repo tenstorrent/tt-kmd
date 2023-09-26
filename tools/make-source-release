@@ -3,7 +3,6 @@
 set -e
 
 machine_readable_output=0
-help=0
 
 while getopts m arg; do
     case $arg in

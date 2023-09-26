@@ -10,6 +10,8 @@ struct grayskull_device {
 	u8 __iomem *kernel_tlb;	// covers one TLB window
 	u8 __iomem *reset_unit_regs;
 	u32 enabled_rows;	// bitmap of enabled Tensix rows (NOC0-indexed)
+	u32 watchdog_fw_reset_vec;
+	u32 smbus_fw_reset_vec;
 };
 
 #define tt_dev_to_gs_dev(ttdev) \

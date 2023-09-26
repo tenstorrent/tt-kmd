@@ -22,9 +22,6 @@ struct tenstorrent_device {
 	struct mutex chardev_mutex;
 	unsigned int chardev_open_count;
 
-	u32 watchdog_fw_reset_vec;
-	u32 smbus_fw_reset_vec;
-
 	struct notifier_block reboot_notifier;
 };
 

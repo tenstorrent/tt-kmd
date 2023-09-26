@@ -314,11 +314,11 @@ static int grayskull_populate_arc_if(struct grayskull_device *gs_dev) {
 	ttkmd_arc_if->f.watchdog_fw_en = watchdog_fw_en;
 	ttkmd_arc_if->f.watchdog_fw_load = !watchdog_fw_override;
 	ttkmd_arc_if->f.watchdog_fw_reset_vec =
-		cpu_to_le32(gs_dev->tt.watchdog_fw_reset_vec);
+		cpu_to_le32(gs_dev->watchdog_fw_reset_vec);
 	ttkmd_arc_if->f.smbus_fw_en = smbus_fw_en;
 	ttkmd_arc_if->f.smbus_fw_load = !smbus_fw_override;
 	ttkmd_arc_if->f.smbus_fw_reset_vec =
-		cpu_to_le32(gs_dev->tt.smbus_fw_reset_vec);
+		cpu_to_le32(gs_dev->smbus_fw_reset_vec);
 
 	iowrite32(ARC_UDMIAXI_REGION_CSM, reset_unit_regs + ARC_UDMIAXI_REGION_REG);
 	memcpy_toio(device_ttkmd_arc_if, ttkmd_arc_if, sizeof(ttkmd_arc_if_u));

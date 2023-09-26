@@ -635,7 +635,7 @@ static void month_lookup(u32 days_into_year, u32* day, u32* month) {
 }
 
 void grayskull_send_curr_date(u8 __iomem* reset_unit_regs) {
-	const u32 SECONDS_TO_2020 = 1577836800; // date -d "Jan 1, 2020 UTC" +"%s"
+	const u32 SECONDS_TO_2020 = 1577836800; // date -d "Jan 1, 2020 UTC" +%s
 	const u32 DAYS_PER_FOUR_YEARS = 4*365 + 1;
 	const u32 DAYS_TO_FEB_29 = 31 + 28;
 	const u32 SECONDS_PER_DAY = 86400;
@@ -647,7 +647,7 @@ void grayskull_send_curr_date(u8 __iomem* reset_unit_regs) {
 	u32 seconds_since_2020 = ktime_get_real_seconds() - SECONDS_TO_2020;
 
 	u32 seconds_into_day = seconds_since_2020 % SECONDS_PER_DAY;
-	u32 days_since_2020 = (seconds_since_2020 - seconds_into_day) / SECONDS_PER_DAY;
+	u32 days_since_2020 = seconds_since_2020 / SECONDS_PER_DAY;
 
 	u32 four_years = days_since_2020 / DAYS_PER_FOUR_YEARS;
 	u32 days_into_four_years = days_since_2020 % DAYS_PER_FOUR_YEARS;

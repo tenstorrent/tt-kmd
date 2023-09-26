@@ -2,6 +2,7 @@
 
 #include "util.h"
 #include "enumeration.h"
+#include "test_failure.h"
 
 void TestGetDeviceInfo(const EnumeratedDevice &dev);
 void TestConfigSpace(const EnumeratedDevice &dev);
@@ -11,6 +12,8 @@ void TestPinPages(const EnumeratedDevice &dev);
 
 int main(int argc, char *argv[])
 {
+    bool at_least_one_device = false;
+
     auto devs = EnumerateDevices();
     for (const auto &d : devs)
     {
@@ -21,7 +24,12 @@ int main(int argc, char *argv[])
         TestQueryMappings(d);
         TestDmaBuf(d);
         TestPinPages(d);
+
+        at_least_one_device = true;
     }
+
+    if (!at_least_one_device)
+        THROW_TEST_FAILURE("No devices found.");
 
     return 0;
 }

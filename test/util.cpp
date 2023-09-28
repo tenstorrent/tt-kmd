@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
+// SPDX-License-Identifier: GPL-2.0-only
+
 #include <fstream>
 #include <iterator>
 #include <limits>

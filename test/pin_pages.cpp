@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
+// SPDX-License-Identifier: GPL-2.0-only
+
 // Verify that pin pages requires TENSTORRENT_PIN_PAGES_CONTIGUOUS.
 // Verify that pin pages rejects any other flags.
 // Verify that pin pages rejects size == 0 and size not multiple of page size.

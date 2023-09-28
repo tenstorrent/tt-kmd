@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
+// SPDX-License-Identifier: GPL-2.0-only
+
 // Verify that all resource IDs are known to us.
 // Verify that all the UNUSEDs are at the end of the output array.
 // Verify that no non-UNUSED mapping ID appears more than once.

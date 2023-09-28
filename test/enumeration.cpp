@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
+// SPDX-License-Identifier: GPL-2.0-only
+
 // Verify that the contents of /dev/tenstorrent are sensible and complete.
 
 // /dev/tenstorrent/* must be a (symlink to) character device, where its MAJOR:MINOR

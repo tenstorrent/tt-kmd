@@ -1,5 +1,8 @@
 #! /usr/bin/python3
 
+# SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
+# SPDX-License-Identifier: GPL-2.0-only
+
 """
 Test-build a kernel module against all kernel versions in a range of refs, or single git ref.
 

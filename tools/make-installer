@@ -1,5 +1,8 @@
 #! /bin/bash
 
+# SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
+# SPDX-License-Identifier: GPL-2.0-only
+
 set -e
 
 ttdriver_rel="/mnt/motor/syseng/ttdriver-rel"

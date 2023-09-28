@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
+// SPDX-License-Identifier: GPL-2.0-only
+
 #include "test_failure.h"
 
 std::string test_failure::format_msg(const std::string &msg, const char *file, unsigned int line, const char *func)

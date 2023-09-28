@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
+# SPDX-License-Identifier: GPL-2.0-only
+
 obj-m += tenstorrent.o
 tenstorrent-y := module.o chardev.o enumerate.o interrupt.o grayskull.o wormhole.o pcie.o
 

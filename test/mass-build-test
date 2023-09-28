@@ -94,6 +94,7 @@ def main() -> int:
     ap.add_argument("kernel_dir", type=Path)
     ap.add_argument("start_ver", help="git ref of first version to build.")
     ap.add_argument("end_ver", nargs="?", help="Last version to build (inclusive). If not present, only builds start_ver.")
+    ap.add_argument("--skip-builds", action='store_true', help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     if args.end_ver is None:
@@ -106,7 +107,8 @@ def main() -> int:
     for v in versions:
         try:
             print(v)
-            test_one_build(args.module_dir, args.kernel_dir, v)
+            if not args.skip_builds:
+                test_one_build(args.module_dir, args.kernel_dir, v)
         except subprocess.CalledProcessError as e:
             print(f"Build failed for {v}.")
             command = " ".join(map(str, e.cmd))

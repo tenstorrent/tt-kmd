@@ -16,7 +16,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-from typing import Optional, List
+from typing import Optional, List, NamedTuple, Dict, Tuple
 
 def path_search(name: str) -> Optional[Path]:
     path = os.getenv("PATH", ".")
@@ -61,28 +61,82 @@ def build_module(module_dir: Path, kernel_dir: Path) -> None:
     # We're building against an incompletely-built kernel tree, so modpost can't find symbol versions.
     subprocess_check_output_merged([make, make_j(), f"KDIR={kernel_dir.absolute()}", "KBUILD_MODPOST_WARN=1"], module_dir)
 
-version_tag_re = re.compile(rb"v\d+\.\d+")
+class KernelVersion(NamedTuple):
+    major: int
+    minor: int
+    point: int
 
-def is_version_tag(tag: bytes) -> bool:
-    return version_tag_re.fullmatch(tag)
+    def major_minor(self) -> Tuple[int,int]:
+        return (self.major, self.minor)
 
-def version_tags_between(kernel_dir: Path, start: str, end: str) -> List[str]:
+    def __str__(self) -> str:
+        return "v" + ".".join(map(str, self if self.point != 0 else self.major_minor()))
+
+version_tag_re = re.compile(rb"v(\d+)\.(\d+)(?:\.(\d+))?")
+
+def parse_version_tag(tag: bytes) -> Optional[KernelVersion]:
+    m = version_tag_re.fullmatch(tag)
+    if m is None:
+        return None
+
+    major = int(m[1])
+    minor = int(m[2])
+    point = int(m[3]) if m[3] else 0
+
+    return KernelVersion(major, minor, point)
+
+def insert_version_if_latest(test_versions: Dict[Tuple[int,int], KernelVersion], version: KernelVersion) -> None:
+    key = (version[0], version[1])
+
+    if test_versions.get(key, (0, 0, 0)) < version:
+        test_versions[key] = version
+
+def convert_ref_to_kernel_version(kernel_dir: Path, ref: str) -> Optional[KernelVersion]:
+    try:
+        tag_output = subprocess.check_output([git, "tag", "--points-at", ref, "--sort=creatordate"],
+                                             cwd=kernel_dir, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to list tags pointing to {ref} in {kernel_dir}.\n" + e.stderr.decode(errors='replace'))
+
+    return next(filter(None, map(parse_version_tag, tag_output.splitlines())), None)
+
+def version_tags_between(kernel_dir: Path, start: str, end: str, use_latest_point: bool) -> List[str]:
     try:
         tag_output = subprocess.check_output([git, "tag", "--contains", start, "--no-contains", end, "--sort=creatordate"],
                                              cwd=kernel_dir, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to list tags between {start} and {end} in {kernel_dir}.\n" + e.stderr.decode(errors='replace'))
 
-    # decode failure can't happen because is_version_tag only matches on ascii strings.
-    found_tags = [ tag.decode('ascii') for tag in tag_output.splitlines() if is_version_tag(tag) ]
+    test_versions = {} # (major,minor) => (major,minor,point). Retains only the highest point.
 
-    try:
-        if is_version_tag(end.encode('ascii')):
-            found_tags.append(end)
-    except UnicodeEncodeError:
-        pass # Whatever it is, it's not a valid version tag.
+    interval_versions = filter(None, map(parse_version_tag, tag_output.splitlines()))
 
-    return found_tags
+    if use_latest_point:
+        for version in interval_versions:
+            insert_version_if_latest(test_versions, version)
+    else:
+        test_versions = { v.major_minor(): v for v in interval_versions if v.point == 0 }
+
+    # If end is a kernel version like "v6.5" or any ref that happens to tagged as a kernel version,
+    # then include that kernel version in the list of versions and resolve to latest point if requested.
+
+    end_version = convert_ref_to_kernel_version(kernel_dir, end)
+    if end_version is not None:
+        if use_latest_point:
+            try:
+                tag_output = subprocess.check_output([git, "tag", "--contains", end, "--sort=creatordate"],
+                                                     cwd=kernel_dir, stderr=subprocess.PIPE)
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"Failed to list tags starting from {end} in {kernel_dir}.\n" + e.stderr.decode(errors='replace'))
+
+            def matching_version(v: KernelVersion) -> bool:
+                return v is not None and v.major_minor() == end_version.major_minor()
+
+            end_version = max(filter(matching_version, map(parse_version_tag, tag_output.splitlines())))
+
+        test_versions[end_version.major_minor()] = end_version
+
+    return [ str(v) for v in sorted(test_versions.values()) ]
 
 def test_one_build(module_dir: Path, kernel_dir: Path, ver: str) -> None:
     prepare_kernel(kernel_dir, ver)
@@ -100,7 +154,7 @@ def main() -> int:
     if args.end_ver is None:
         versions = [args.start_ver]
     else:
-        versions = version_tags_between(args.kernel_dir, args.start_ver, args.end_ver)
+        versions = version_tags_between(args.kernel_dir, args.start_ver, args.end_ver, True)
 
     print("Testing versions:", ", ".join(versions))
 

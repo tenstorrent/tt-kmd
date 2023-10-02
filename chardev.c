@@ -9,6 +9,7 @@
 #include <linux/uaccess.h>
 #include <linux/dma-mapping.h>
 #include <linux/version.h>
+#include <linux/hashtable.h>
 
 #include "device.h"
 #include "enumerate.h"
@@ -134,10 +135,14 @@ static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npage
 
 #define MMAP_SIZE_DMA_BUF (U64_C(1) << 32)
 
+#define DMABUF_HASHTABLE_BITS 4
 struct dmabuf {
+	struct hlist_node hash_chain;
+
 	void *ptr;	// kernel address for dma buffer
 	dma_addr_t phys;
 	u64 size;	// always a multiple of PAGE_SIZE
+	u8 index;
 };
 
 struct pinned_page_range {
@@ -152,7 +157,7 @@ struct pinned_page_range {
 struct chardev_private {
 	struct tenstorrent_device *device;
 	struct mutex mutex;
-	struct dmabuf dmabufs[TENSTORRENT_MAX_DMA_BUFS];
+	DECLARE_HASHTABLE(dmabufs, DMABUF_HASHTABLE_BITS);	// keyed on by dmabuf.index, chained on struct dmabuf.hash_chain
 	struct list_head pinnings;	// struct pinned_page_range.list
 };
 
@@ -350,6 +355,20 @@ static long ioctl_query_mappings(struct chardev_private *priv,
 	return 0;
 }
 
+static struct dmabuf *lookup_dmabuf_by_index(struct chardev_private *priv, u8 buf_index) {
+	struct dmabuf *dmabuf;
+
+	hash_for_each_possible(priv->dmabufs, dmabuf, hash_chain, buf_index)
+		if (dmabuf->index == buf_index)
+			return dmabuf;
+
+	return NULL;
+}
+
+static u64 dmabuf_mapping_start(u8 buf_index) {
+	return MMAP_OFFSET_DMA_BUF + buf_index * MMAP_SIZE_DMA_BUF;
+}
+
 static long ioctl_allocate_dma_buf(struct chardev_private *priv,
 				   struct tenstorrent_allocate_dma_buf __user *arg)
 {
@@ -372,40 +391,53 @@ static long ioctl_allocate_dma_buf(struct chardev_private *priv,
 	if (in.buf_index >= TENSTORRENT_MAX_DMA_BUFS)
 		return -EINVAL;
 
-	dmabuf = &priv->dmabufs[in.buf_index];
-
 	if (in.requested_size % PAGE_SIZE != 0
 	    || in.requested_size == 0
 	    || in.requested_size > MAX_DMA_BUF_SIZE)
 		return -EINVAL;
 
-	if (dmabuf->ptr != NULL)
-		return -EINVAL;
-
 	mutex_lock(&priv->mutex);
+
+	if (lookup_dmabuf_by_index(priv, in.buf_index)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	dmabuf = kzalloc(sizeof(*dmabuf), GFP_KERNEL);
+	if (!dmabuf) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
 	dma_buf_kernel_ptr = dma_alloc_coherent(&priv->device->pdev->dev,
 						in.requested_size,
 						&dma_handle, GFP_KERNEL);
 
 	if (dma_buf_kernel_ptr == NULL) {
+		kfree(dmabuf);
 		ret = -ENOMEM;
 		goto out;
 	}
 
+	dmabuf->index = in.buf_index;
 	dmabuf->ptr = dma_buf_kernel_ptr;
 	dmabuf->phys = dma_handle;
 	dmabuf->size = in.requested_size;
 
 	out.physical_address = (u64)dmabuf->phys;
-	out.mapping_offset = MMAP_OFFSET_DMA_BUF + MMAP_SIZE_DMA_BUF * in.buf_index;
+	out.mapping_offset = dmabuf_mapping_start(in.buf_index);
 	out.size = in.requested_size;
 
 	if (copy_to_user(&arg->out, &out, sizeof(out)) != 0) {
 		dma_free_coherent(&priv->device->pdev->dev, dmabuf->size,
 				  dmabuf->ptr, dmabuf->phys);
-		dmabuf->ptr = NULL;
+
+		kfree(dmabuf);
 		ret = -EFAULT;
+		goto out;
 	}
+
+	hash_add(priv->dmabufs, &dmabuf->hash_chain, dmabuf->index);
 
 out:
 	mutex_unlock(&priv->mutex);
@@ -639,17 +671,28 @@ static bool vma_target_range(struct vm_area_struct *vma, u64 start, u64 len)
 
 static struct dmabuf *vma_dmabuf_target(struct chardev_private *priv,
 					struct vm_area_struct *vma) {
-	unsigned int i;
-	for (i = 0; i < ARRAY_SIZE(priv->dmabufs); i++) {
-		u64 start = MMAP_OFFSET_DMA_BUF + i * MMAP_SIZE_DMA_BUF;
-		struct dmabuf *dmabuf = &priv->dmabufs[i];
+	unsigned long dmabuf_index;
+	struct dmabuf *dmabuf;
 
-		if (dmabuf->ptr != NULL
-		    && vma_target_range(vma, start, dmabuf->size))
-			return dmabuf;
-	}
+	if (vma->vm_pgoff < MMAP_OFFSET_DMA_BUF >> PAGE_SHIFT)
+		// Not in DMA buffer offset range (too low).
+		return NULL;
 
-	return NULL;
+	dmabuf_index = (vma->vm_pgoff - (MMAP_OFFSET_DMA_BUF >> PAGE_SHIFT)) / (MMAP_SIZE_DMA_BUF >> PAGE_SHIFT);
+	if (dmabuf_index >= TENSTORRENT_MAX_DMA_BUFS)
+		// Not in DMA buffer offset range (too high).
+		return NULL;
+
+	dmabuf = lookup_dmabuf_by_index(priv, dmabuf_index);
+	if (!dmabuf)
+		// No allocated DMA buffer for that index.
+		return NULL;
+
+	if (vma_target_range(vma, dmabuf_mapping_start(dmabuf_index), dmabuf->size))
+		return dmabuf;
+	else
+		// Allocated DMA buffer does not cover requested size.
+		return NULL;
 }
 
 static int map_pci_bar(struct pci_dev *pdev, struct vm_area_struct *vma, unsigned int bar)
@@ -738,6 +781,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 
 	mutex_init(&private_data->mutex);
 
+	hash_init(private_data->dmabufs);
 	INIT_LIST_HEAD(&private_data->pinnings);
 
 	private_data->device = tt_dev;
@@ -753,16 +797,17 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	struct tenstorrent_device *tt_dev = inode_to_tt_dev(inode);
 	struct chardev_private *priv = file->private_data;
 	struct pinned_page_range *pinning, *tmp_pinning;
+	struct hlist_node *tmp_dmabuf;
+	struct dmabuf *dmabuf;
 	unsigned int i;
 
 	decrement_cdev_open_count(tt_dev);
 
-	for (i = 0; i < ARRAY_SIZE(priv->dmabufs); i++) {
-		struct dmabuf *dmabuf = &priv->dmabufs[i];
+	hash_for_each_safe(priv->dmabufs, i, tmp_dmabuf, dmabuf, hash_chain) {
+		dma_free_coherent(&priv->device->pdev->dev, dmabuf->size, dmabuf->ptr, dmabuf->phys);
 
-		if (dmabuf->ptr != NULL)
-			dma_free_coherent(&priv->device->pdev->dev,
-					  dmabuf->size, dmabuf->ptr, dmabuf->phys);
+		hash_del(&dmabuf->hash_chain);
+		kfree(dmabuf);
 	}
 
 	list_for_each_entry_safe(pinning, tmp_pinning, &priv->pinnings, list) {

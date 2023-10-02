@@ -1,3 +1,4 @@
+#include <limits>
 #include <variant>
 #include <cerrno>
 
@@ -66,12 +67,14 @@ AllocateDmaBufUpTo(int dev_fd, std::uint32_t size, std::uint8_t index)
 
 void VerifyTooLargeIndexFails(int dev_fd)
 {
-    auto buf_max = AllocateDmaBuf(dev_fd, page_size(), TENSTORRENT_MAX_DMA_BUFS);
-    if (!std::holds_alternative<int>(buf_max))
-        THROW_TEST_FAILURE("DMA buf allocation with too-large index was permitted unexpectedly.");
+    if (TENSTORRENT_MAX_DMA_BUFS <= std::numeric_limits<decltype(tenstorrent_allocate_dma_buf_in::buf_index)>::max()) {
+        auto buf_max = AllocateDmaBuf(dev_fd, page_size(), TENSTORRENT_MAX_DMA_BUFS);
+        if (!std::holds_alternative<int>(buf_max))
+            THROW_TEST_FAILURE("DMA buf allocation with too-large index was permitted unexpectedly.");
 
-    if (std::get<int>(buf_max) != EINVAL)
-        THROW_TEST_FAILURE("DMA buf allocation with too-large index failed for a reason other than EINVAL.");
+        if (std::get<int>(buf_max) != EINVAL)
+            THROW_TEST_FAILURE("DMA buf allocation with too-large index failed for a reason other than EINVAL.");
+    }
 }
 
 void VerifyBufferMapping(int dev_fd, const std::vector<tenstorrent_allocate_dma_buf_out> &buffers)

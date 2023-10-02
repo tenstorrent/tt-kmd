@@ -122,12 +122,15 @@ static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npage
 // TENSTORRENT_IOCTL_ALLOCATE_DMA_BUF), but they are actually hard-coded.
 #define MMAP_OFFSET_RESOURCE0_UC	(U64_C(0) << 32)
 #define MMAP_OFFSET_RESOURCE0_WC	(U64_C(1) << 32)
-#define MMAP_OFFSET_DMA_BUF		(U64_C(2) << 32)
-// 2,3,4,5,6,7,8,9 are all DMA buffers.
-#define MMAP_OFFSET_RESOURCE1_UC	(U64_C(10) << 32)
-#define MMAP_OFFSET_RESOURCE1_WC	(U64_C(11) << 32)
-#define MMAP_OFFSET_RESOURCE2_UC	(U64_C(12) << 32)
-#define MMAP_OFFSET_RESOURCE2_WC	(U64_C(13) << 32)
+#define MMAP_OFFSET_RESOURCE1_UC	(U64_C(2) << 32)
+#define MMAP_OFFSET_RESOURCE1_WC	(U64_C(3) << 32)
+#define MMAP_OFFSET_RESOURCE2_UC	(U64_C(4) << 32)
+#define MMAP_OFFSET_RESOURCE2_WC	(U64_C(5) << 32)
+
+// tenstorrent_allocate_dma_buf_in.buf_index is u8 so that sets a limit of
+// U8_MAX DMA buffers per fd. 32-bit mmap offsets are divided by PAGE_SIZE,
+// so PAGE_SIZE << 32 is the largest possible offset.
+#define MMAP_OFFSET_DMA_BUF		((u64)(PAGE_SIZE-U8_MAX) << 32)
 
 #define MMAP_SIZE_DMA_BUF (U64_C(1) << 32)
 

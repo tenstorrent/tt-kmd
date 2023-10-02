@@ -697,7 +697,7 @@ static int tt_cdev_mmap(struct file *file, struct vm_area_struct *vma)
 		struct dmabuf *dmabuf = vma_dmabuf_target(priv, vma);
 		if (dmabuf != NULL)
 			return dma_mmap_coherent(&pdev->dev, vma, dmabuf->ptr,
-					 	 dmabuf->phys, dmabuf->size);
+						 dmabuf->phys, dmabuf->size);
 		else
 			return -EINVAL;
 	}

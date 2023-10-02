@@ -21,7 +21,7 @@ DEFINE_IDR(tenstorrent_dev_idr);
 DEFINE_MUTEX(tenstorrent_dev_idr_mutex);
 
 static int tenstorrent_reboot_notifier(struct notifier_block *nb,
-                        	       unsigned long action, void *data) {
+				       unsigned long action, void *data) {
 	struct tenstorrent_device *tt_dev = container_of(nb, struct tenstorrent_device, reboot_notifier);
 
 	if (action != SYS_POWER_OFF)

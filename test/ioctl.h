@@ -26,7 +26,7 @@
 #define TENSTORRENT_MAPPING_RESOURCE2_UC	5
 #define TENSTORRENT_MAPPING_RESOURCE2_WC	6
 
-#define TENSTORRENT_MAX_DMA_BUFS	8
+#define TENSTORRENT_MAX_DMA_BUFS	256
 
 struct tenstorrent_get_device_info_in {
 	__u32 output_size_bytes;

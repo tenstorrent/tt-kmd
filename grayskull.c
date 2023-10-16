@@ -367,7 +367,7 @@ static int grayskull_arc_init(struct grayskull_device *gs_dev) {
 		if (grayskull_load_iccm_fw(gs_dev,
 					GS_WATCHDOG_FW_NAME,
 					GS_WATCHDOG_FW_CORE_ID,
-					&gs_dev->tt.watchdog_fw_reset_vec)) {
+					&gs_dev->watchdog_fw_reset_vec)) {
 			pr_warn("Watchdog FW Override unsuccessful.\n");
 			goto grayskull_arc_init_err;
 		}
@@ -377,7 +377,7 @@ static int grayskull_arc_init(struct grayskull_device *gs_dev) {
 		if (grayskull_load_iccm_fw(gs_dev,
 					GS_SMBUS_FW_NAME,
 					GS_SMBUS_FW_CORE_ID,
-					&gs_dev->tt.smbus_fw_reset_vec)) {
+					&gs_dev->smbus_fw_reset_vec)) {
 			pr_warn("Watchdog FW Override unsuccessful.\n");
 			goto grayskull_arc_init_err;
 		}

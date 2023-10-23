@@ -1,0 +1,7 @@
+Next two lines contain only whitespace
+ 
+	
+This line has a trailing space. 
+This line has a trailing tab.	
+ 	This line's leading whitespace has a tab after a space.
+This line has        8 consecutive spaces.

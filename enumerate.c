@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
 #include <linux/idr.h>
@@ -66,6 +67,9 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 		return ordinal;
 	}
 
+	// The refcount created here persists until remove.
+	kref_init(&tt_dev->kref);
+
 	tt_dev->dev_class = device_class;
 	tt_dev->pdev = dev;
 	tt_dev->ordinal = ordinal;
@@ -99,25 +103,22 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 {
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(dev);
 
-	if (tt_dev->dev_class->reboot)
-		unregister_reboot_notifier(&tt_dev->reboot_notifier);
-
+	// These remove child sysfs entries which must happen before remove returns.
 	tenstorrent_unregister_device(tt_dev);
-
-	tt_dev->dev_class->cleanup_device(tt_dev);
-
 	tenstorrent_disable_interrupts(tt_dev);
 
 	pci_set_drvdata(dev, NULL);
 
-	pci_disable_pcie_error_reporting(dev);
-	pci_disable_device(dev);
-
+	// If this is postponed, a subsequent probe is forced to use a different ordinal.
 	mutex_lock(&tenstorrent_dev_idr_mutex);
 	idr_remove(&tenstorrent_dev_idr, tt_dev->ordinal);
 	mutex_unlock(&tenstorrent_dev_idr_mutex);
 
 	kfree(tt_dev);
+}
+
+void tenstorrent_device_put(struct tenstorrent_device *tt_dev) {
+	kref_put(&tt_dev->kref, tt_dev_release);
 }
 
 extern const struct pci_device_id tenstorrent_ids[];

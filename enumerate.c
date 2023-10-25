@@ -71,7 +71,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	kref_init(&tt_dev->kref);
 
 	tt_dev->dev_class = device_class;
-	tt_dev->pdev = dev;
+	tt_dev->pdev = pci_dev_get(dev);
 	tt_dev->ordinal = ordinal;
 
 	mutex_init(&tt_dev->chardev_mutex);
@@ -114,6 +114,7 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	idr_remove(&tenstorrent_dev_idr, tt_dev->ordinal);
 	mutex_unlock(&tenstorrent_dev_idr_mutex);
 
+	pci_dev_put(dev);
 	kfree(tt_dev);
 }
 

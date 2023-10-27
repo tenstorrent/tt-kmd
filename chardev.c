@@ -787,6 +787,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	hash_init(private_data->dmabufs);
 	INIT_LIST_HEAD(&private_data->pinnings);
 
+	kref_get(&tt_dev->kref);
 	private_data->device = tt_dev;
 	file->private_data = private_data;
 
@@ -797,8 +798,8 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 
 static int tt_cdev_release(struct inode *inode, struct file *file)
 {
-	struct tenstorrent_device *tt_dev = inode_to_tt_dev(inode);
 	struct chardev_private *priv = file->private_data;
+	struct tenstorrent_device *tt_dev = priv->device;
 	struct pinned_page_range *pinning, *tmp_pinning;
 	struct hlist_node *tmp_dmabuf;
 	struct dmabuf *dmabuf;
@@ -807,7 +808,7 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	decrement_cdev_open_count(tt_dev);
 
 	hash_for_each_safe(priv->dmabufs, i, tmp_dmabuf, dmabuf, hash_chain) {
-		dma_free_coherent(&priv->device->pdev->dev, dmabuf->size, dmabuf->ptr, dmabuf->phys);
+		dma_free_coherent(&tt_dev->pdev->dev, dmabuf->size, dmabuf->ptr, dmabuf->phys);
 
 		hash_del(&dmabuf->hash_chain);
 		kfree(dmabuf);
@@ -820,6 +821,8 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 		list_del(&pinning->list);
 		kfree(pinning);
 	}
+
+	tenstorrent_device_put(tt_dev);
 
 	kfree(file->private_data);
 	file->private_data = NULL;

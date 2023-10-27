@@ -9,10 +9,13 @@
 #include <linux/pci.h>
 #include <linux/cdev.h>
 #include <linux/reboot.h>
+#include <linux/kref.h>
 
 struct tenstorrent_device_class;
 
 struct tenstorrent_device {
+	struct kref kref;
+
 	struct device dev;
 	struct cdev chardev;
 	struct pci_dev *pdev;
@@ -38,5 +41,7 @@ struct tenstorrent_device_class {
 	void (*last_release_cb)(struct tenstorrent_device *ttdev);
 	void (*reboot)(struct tenstorrent_device *ttdev);
 };
+
+void tenstorrent_device_put(struct tenstorrent_device *);
 
 #endif

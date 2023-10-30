@@ -5,23 +5,34 @@
 
 import fileinput
 import re
+import sys
 
 empty_with_spaces_re = re.compile('^\\s+$')     # Lines that contain whitespace but no nonspaces
-trailing_whitespace_re = re.compile('\S\s+$')   # Lines that contain trailing whitespace
-tab_after_space = re.compile('^\s* \t')         # Lines where the leading whitespace contains a tab after a space
-consecutive_spaces = re.compile(' {8}')         # Lines that contain 8 consecutive spaces
+trailing_whitespace_re = re.compile('\\S\\s+$') # Lines that contain trailing whitespace
+tab_after_space = re.compile('^\\s* \t')        # Lines where the leading whitespace contains a tab after a space
+initial_consecutive_spaces = re.compile('^\\s* {8}')         # Lines that contain 8 consecutive spaces in the initial whitespace
+
+error_count = 0
+
+def error(msg: str) -> None:
+    global error_count
+    error_count += 1
+
+    print(f'{fileinput.filename()}:{fileinput.filelineno()}: {msg}', file=sys.stderr)
 
 for line in fileinput.input():
     line = line.rstrip('\n')
 
-    if empty_with_spaces_re.match(line):
-        print(f'{fileinput.filename()}:{fileinput.filelineno()}: contains whitespace but no nonspaces.')
+    if empty_with_spaces_re.search(line):
+        error('contains whitespace but no nonspaces.')
 
-    if trailing_whitespace_re.match(line):
-        print(f'{fileinput.filename()}:{fileinput.filelineno()}: contains trailing whitespace.')
+    if trailing_whitespace_re.search(line):
+        error('contains trailing whitespace.')
 
-    if tab_after_space.match(line):
-        print(f'{fileinput.filename()}:{fileinput.filelineno()}: the leading whitespace contains a tab after a space.')
+    if tab_after_space.search(line):
+        error('the leading whitespace contains a tab after a space.')
 
-    if consecutive_spaces.match(line):
-        print(f'{fileinput.filename()}:{fileinput.filelineno()}: contains 8 consecutive spaces.')
+    if initial_consecutive_spaces.search(line):
+        error('contains 8 consecutive spaces in initial whitespace.')
+
+sys.exit(1 if error_count > 0 else 0)

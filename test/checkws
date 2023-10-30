@@ -10,7 +10,7 @@ import sys
 empty_with_spaces_re = re.compile('^\\s+$')     # Lines that contain whitespace but no nonspaces
 trailing_whitespace_re = re.compile('\\S\\s+$') # Lines that contain trailing whitespace
 tab_after_space = re.compile('^\\s* \t')        # Lines where the leading whitespace contains a tab after a space
-consecutive_spaces = re.compile(' {8}')         # Lines that contain 8 consecutive spaces
+initial_consecutive_spaces = re.compile('^\\s* {8}')         # Lines that contain 8 consecutive spaces in the initial whitespace
 
 error_count = 0
 
@@ -32,7 +32,7 @@ for line in fileinput.input():
     if tab_after_space.search(line):
         error('the leading whitespace contains a tab after a space.')
 
-    if consecutive_spaces.search(line):
-        error('contains 8 consecutive spaces.')
+    if initial_consecutive_spaces.search(line):
+        error('contains 8 consecutive spaces in initial whitespace.')
 
 sys.exit(1 if error_count > 0 else 0)

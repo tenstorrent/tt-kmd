@@ -11,8 +11,8 @@ opts=$(/usr/bin/getopt -n make-installer -l deploy-motor,help "h" "$@")
 eval set -- "$opts"
 
 print_usage() {
-    echo "Usage: make-installer --motor-deploy | target-dir"
-    echo "--motor-deploy automatically deploys to /mnt/motor."
+    echo "Usage: make-installer --deploy-motor | target-dir"
+    echo "--deploy-motor automatically deploys to /mnt/motor."
     echo "Otherwise a target directory must be given."
 }
 

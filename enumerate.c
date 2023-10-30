@@ -114,7 +114,22 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	idr_remove(&tenstorrent_dev_idr, tt_dev->ordinal);
 	mutex_unlock(&tenstorrent_dev_idr_mutex);
 
-	pci_dev_put(dev);
+	tenstorrent_device_put(tt_dev);
+}
+
+static void tt_dev_release(struct kref *tt_dev_kref) {
+	struct tenstorrent_device *tt_dev = container_of(tt_dev_kref, struct tenstorrent_device, kref);
+	struct pci_dev *pdev = tt_dev->pdev;
+
+	if (tt_dev->dev_class->reboot)
+		unregister_reboot_notifier(&tt_dev->reboot_notifier);
+
+	tt_dev->dev_class->cleanup_device(tt_dev);
+
+	pci_disable_pcie_error_reporting(pdev);
+	pci_disable_device(pdev);
+
+	pci_dev_put(pdev);
 	kfree(tt_dev);
 }
 

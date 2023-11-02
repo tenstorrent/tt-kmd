@@ -7,9 +7,11 @@
 #include "wormhole.h"
 #include "grayskull.h"
 #include "pcie.h"
+#include "module.h"
 
 #define WH_FW_MSG_PCIE_INDEX 0x51
 #define WH_FW_MSG_ASTATE0 0xA0
+#define WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT 0xBC
 
 // The iATU can be used to match & remap PCIE transactions.
 #define IATU_BASE 0x1200	// Relative to the start of BAR2
@@ -96,6 +98,7 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 		grayskull_send_arc_fw_message(reset_unit_regs(wh_dev), WH_FW_MSG_ASTATE0, 10000, NULL);
 		update_device_index(wh_dev);
 		complete_pcie_init(&wh_dev->tt, reset_unit_regs(wh_dev));
+		grayskull_send_arc_fw_message_with_args(reset_unit_regs(wh_dev), WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT, auto_reset_timeout, 0, 10000, NULL);
 	}
 
 	return true;

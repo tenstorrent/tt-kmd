@@ -87,6 +87,10 @@ uint reset_limit = 10;
 module_param(reset_limit, uint, 0444);
 MODULE_PARM_DESC(reset_limit, "Maximum number of times to reset device during boot.");
 
+unsigned char auto_reset_timeout = 10;
+module_param(auto_reset_timeout, byte, 0444);
+MODULE_PARM_DESC(auto_reset_timeout, "Timeout duration in seconds for M3 auto reset to occur.");
+
 struct tenstorrent_device_class;
 extern struct tenstorrent_device_class grayskull_class;
 extern struct tenstorrent_device_class wormhole_class;

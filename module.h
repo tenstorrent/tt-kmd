@@ -23,4 +23,5 @@ extern uint axiclk_override;
 extern uint tensix_harvest_override;
 extern uint dma_address_bits;
 extern uint reset_limit;
+extern unsigned char auto_reset_timeout;
 #endif

@@ -7,6 +7,7 @@
 ## Supported hardware:
 * Grayskull
 * Wormhole
+* Blackhole
 
 The driver registers device files named `/dev/tenstorrent/%d`, one for each enumerated device.
 

@@ -14,7 +14,8 @@ The driver registers device files named `/dev/tenstorrent/%d`, one for each enum
 
 * You must have dkms installed.
     * `apt install dkms` (Debian, Ubuntu)
-    * `dnf install dkms` (Fedora, Enterprise Linux based)
+    * `dnf install dkms` (Fedora)
+    * `dnf install epel-release && dnf install dkms` (Enterprise Linux based)
 ```
 sudo dkms add .
 sudo dkms install tenstorrent/1.26

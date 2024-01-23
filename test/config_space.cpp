@@ -117,7 +117,7 @@ void VerifyMSI(int config_fd)
         THROW_TEST_FAILURE("MSI address is zero.");
 }
 
-void VerifyAER(int config_fd)
+void VerifyAER(int config_fd, bool check_aer)
 {
     // Check that AER is enabled.
     auto maybe_pcie_offset = find_capability(config_fd, pcie_cap_id);
@@ -133,13 +133,13 @@ void VerifyAER(int config_fd)
 
     auto device_control = read_config<std::uint16_t>(config_fd, pcie_offset + device_control_offset);
 
-    if (!(device_control & any_error_reporting_enable))
+    if (check_aer && !(device_control & any_error_reporting_enable))
         THROW_TEST_FAILURE("AER is disabled.");
 }
 
 } // namespace
 
-void TestConfigSpace(const EnumeratedDevice &dev)
+void TestConfigSpace(const EnumeratedDevice &dev, bool check_aer)
 {
     auto sysfs_dir = sysfs_dir_for_bdf(dev.location);
     int config_fd = open(std::string(sysfs_dir + "/config").c_str(), O_RDONLY);
@@ -156,7 +156,7 @@ void TestConfigSpace(const EnumeratedDevice &dev)
 
     try
     {
-        VerifyAER(config_fd);
+        VerifyAER(config_fd, check_aer);
     }
     catch (const config_space_read_error &)
     {

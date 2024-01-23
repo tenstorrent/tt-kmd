@@ -11,6 +11,8 @@
 #include <linux/reboot.h>
 #include <linux/kref.h>
 
+#include "ioctl.h"
+
 struct tenstorrent_device_class;
 
 struct tenstorrent_device {
@@ -29,6 +31,8 @@ struct tenstorrent_device {
 	unsigned int chardev_open_count;
 
 	struct notifier_block reboot_notifier;
+
+	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
 };
 
 struct tenstorrent_device_class {

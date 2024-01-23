@@ -162,6 +162,8 @@ struct chardev_private {
 	struct mutex mutex;
 	DECLARE_HASHTABLE(dmabufs, DMABUF_HASHTABLE_BITS);	// keyed on by dmabuf.index, chained on struct dmabuf.hash_chain
 	struct list_head pinnings;	// struct pinned_page_range.list
+
+	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
 };
 
 static dev_t tt_device_id;
@@ -611,6 +613,71 @@ err_free_pinning:
 	return ret;
 }
 
+static long ioctl_lock_ctl(struct chardev_private *priv,
+			    struct tenstorrent_lock_ctl __user *arg) {
+	u32 bytes_to_copy;
+
+	struct tenstorrent_lock_ctl_in in;
+	struct tenstorrent_lock_ctl_out out;
+
+	memset(&in, 0, sizeof(in));
+	memset(&out, 0, sizeof(out));
+
+	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
+		return -EFAULT;
+
+	if (in.index >= TENSTORRENT_RESOURCE_LOCK_COUNT)
+		return -EINVAL;
+
+	switch (in.flags) {
+		case TENSTORRENT_LOCK_CTL_ACQUIRE:
+			// If the global lock was unset then the local one must also be unset.
+			// In a race this won't desync because the global lock is set first in the lock
+			// and unset last in the unlock.
+			if (!test_and_set_bit(in.index, priv->device->resource_lock)) {
+				set_bit(in.index, priv->resource_lock);
+
+				// 1 means that the lock was aquired.
+				out.value = 1;
+			} else {
+				// 0 means that the lock failed to be aquired.
+				out.value = 0;
+			}
+			break;
+		case TENSTORRENT_LOCK_CTL_RELEASE:
+			// First check the local lock, it is set last when locking so must be unset first when unlocking.
+			if (test_and_clear_bit(in.index, priv->resource_lock)) {
+				clear_bit(in.index, priv->device->resource_lock);
+
+				// 1 means that the lock was released.
+				out.value = 1;
+			} else {
+				// 0 means that the lock failed to be released.
+				out.value = 0;
+			}
+			break;
+		case TENSTORRENT_LOCK_CTL_TEST:
+			// The local view goes in the first bit and the global goes in the second.
+			// This should ensure that you can still convert to a bool in order to check if the lock
+			// has been set at all, but also allows means that the caller doesn't always needs to do their own bookkeeping.
+			out.value = (test_bit(in.index, priv->device->resource_lock) << 1) |
+			             test_bit(in.index, priv->resource_lock);
+			break;
+		default:
+			return -EINVAL;
+	}
+
+	if (clear_user(&arg->out, in.output_size_bytes) != 0)
+		return -EFAULT;
+
+	bytes_to_copy = min(in.output_size_bytes, (u32)sizeof(out));
+
+	if (copy_to_user(&arg->out, &out, bytes_to_copy) != 0)
+		return -EFAULT;
+
+	return 0;
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	long ret = -EINVAL;
@@ -646,6 +713,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_PIN_PAGES:
 			ret = ioctl_pin_pages(priv, (struct tenstorrent_pin_pages __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_LOCK_CTL:
+			ret = ioctl_lock_ctl(priv, (struct tenstorrent_lock_ctl __user *)arg);
 			break;
 
 		default:
@@ -804,6 +875,7 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	struct hlist_node *tmp_dmabuf;
 	struct dmabuf *dmabuf;
 	unsigned int i;
+	unsigned int bitpos;
 
 	decrement_cdev_open_count(tt_dev);
 
@@ -820,6 +892,13 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 
 		list_del(&pinning->list);
 		kfree(pinning);
+	}
+
+	// Release all locally held resources.
+	for (bitpos = 0; bitpos < TENSTORRENT_RESOURCE_LOCK_COUNT; ++bitpos) {
+		// Same as in the ioctl handler, first clear the local data because it is set last during the lock.
+		if (test_and_clear_bit(bitpos, priv->resource_lock))
+			clear_bit(bitpos, priv->device->resource_lock);
 	}
 
 	tenstorrent_device_put(tt_dev);

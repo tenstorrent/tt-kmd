@@ -141,8 +141,8 @@ static bool is_hardware_hung(struct pci_dev *pdev, u8 __iomem *reset_unit_regs) 
 	return (ioread32(reset_unit_regs + SCRATCH_REG(6)) == 0xFFFFFFFF);
 }
 
-int wait_reg32_with_timeout(u8 __iomem* reset_unit_regs, u8 __iomem* reg,
-			    u32 expected_val, u32 timeout_us) {
+static int wait_reg32_with_timeout(u8 __iomem* reset_unit_regs, u8 __iomem* reg,
+				   u32 expected_val, u32 timeout_us) {
 	// Scale poll_period for around 100 polls, and at least 10 us
 	u32 poll_period_us = max((u32)10, timeout_us / 100);
 
@@ -163,8 +163,8 @@ int wait_reg32_with_timeout(u8 __iomem* reset_unit_regs, u8 __iomem* reg,
 	}
 }
 
-int arc_msg_poll_completion(u8 __iomem* reset_unit_regs, u8 __iomem* msg_reg,
-			    u32 msg_code, u32 timeout_us, u16* exit_code) {
+static int arc_msg_poll_completion(u8 __iomem* reset_unit_regs, u8 __iomem* msg_reg,
+				   u32 msg_code, u32 timeout_us, u16* exit_code) {
 	// Scale poll_period for around 100 polls, and at least 10 us
 	u32 poll_period_us = max((u32)10, timeout_us / 100);
 
@@ -677,7 +677,7 @@ void grayskull_send_curr_date(u8 __iomem* reset_unit_regs) {
 						packed_datetime_low, packed_datetime_high, 1000, NULL);
 }
 
-bool grayskull_init(struct tenstorrent_device *tt_dev) {
+static bool grayskull_init(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
 	gs_dev->reg_iomap = pci_iomap_range(gs_dev->tt.pdev, 0, REG_IOMAP_START, REG_IOMAP_LEN);
@@ -697,7 +697,7 @@ bool grayskull_init(struct tenstorrent_device *tt_dev) {
 	return true;
 }
 
-bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
+static bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
 	if (arc_l2_is_running(gs_dev->reset_unit_regs)) {
@@ -720,7 +720,7 @@ bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 	return true;
 }
 
-void grayskull_cleanup(struct tenstorrent_device *tt_dev) {
+static void grayskull_cleanup(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
 	if (gs_dev->reset_unit_regs != NULL)

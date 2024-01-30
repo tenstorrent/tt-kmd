@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include "interrupt.h"
+
 #include <linux/pci.h>
 #include <linux/types.h>
 #include <linux/interrupt.h>

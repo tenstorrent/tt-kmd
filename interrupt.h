@@ -4,6 +4,8 @@
 #ifndef TTDRIVER_INTERRUPT_H_INCLUDED
 #define TTDRIVER_INTERRUPT_H_INCLUDED
 
+#include <linux/types.h>
+
 struct tenstorrent_device;
 
 bool tenstorrent_enable_interrupts(struct tenstorrent_device *tt_dev);

@@ -15,6 +15,8 @@ struct grayskull_device {
 	u32 enabled_rows;	// bitmap of enabled Tensix rows (NOC0-indexed)
 	u32 watchdog_fw_reset_vec;
 	u32 smbus_fw_reset_vec;
+	struct device *hwmon_device;
+	u8 __iomem *telemetry_base;
 };
 
 #define tt_dev_to_gs_dev(ttdev) \

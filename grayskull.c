@@ -7,6 +7,8 @@
 #include <linux/slab.h>
 #include <linux/firmware.h>
 #include <linux/timekeeping.h>
+#include <linux/hwmon.h>
+#include <linux/stat.h>
 #include <asm/io.h>
 
 #include "module.h"
@@ -74,6 +76,8 @@
 #define GS_FW_MSG_ASTATE3 0xA3
 #define GS_FW_MSG_ASTATE5 0xA5
 #define GS_FW_MSG_CURR_DATE 0xB7
+#define GS_FW_MSG_GET_VERSION 0xB9
+#define GS_FW_MSG_GET_TELEMETRY_OFFSET 0x2C
 
 #define GS_ARC_L2_FW_NAME "tenstorrent_gs_arc_l2_fw.bin"
 #define GS_ARC_L2_FW_SIZE_BYTES 0xF000
@@ -610,6 +614,256 @@ static void grayskull_noc_init(struct grayskull_device *gs_dev) {
 	}
 }
 
+static umode_t grayskull_hwmon_is_visible(const void *data, enum hwmon_sensor_types type, u32 attr, int channel) {
+	switch (type) {
+	case hwmon_temp:
+		switch (attr) {
+		case hwmon_temp_input:
+		case hwmon_temp_label:
+		case hwmon_temp_max:
+			return S_IRUGO;
+		default:
+			break;
+		}
+		break;
+	case hwmon_in:
+		switch (attr) {
+		case hwmon_in_input:
+		case hwmon_in_label:
+		case hwmon_in_max:
+			return S_IRUGO;
+		default:
+			break;
+		}
+		break;
+	case hwmon_curr:
+		switch (attr) {
+		case hwmon_curr_input:
+		case hwmon_curr_label:
+		case hwmon_curr_max:
+			return S_IRUGO;
+		default:
+			break;
+		}
+		break;
+	case hwmon_power:
+		switch (attr) {
+		case hwmon_power_input:
+		case hwmon_power_label:
+		case hwmon_power_max:
+			return S_IRUGO;
+		default:
+			break;
+		}
+	default:
+		break;
+	}
+	return 0;
+}
+
+static int grayskull_read_asic_temp(struct grayskull_device *gs_dev, long *cur_temp, long *max_temp) {
+	unsigned int val;
+
+	if (gs_dev->telemetry_base == NULL)
+		return -ENODEV;
+
+	if (cur_temp) {
+		val = ioread32(gs_dev->telemetry_base + 0x64);
+		*cur_temp = (val & 0xFFFF) << 6;
+	}
+
+	if (max_temp) {
+		val = ioread32(gs_dev->telemetry_base + 0x78);
+		*max_temp = (val & 0xFFFF) * 1000;
+	}
+
+	return 0;
+}
+
+static int grayskull_read_vcore(struct grayskull_device *gs_dev, long *cur_vcore, long *max_vcore) {
+	unsigned int val;
+
+	if (gs_dev->telemetry_base == NULL)
+		return -ENODEV;
+
+	if (cur_vcore) {
+		val = ioread32(gs_dev->telemetry_base + 0x60);
+		*cur_vcore = val;
+	}
+
+	if (max_vcore) {
+		val = ioread32(gs_dev->telemetry_base + 0x74);
+		*max_vcore = val >> 16;
+	}
+
+	return 0;
+}
+
+static int grayskull_read_current(struct grayskull_device *gs_dev, long *amperes, long *max_amperes) {
+	unsigned int val;
+
+	if (gs_dev->telemetry_base == NULL)
+		return -ENODEV;
+
+	val = ioread32(gs_dev->telemetry_base + 0x70);
+
+	if (amperes)
+		*amperes = (val & 0xFFFF) * 1000;
+	if (max_amperes)
+		*max_amperes = ((val >> 16) & 0xFFFF) * 1000;
+
+	return 0;
+}
+
+static int grayskull_read_power(struct grayskull_device *gs_dev, long *watts, long *max_watts) {
+	unsigned int val;
+
+	if (gs_dev->telemetry_base == NULL)
+		return -ENODEV;
+
+	val = ioread32(gs_dev->telemetry_base + 0x6C);
+
+	if (watts)
+		*watts = (val & 0xFFFF) * 1000;
+	if (max_watts)
+		*max_watts = ((val >> 16) & 0xFFFF) * 1000;
+
+	return 0;
+}
+
+static int grayskull_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long *val) {
+	struct grayskull_device *gs_dev = dev_get_drvdata(dev);
+
+	if (type == hwmon_temp && attr == hwmon_temp_input)
+		return grayskull_read_asic_temp(gs_dev, val, NULL);
+
+	if (type == hwmon_temp && attr == hwmon_temp_max)
+		return grayskull_read_asic_temp(gs_dev, NULL, val);
+
+	if (type == hwmon_in && attr == hwmon_in_input)
+		return grayskull_read_vcore(gs_dev, val, NULL);
+
+	if (type == hwmon_in && attr == hwmon_in_max)
+		return grayskull_read_vcore(gs_dev, NULL, val);
+
+	if (type == hwmon_curr && attr == hwmon_curr_input)
+		return grayskull_read_current(gs_dev, val, NULL);
+
+	if (type == hwmon_curr && attr == hwmon_curr_max)
+		return grayskull_read_current(gs_dev, NULL, val);
+
+	if (type == hwmon_power && attr == hwmon_power_input)
+		return grayskull_read_power(gs_dev, val, NULL);
+
+	if (type == hwmon_power && attr == hwmon_power_max)
+		return grayskull_read_power(gs_dev, NULL, val);
+
+	return -EOPNOTSUPP;
+}
+
+static int grayskull_hwmon_read_string(struct device *dev, enum hwmon_sensor_types type,
+		    u32 attr, int channel, const char **str) {
+
+	if (type == hwmon_temp && attr == hwmon_temp_label) {
+		*str = "asic_temp";
+		return 0;
+	}
+
+	if (type == hwmon_in && attr == hwmon_in_label) {
+		*str = "vcore";
+		return 0;
+	}
+
+	if (type == hwmon_curr && attr == hwmon_curr_label) {
+		*str = "current";
+		return 0;
+	}
+
+	if (type == hwmon_power && attr == hwmon_power_label) {
+		*str = "power";
+		return 0;
+	}
+
+	return -EOPNOTSUPP;
+}
+
+static const struct hwmon_ops grayskull_hwmon_ops = {
+	.is_visible = grayskull_hwmon_is_visible,
+	.read = grayskull_hwmon_read,
+	.read_string = grayskull_hwmon_read_string,
+};
+
+static const struct hwmon_channel_info *grayskull_hwmon_info[] = {
+	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_MAX),
+	HWMON_CHANNEL_INFO(in, HWMON_I_INPUT | HWMON_I_LABEL | HWMON_I_MAX),
+	HWMON_CHANNEL_INFO(curr, HWMON_C_INPUT | HWMON_C_LABEL | HWMON_C_MAX),
+	HWMON_CHANNEL_INFO(power, HWMON_P_INPUT | HWMON_P_LABEL | HWMON_P_MAX),
+	NULL
+};
+
+static const struct hwmon_chip_info grayskull_hwmon_chip_info = {
+	.ops = &grayskull_hwmon_ops,
+	.info = grayskull_hwmon_info,
+};
+
+static bool grayskull_read_fw_version(struct grayskull_device *gs_dev, u32 *fw_version) {
+	void __iomem *arc_return_reg = gs_dev->reset_unit_regs + SCRATCH_REG(3);
+
+	if (!grayskull_send_arc_fw_message(gs_dev->reset_unit_regs, GS_FW_MSG_GET_VERSION, 10000, NULL))
+		return false;
+
+	*fw_version = ioread32(arc_return_reg);
+
+	return true;
+}
+
+static bool grayskull_read_fw_telemetry_offset(struct grayskull_device *gs_dev, u32 *offset) {
+	void __iomem *arc_return_reg = gs_dev->reset_unit_regs + SCRATCH_REG(3);
+
+	if (!grayskull_send_arc_fw_message(gs_dev->reset_unit_regs, GS_FW_MSG_GET_TELEMETRY_OFFSET, 10000, NULL))
+		return false;
+
+	*offset = ioread32(arc_return_reg);
+
+	return true;
+}
+
+static u32 grayskull_convert_arc_addr_to_regio_map_offset(u32 arc_addr) {
+	return ARC_CSM_MEMORY_OFFSET + (arc_addr - 0x10000000);
+}
+
+static void grayskull_hwmon_init(struct grayskull_device *gs_dev) {
+	struct device *dev = &gs_dev->tt.pdev->dev;
+	struct device *hwmon_device;
+	u32 fw_version;
+	u32 telemetry_offset;
+
+	if (!grayskull_read_fw_version(gs_dev, &fw_version)) {
+		pr_warn("Failed to read ARC FW version (this is normal for old firmware).\n");
+		goto grayskull_hwmon_init_err;
+	}
+
+	if (fw_version <= 0x01030000) {
+		pr_warn("ARC FW version %08X is too old for hwmon support.\n", fw_version);
+		goto grayskull_hwmon_init_err;
+	}
+
+	if (!grayskull_read_fw_telemetry_offset(gs_dev, &telemetry_offset))
+		goto grayskull_hwmon_init_err;
+
+	hwmon_device = devm_hwmon_device_register_with_info(dev, "grayskull", gs_dev, &grayskull_hwmon_chip_info, NULL);
+	if (IS_ERR(hwmon_device))
+		goto grayskull_hwmon_init_err;
+
+	gs_dev->telemetry_base = gs_dev->reg_iomap + grayskull_convert_arc_addr_to_regio_map_offset(telemetry_offset);
+	gs_dev->hwmon_device = hwmon_device;
+
+	return;
+
+grayskull_hwmon_init_err:
+	pr_warn("Failed to initialize hwmon.\n");
+}
+
 // This is shared with wormhole.
 bool grayskull_shutdown_firmware(struct pci_dev *pdev, u8 __iomem* reset_unit_regs) {
 	if (is_hardware_hung(pdev, reset_unit_regs))
@@ -716,6 +970,8 @@ static bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 	grayskull_harvesting_init(gs_dev);
 
 	grayskull_noc_init(gs_dev);
+
+	grayskull_hwmon_init(gs_dev);
 
 	return true;
 }

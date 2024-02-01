@@ -3,6 +3,7 @@
 
 #include <optional>
 #include <string>
+#include <cstdint>
 
 #include <errno.h>
 #include <sys/ioctl.h>

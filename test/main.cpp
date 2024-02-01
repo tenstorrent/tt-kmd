@@ -14,6 +14,7 @@ void TestQueryMappings(const EnumeratedDevice &dev);
 void TestDmaBuf(const EnumeratedDevice &dev);
 void TestPinPages(const EnumeratedDevice &dev);
 void TestLock(const EnumeratedDevice &dev);
+void TestHwmon(const EnumeratedDevice &dev);
 
 int main(int argc, char *argv[])
 {
@@ -35,6 +36,7 @@ int main(int argc, char *argv[])
         TestDmaBuf(d);
         TestPinPages(d);
         TestLock(d);
+        TestHwmon(d);
 
         at_least_one_device = true;
     }

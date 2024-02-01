@@ -4,6 +4,7 @@
 #include <limits>
 #include <variant>
 #include <cerrno>
+#include <cstdint>
 
 #include <sys/ioctl.h>
 #include <sys/mman.h>

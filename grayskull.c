@@ -9,7 +9,7 @@
 #include <linux/timekeeping.h>
 #include <linux/hwmon.h>
 #include <linux/stat.h>
-#include <linux/bits.h>
+#include <linux/bitops.h>
 #include <asm/io.h>
 
 #include "module.h"
@@ -17,6 +17,7 @@
 #include "ttkmd_arc_if.h"
 #include "enumerate.h"
 #include "pcie.h"
+#include "hwmon.h"
 
 #define GRID_SIZE_X 13
 #define GRID_SIZE_Y 12
@@ -57,7 +58,6 @@
 #define ARC_UDMIAXI_REGION_REG 0x10C
 #define ARC_UDMIAXI_REGION_ICCM(n) (0x3 * (n))
 #define ARC_UDMIAXI_REGION_CSM 0x10
-
 
 #define GPIO_PAD_VAL_REG 0x1B8
 #define GPIO_ARC_SPI_BOOTROM_EN_MASK (1 << 12)
@@ -134,6 +134,10 @@ struct TLB_16M_REG {
 };
 
 #define TLB_16M_SIZE_SHIFT 24
+
+static u32 gs_arc_addr_to_sysreg(u32 arc_addr) {
+	return ARC_CSM_MEMORY_OFFSET + (arc_addr - 0x10000000);
+}
 
 static bool is_hardware_hung(struct pci_dev *pdev, u8 __iomem *reset_unit_regs) {
 	u16 vendor_id;
@@ -615,109 +619,6 @@ static void grayskull_noc_init(struct grayskull_device *gs_dev) {
 	}
 }
 
-struct gs_hwmon_attr {
-	enum hwmon_sensor_types type;
-	u32 attr;
-	u32 reg_offset;
-	u32 shift;
-	u32 mask;
-	u32 multiplier;
-};
-
-static const struct gs_hwmon_attr gs_hwmon_attributes[] = {
-	{ hwmon_temp,  hwmon_temp_input,  0x64, 0,  GENMASK(15, 0), 64   },
-	{ hwmon_temp,  hwmon_temp_max,    0x78, 0,  GENMASK(15, 0), 1000 },
-	{ hwmon_in,    hwmon_in_input,    0x60, 0,  GENMASK(31, 0), 1    },
-	{ hwmon_in,    hwmon_in_max,      0x74, 16, GENMASK(15, 0), 1    },
-	{ hwmon_curr,  hwmon_curr_input,  0x70, 0,  GENMASK(15, 0), 1000 },
-	{ hwmon_curr,  hwmon_curr_max,    0x70, 16, GENMASK(15, 0), 1000 },
-	{ hwmon_power, hwmon_power_input, 0x6c, 0,  GENMASK(15, 0), 1000 },
-	{ hwmon_power, hwmon_power_max,   0x6c, 16, GENMASK(15, 0), 1000 },
-};
-
-struct gs_hwmon_label {
-	enum hwmon_sensor_types type;
-	u32 attr;
-	const char *name;
-};
-
-static const struct gs_hwmon_label gs_hwmon_labels[] = {
-	{ hwmon_temp,  hwmon_temp_label,  "asic_temp" },
-	{ hwmon_in,    hwmon_in_label,    "vcore"     },
-	{ hwmon_curr,  hwmon_curr_label,  "current"   },
-	{ hwmon_power, hwmon_power_label, "power"     },
-	{ .name = NULL },
-};
-
-static umode_t grayskull_hwmon_is_visible(const void *data, enum hwmon_sensor_types type, u32 attr, int channel) {
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(gs_hwmon_attributes); i++) {
-		const struct gs_hwmon_attr *attribute = &gs_hwmon_attributes[i];
-		if (attribute->type == type && attribute->attr == attr)
-			return S_IRUGO;
-	}
-
-	for (i = 0; i < ARRAY_SIZE(gs_hwmon_labels); i++) {
-		const struct gs_hwmon_label *label = &gs_hwmon_labels[i];
-		if (label->type == type && label->attr == attr)
-			return S_IRUGO;
-	}
-
-	return 0;
-}
-
-static int grayskull_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long *val) {
-	struct grayskull_device *gs_dev = dev_get_drvdata(dev);
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(gs_hwmon_attributes); i++) {
-		const struct gs_hwmon_attr *attribute = &gs_hwmon_attributes[i];
-		if (attribute->type == type && attribute->attr == attr) {
-			u32 value = ioread32(gs_dev->telemetry_base + attribute->reg_offset);
-			value >>= attribute->shift;
-			value &= attribute->mask;
-			value *= attribute->multiplier;
-			*val = value;
-			return 0;
-		}
-	}
-
-	return -EOPNOTSUPP;
-}
-
-static int grayskull_hwmon_read_string(struct device *dev, enum hwmon_sensor_types type,
-		    u32 attr, int channel, const char **str) {
-	int i;
-	for (i = 0; i < ARRAY_SIZE(gs_hwmon_labels); i++) {
-		const struct gs_hwmon_label *label = &gs_hwmon_labels[i];
-		if (label->type == type && label->attr == attr) {
-			*str = label->name;
-			return 0;
-		}
-	}
-	return -EOPNOTSUPP;
-}
-
-static const struct hwmon_ops grayskull_hwmon_ops = {
-	.is_visible = grayskull_hwmon_is_visible,
-	.read = grayskull_hwmon_read,
-	.read_string = grayskull_hwmon_read_string,
-};
-
-static const struct hwmon_channel_info *grayskull_hwmon_info[] = {
-	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_MAX),
-	HWMON_CHANNEL_INFO(in, HWMON_I_INPUT | HWMON_I_LABEL | HWMON_I_MAX),
-	HWMON_CHANNEL_INFO(curr, HWMON_C_INPUT | HWMON_C_LABEL | HWMON_C_MAX),
-	HWMON_CHANNEL_INFO(power, HWMON_P_INPUT | HWMON_P_LABEL | HWMON_P_MAX),
-	NULL
-};
-
-static const struct hwmon_chip_info grayskull_hwmon_chip_info = {
-	.ops = &grayskull_hwmon_ops,
-	.info = grayskull_hwmon_info,
-};
-
 static bool grayskull_read_fw_version(struct grayskull_device *gs_dev, u32 *fw_version) {
 	void __iomem *arc_return_reg = gs_dev->reset_unit_regs + SCRATCH_REG(3);
 
@@ -729,10 +630,10 @@ static bool grayskull_read_fw_version(struct grayskull_device *gs_dev, u32 *fw_v
 	return true;
 }
 
-static bool grayskull_read_fw_telemetry_offset(struct grayskull_device *gs_dev, u32 *offset) {
-	void __iomem *arc_return_reg = gs_dev->reset_unit_regs + SCRATCH_REG(3);
+bool grayskull_read_fw_telemetry_offset(u8 __iomem *reset_unit_regs, u32 *offset) {
+	u8 __iomem *arc_return_reg = reset_unit_regs + SCRATCH_REG(3);
 
-	if (!grayskull_send_arc_fw_message(gs_dev->reset_unit_regs, GS_FW_MSG_GET_TELEMETRY_OFFSET, 10000, NULL))
+	if (!grayskull_send_arc_fw_message(reset_unit_regs, GS_FW_MSG_GET_TELEMETRY_OFFSET, 10000, NULL))
 		return false;
 
 	*offset = ioread32(arc_return_reg);
@@ -740,12 +641,44 @@ static bool grayskull_read_fw_telemetry_offset(struct grayskull_device *gs_dev, 
 	return true;
 }
 
-static u32 grayskull_convert_arc_addr_to_regio_map_offset(u32 arc_addr) {
-	return ARC_CSM_MEMORY_OFFSET + (arc_addr - 0x10000000);
-}
+
+static const struct tt_hwmon_attr gs_hwmon_attributes[] = {
+	{ hwmon_temp,  hwmon_temp_input,  0x64, 0,  GENMASK(15, 0), 64   },
+	{ hwmon_temp,  hwmon_temp_max,    0x78, 0,  GENMASK(15, 0), 1000 },
+	{ hwmon_in,    hwmon_in_input,    0x60, 0,  GENMASK(31, 0), 1    },
+	{ hwmon_in,    hwmon_in_max,      0x74, 16, GENMASK(15, 0), 1    },
+	{ hwmon_curr,  hwmon_curr_input,  0x70, 0,  GENMASK(15, 0), 1000 },
+	{ hwmon_curr,  hwmon_curr_max,    0x70, 16, GENMASK(15, 0), 1000 },
+	{ hwmon_power, hwmon_power_input, 0x6c, 0,  GENMASK(15, 0), 1000 },
+	{ hwmon_power, hwmon_power_max,   0x6c, 16, GENMASK(15, 0), 1000 },
+	{ .reg_offset = TT_HWMON_ATTR_END },
+};
+
+static const struct tt_hwmon_label gs_hwmon_labels[] = {
+	{ hwmon_temp,  hwmon_temp_label,  "asic_temp" },
+	{ hwmon_in,    hwmon_in_label,    "vcore"     },
+	{ hwmon_curr,  hwmon_curr_label,  "current"   },
+	{ hwmon_power, hwmon_power_label, "power"     },
+	{ .name = NULL },
+};
+
+static const struct hwmon_channel_info *gs_hwmon_info[] = {
+	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_MAX),
+	HWMON_CHANNEL_INFO(in, HWMON_I_INPUT | HWMON_I_LABEL | HWMON_I_MAX),
+	HWMON_CHANNEL_INFO(curr, HWMON_C_INPUT | HWMON_C_LABEL | HWMON_C_MAX),
+	HWMON_CHANNEL_INFO(power, HWMON_P_INPUT | HWMON_P_LABEL | HWMON_P_MAX),
+	NULL
+};
+
+static const struct hwmon_chip_info gs_hwmon_chip_info = {
+	.ops = &tt_hwmon_ops,
+	.info = gs_hwmon_info,
+};
 
 static void grayskull_hwmon_init(struct grayskull_device *gs_dev) {
-	struct device *dev = &gs_dev->tt.pdev->dev;
+	struct tenstorrent_device *tt_dev = &gs_dev->tt;
+	struct device *dev = &tt_dev->pdev->dev;
+	struct tt_hwmon_context *context = &tt_dev->hwmon_context;
 	struct device *hwmon_device;
 	u32 fw_version;
 	u32 telemetry_offset;
@@ -760,15 +693,17 @@ static void grayskull_hwmon_init(struct grayskull_device *gs_dev) {
 		goto grayskull_hwmon_init_err;
 	}
 
-	if (!grayskull_read_fw_telemetry_offset(gs_dev, &telemetry_offset))
+	if (!grayskull_read_fw_telemetry_offset(gs_dev->reset_unit_regs, &telemetry_offset))
 		goto grayskull_hwmon_init_err;
 
-	hwmon_device = devm_hwmon_device_register_with_info(dev, "grayskull", gs_dev, &grayskull_hwmon_chip_info, NULL);
+	context->attributes = gs_hwmon_attributes;
+	context->labels = gs_hwmon_labels;
+	context->telemetry_base = gs_dev->reg_iomap + gs_arc_addr_to_sysreg(telemetry_offset);
+
+	hwmon_device = devm_hwmon_device_register_with_info(dev, "grayskull", context, &gs_hwmon_chip_info, NULL);
 	if (IS_ERR(hwmon_device))
 		goto grayskull_hwmon_init_err;
 
-	gs_dev->telemetry_base = gs_dev->reg_iomap + grayskull_convert_arc_addr_to_regio_map_offset(telemetry_offset);
-	gs_dev->hwmon_device = hwmon_device;
 
 	return;
 

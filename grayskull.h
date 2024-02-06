@@ -15,8 +15,7 @@ struct grayskull_device {
 	u32 enabled_rows;	// bitmap of enabled Tensix rows (NOC0-indexed)
 	u32 watchdog_fw_reset_vec;
 	u32 smbus_fw_reset_vec;
-	struct device *hwmon_device;
-	u8 __iomem *telemetry_base;
+	struct tt_hwmon_context *hwmon_context;
 };
 
 #define tt_dev_to_gs_dev(ttdev) \
@@ -29,6 +28,7 @@ bool grayskull_send_arc_fw_message_with_args(u8 __iomem* reset_unit_regs,
 					     u8 message_id, u16 arg0, u16 arg1,
 					     u32 timeout_us, u16* exit_code);
 bool arc_l2_is_running(u8 __iomem* reset_unit_regs);
+bool grayskull_read_fw_telemetry_offset(u8 __iomem *reset_unit_regs, u32 *offset);
 void grayskull_send_curr_date(u8 __iomem* reset_unit_regs);
 
 #endif

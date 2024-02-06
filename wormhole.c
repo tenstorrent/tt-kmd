@@ -8,6 +8,7 @@
 #include "grayskull.h"
 #include "pcie.h"
 #include "module.h"
+#include "hwmon.h"
 
 #define WH_FW_MSG_PCIE_INDEX 0x51
 #define WH_FW_MSG_ASTATE0 0xA0
@@ -34,6 +35,7 @@
 #define BAR4_SOC_TARGET_ADDRESS 0x1E000000
 
 #define RESET_UNIT_START (0x1FF30000 - BAR4_SOC_TARGET_ADDRESS)
+#define ARC_CSM_START    (0x1FE80000 - BAR4_SOC_TARGET_ADDRESS)
 
 #define WRITE_IATU_REG(wh_dev, direction, region, reg, value) \
 	write_iatu_reg(wh_dev, IATU_##direction, region, \
@@ -45,6 +47,10 @@ static void write_iatu_reg(struct wormhole_device *wh_dev, unsigned direction,
 		   + reg;
 
 	iowrite32(value, wh_dev->bar2_mapping + offset);
+}
+
+static u32 wh_arc_addr_to_sysreg(u32 arc_addr) {
+	return ARC_CSM_START + (arc_addr - 0x10000000);
 }
 
 // Program the iATU so that BAR4 is directed to the system registers.
@@ -88,6 +94,63 @@ fail_bar2:
 	return false;
 }
 
+static const struct tt_hwmon_attr wh_hwmon_attributes[] = {
+	{ hwmon_temp,  hwmon_temp_input,  0x74, 0,  GENMASK(15, 0), 64   },
+	{ hwmon_temp,  hwmon_temp_max,    0x8c, 0,  GENMASK(15, 0), 1000 },
+	{ hwmon_in,    hwmon_in_input,    0x70, 0,  GENMASK(31, 0), 1    },
+	{ hwmon_in,    hwmon_in_max,      0x88, 16, GENMASK(15, 0), 1    },
+	{ hwmon_curr,  hwmon_curr_input,  0x84, 0,  GENMASK(15, 0), 1000 },
+	{ hwmon_curr,  hwmon_curr_max,    0x84, 16, GENMASK(15, 0), 1000 },
+	{ hwmon_power, hwmon_power_input, 0x80, 0,  GENMASK(15, 0), 1000 },
+	{ hwmon_power, hwmon_power_max,   0x80, 16, GENMASK(15, 0), 1000 },
+	{ .reg_offset = TT_HWMON_ATTR_END },
+};
+
+static const struct tt_hwmon_label wh_hwmon_labels[] = {
+	{ hwmon_temp,  hwmon_temp_label,  "asic1_temp" },
+	{ hwmon_in,    hwmon_in_label,    "vcore1"     },
+	{ hwmon_curr,  hwmon_curr_label,  "current1"   },
+	{ hwmon_power, hwmon_power_label, "power1"     },
+	{ .name = NULL },
+};
+
+static const struct hwmon_channel_info *wh_hwmon_info[] = {
+	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_MAX),
+	HWMON_CHANNEL_INFO(in, HWMON_I_INPUT | HWMON_I_LABEL | HWMON_I_MAX),
+	HWMON_CHANNEL_INFO(curr, HWMON_C_INPUT | HWMON_C_LABEL | HWMON_C_MAX),
+	HWMON_CHANNEL_INFO(power, HWMON_P_INPUT | HWMON_P_LABEL | HWMON_P_MAX),
+	NULL,
+};
+
+static const struct hwmon_chip_info wh_hwmon_chip_info = {
+	.ops = &tt_hwmon_ops,
+	.info = wh_hwmon_info,
+};
+
+static void wormhole_hwmon_init(struct wormhole_device *wh_dev) {
+	struct tenstorrent_device *tt_dev = &wh_dev->tt;
+	struct device *dev = &tt_dev->pdev->dev;
+	struct tt_hwmon_context *context = &tt_dev->hwmon_context;
+	struct device *hwmon_device;
+	u32 telemetry_offset;
+
+	if (!grayskull_read_fw_telemetry_offset(reset_unit_regs(wh_dev), &telemetry_offset))
+		goto wormhole_hwmon_init_err;
+
+	context->attributes = wh_hwmon_attributes;
+	context->labels = wh_hwmon_labels;
+	context->telemetry_base = wh_dev->bar4_mapping + wh_arc_addr_to_sysreg(telemetry_offset);
+
+	hwmon_device = devm_hwmon_device_register_with_info(dev, "wormhole", context, &wh_hwmon_chip_info, NULL);
+	if (IS_ERR(hwmon_device))
+		goto wormhole_hwmon_init_err;
+
+	return;
+
+wormhole_hwmon_init_err:
+	dev_warn(dev, "Failed to initialize hwmon.\n");
+}
+
 static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
@@ -100,6 +163,8 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 		complete_pcie_init(&wh_dev->tt, reset_unit_regs(wh_dev));
 		grayskull_send_arc_fw_message_with_args(reset_unit_regs(wh_dev), WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT, auto_reset_timeout, 0, 10000, NULL);
 	}
+
+	wormhole_hwmon_init(wh_dev);
 
 	return true;
 }

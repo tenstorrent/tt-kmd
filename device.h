@@ -12,6 +12,7 @@
 #include <linux/kref.h>
 
 #include "ioctl.h"
+#include "hwmon.h"
 
 struct tenstorrent_device_class;
 
@@ -33,6 +34,8 @@ struct tenstorrent_device {
 	struct notifier_block reboot_notifier;
 
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
+
+	struct tt_hwmon_context hwmon_context;
 };
 
 struct tenstorrent_device_class {

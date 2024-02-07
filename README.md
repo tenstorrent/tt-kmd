@@ -23,6 +23,13 @@ sudo modprobe tenstorrent
 ```
 (or reboot, driver will auto-load next boot)
 
+
+For NixOS users, add:
+```nix
+"${builtins.fetchTarball "https://github.com/tenstorrent/tt-kmd/archive/main.tar.gz"}/tt-kmd.nix"
+```
+to your `configuration.nix`. The module will load on the next boot. 
+
 ### To uninstall:
 ```
 sudo modprobe -r tenstorrent

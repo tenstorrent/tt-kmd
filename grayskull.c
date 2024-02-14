@@ -649,8 +649,8 @@ static const struct tt_hwmon_attr gs_hwmon_attributes[] = {
 	{ hwmon_in,    hwmon_in_max,      0x74, 16, GENMASK(15, 0), 1    },
 	{ hwmon_curr,  hwmon_curr_input,  0x70, 0,  GENMASK(15, 0), 1000 },
 	{ hwmon_curr,  hwmon_curr_max,    0x70, 16, GENMASK(15, 0), 1000 },
-	{ hwmon_power, hwmon_power_input, 0x6c, 0,  GENMASK(15, 0), 1000 },
-	{ hwmon_power, hwmon_power_max,   0x6c, 16, GENMASK(15, 0), 1000 },
+	{ hwmon_power, hwmon_power_input, 0x6c, 0,  GENMASK(15, 0), 1000000 },
+	{ hwmon_power, hwmon_power_max,   0x6c, 16, GENMASK(15, 0), 1000000 },
 	{ .reg_offset = TT_HWMON_ATTR_END },
 };
 

@@ -3,6 +3,7 @@
 
 #include <filesystem>
 #include <map>
+#include <regex>
 
 #include "enumeration.h"
 #include "test_failure.h"
@@ -12,9 +13,10 @@ static void VerifyLabels(const std::filesystem::path &hwmon_dir)
 {
     // Map filename to expected contents of the file.
     static const std::map<std::string, std::string> labels = {
-        { "curr1_label",    "current" },
-        { "in0_label",      "vcore" },
-        { "temp1_label",    "asic_temp" }
+        { "curr1_label",    "current[0-9]*" },
+        { "in0_label",      "vcore[0-9]*" },
+        { "temp1_label",    "asic[0-9]*_temp" },
+        { "power1_label",   "power[0-9]*" },
     };
 
     for (const auto &label : labels) {
@@ -24,7 +26,7 @@ static void VerifyLabels(const std::filesystem::path &hwmon_dir)
 
         actual.pop_back(); // Remove the newline at the end of the file.
 
-        if (actual != expected)
+        if (!std::regex_match(actual, std::regex(expected)))
             THROW_TEST_FAILURE(hwmon_dir.string() + "/" + filename + " contains " + actual + ", expected " + expected);
     }
 }
@@ -35,7 +37,8 @@ static void VerifyInputsAreUnderMaxes(const std::filesystem::path &hwmon_dir)
     static const std::map<std::string, std::string> inputs_to_maxes = {
         { "in0_input", "in0_max" },
         { "curr1_input", "curr1_max" },
-        { "temp1_input", "temp1_max" }
+        { "temp1_input", "temp1_max" },
+        { "power1_input", "power1_max" },
     };
 
     for (const auto &item : inputs_to_maxes) {

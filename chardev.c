@@ -664,7 +664,7 @@ static long ioctl_lock_ctl(struct chardev_private *priv,
 			// This should ensure that you can still convert to a bool in order to check if the lock
 			// has been set at all, but also allows means that the caller doesn't always needs to do their own bookkeeping.
 			out.value = (test_bit(in.index, priv->device->resource_lock) << 1) |
-			             test_bit(in.index, priv->resource_lock);
+				     test_bit(in.index, priv->resource_lock);
 			break;
 		default:
 			return -EINVAL;

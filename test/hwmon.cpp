@@ -3,6 +3,7 @@
 
 #include <filesystem>
 #include <map>
+#include <regex>
 
 #include "enumeration.h"
 #include "test_failure.h"
@@ -12,9 +13,9 @@ static void VerifyLabels(const std::filesystem::path &hwmon_dir)
 {
     // Map filename to expected contents of the file.
     static const std::map<std::string, std::string> labels = {
-        { "curr1_label",    "current" },
-        { "in0_label",      "vcore" },
-        { "temp1_label",    "asic_temp" }
+        { "curr1_label",    "current[0-9]*" },
+        { "in0_label",      "vcore[0-9]*" },
+        { "temp1_label",    "asic[0-9]*_temp" }
     };
 
     for (const auto &label : labels) {
@@ -24,7 +25,7 @@ static void VerifyLabels(const std::filesystem::path &hwmon_dir)
 
         actual.pop_back(); // Remove the newline at the end of the file.
 
-        if (actual != expected)
+        if (!std::regex_match(actual, std::regex(expected)))
             THROW_TEST_FAILURE(hwmon_dir.string() + "/" + filename + " contains " + actual + ", expected " + expected);
     }
 }

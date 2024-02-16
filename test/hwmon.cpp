@@ -15,7 +15,8 @@ static void VerifyLabels(const std::filesystem::path &hwmon_dir)
     static const std::map<std::string, std::string> labels = {
         { "curr1_label",    "current[0-9]*" },
         { "in0_label",      "vcore[0-9]*" },
-        { "temp1_label",    "asic[0-9]*_temp" }
+        { "temp1_label",    "asic[0-9]*_temp" },
+        { "power1_label",   "power[0-9]*" },
     };
 
     for (const auto &label : labels) {
@@ -36,7 +37,8 @@ static void VerifyInputsAreUnderMaxes(const std::filesystem::path &hwmon_dir)
     static const std::map<std::string, std::string> inputs_to_maxes = {
         { "in0_input", "in0_max" },
         { "curr1_input", "curr1_max" },
-        { "temp1_input", "temp1_max" }
+        { "temp1_input", "temp1_max" },
+        { "power1_input", "power1_max" },
     };
 
     for (const auto &item : inputs_to_maxes) {

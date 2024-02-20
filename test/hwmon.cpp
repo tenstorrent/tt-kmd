@@ -13,10 +13,10 @@ static void VerifyLabels(const std::filesystem::path &hwmon_dir)
 {
     // Map filename to expected contents of the file.
     static const std::map<std::string, std::string> labels = {
-        { "curr1_label",    "current[0-9]*" },
-        { "in0_label",      "vcore[0-9]*" },
+        { "curr1_label",    "asic[0-9]*_current" },
+        { "in0_label",      "asic[0-9]*_vcore" },
         { "temp1_label",    "asic[0-9]*_temp" },
-        { "power1_label",   "power[0-9]*" },
+        { "power1_label",   "asic[0-9]*_power" },
     };
 
     for (const auto &label : labels) {

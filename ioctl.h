@@ -163,6 +163,10 @@ struct tenstorrent_pin_pages {
 #define TENSTORRENT_LOCK_CTL_RELEASE 1
 #define TENSTORRENT_LOCK_CTL_TEST 2
 
+// tenstorrent_lock_ctl_in.index
+#define TENSTORRENT_LOCK_ARC 0
+#define TENSTORRENT_LOCK_ETH(n) (1 + (n))
+
 struct tenstorrent_lock_ctl_in {
 	__u32 output_size_bytes;
 	__u32 flags;

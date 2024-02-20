@@ -9,6 +9,8 @@
 #include "pcie.h"
 #include "module.h"
 #include "hwmon.h"
+#include "eth.h"
+#include "ioctl.h"
 
 #define WH_FW_MSG_PCIE_INDEX 0x51
 #define WH_FW_MSG_ASTATE0 0xA0
@@ -36,10 +38,23 @@
 
 #define RESET_UNIT_START (0x1FF30000 - BAR4_SOC_TARGET_ADDRESS)
 #define ARC_CSM_START    (0x1FE80000 - BAR4_SOC_TARGET_ADDRESS)
+#define TLB_CONFIG_START (0x1FC00000 - BAR4_SOC_TARGET_ADDRESS)
+
+#define ARC_CSM_NOC 0x810000000ULL
 
 #define WRITE_IATU_REG(wh_dev, direction, region, reg, value) \
 	write_iatu_reg(wh_dev, IATU_##direction, region, \
 		       IATU_##reg##_##direction, (value))
+
+
+#define TLB_COUNT (156 + 10 + 20)
+#define TLB_16M_SIZE_SHIFT 24
+#define KERNEL_TLB_INDEX (TLB_COUNT - 1)
+#define KERNEL_TLB_CONFIG_REGS	(TLB_CONFIG_START + (KERNEL_TLB_INDEX*2*sizeof(u32)))
+
+#define WH_BOARD_N150 0x18
+#define WH_BOARD_N300 0x14
+#define WH_TELEMETRY_BOARD_ID_OFFSET 0x10
 
 static void write_iatu_reg(struct wormhole_device *wh_dev, unsigned direction,
 			   unsigned region, unsigned reg, u32 value) {
@@ -49,8 +64,9 @@ static void write_iatu_reg(struct wormhole_device *wh_dev, unsigned direction,
 	iowrite32(value, wh_dev->bar2_mapping + offset);
 }
 
-static u32 wh_arc_addr_to_sysreg(u32 arc_addr) {
-	return ARC_CSM_START + (arc_addr - 0x10000000);
+// Returns an address relative to ARC_CSM_START
+static u32 wh_arc_addr_adjust(u32 arc_addr) {
+	return (arc_addr - 0x10000000);
 }
 
 // Program the iATU so that BAR4 is directed to the system registers.
@@ -94,31 +110,98 @@ fail_bar2:
 	return false;
 }
 
+
+#define ARC_NOC_X 0
+#define ARC_NOC_Y 10
+static int wormhole_hwmon_read(u64 offset, struct tt_hwmon_context *context, int channel, long *val) {
+	struct tenstorrent_device *tt_dev = context->tt_dev;
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	struct eth_addr_t *remote_addr;
+	u32 eth_channel;
+	u8 lock_index;
+	bool ok;
+
+	offset += context->telemetry_offset;
+
+	if (channel == 0) {
+		offset += ARC_CSM_START;
+		*val = ioread32(wh_dev->bar4_mapping + offset);
+		return 0;
+	}
+
+	if (wh_dev->num_connected_cores == 0)
+		return -EOPNOTSUPP;
+
+	// Need to do a remote read, so adjust the offset - the ARC will be accessed
+	// via the NOC rather than via PCI BAR.
+	offset += ARC_CSM_NOC;
+
+	// Use the first connected core to determine the remote chip's address.
+	remote_addr = &wh_dev->connected_eth_cores[0].remote;
+
+	// Use eth core 0 to do the actual read.
+	eth_channel = 0;
+	lock_index = TENSTORRENT_LOCK_ETH(eth_channel);
+
+	// FIXME: UMD must use the KMD locking API to avoid conflicts here.
+	if (!test_and_set_bit(lock_index, tt_dev->resource_lock)) {
+		u32 value;
+		ok = wormhole_remote_read32(wh_dev, eth_channel, remote_addr, ARC_NOC_X, ARC_NOC_Y, offset, &value);
+		*val = value;
+		clear_bit(lock_index, tt_dev->resource_lock);
+	} else {
+		return -EBUSY;
+	}
+
+	if (!ok)
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
+// N150 cards have a single ASIC, N300 cards have two.
+// Channel 1 represents the attributes/labels for the second ASIC.
 static const struct tt_hwmon_attr wh_hwmon_attributes[] = {
-	{ hwmon_temp,  hwmon_temp_input,  0x74, 0,  GENMASK(15, 0), 64   },
-	{ hwmon_temp,  hwmon_temp_max,    0x8c, 0,  GENMASK(15, 0), 1000 },
-	{ hwmon_in,    hwmon_in_input,    0x70, 0,  GENMASK(31, 0), 1    },
-	{ hwmon_in,    hwmon_in_max,      0x88, 16, GENMASK(15, 0), 1    },
-	{ hwmon_curr,  hwmon_curr_input,  0x84, 0,  GENMASK(15, 0), 1000 },
-	{ hwmon_curr,  hwmon_curr_max,    0x84, 16, GENMASK(15, 0), 1000 },
-	{ hwmon_power, hwmon_power_input, 0x80, 0,  GENMASK(15, 0), 1000000 },
-	{ hwmon_power, hwmon_power_max,   0x80, 16, GENMASK(15, 0), 1000000 },
+	{ hwmon_temp,  hwmon_temp_input,  0x74, 0,  GENMASK(15, 0), 64,		 0 },
+	{ hwmon_temp,  hwmon_temp_max,    0x8c, 0,  GENMASK(15, 0), 1000,    0 },
+	{ hwmon_in,    hwmon_in_input,    0x70, 0,  GENMASK(31, 0), 1,	     0 },
+	{ hwmon_in,    hwmon_in_max,      0x88, 16, GENMASK(15, 0), 1,		 0 },
+	{ hwmon_curr,  hwmon_curr_input,  0x84, 0,  GENMASK(15, 0), 1000,    0 },
+	{ hwmon_curr,  hwmon_curr_max,    0x84, 16, GENMASK(15, 0), 1000,    0 },
+	{ hwmon_power, hwmon_power_input, 0x80, 0,  GENMASK(15, 0), 1000000, 0 },
+	{ hwmon_power, hwmon_power_max,   0x80, 16, GENMASK(15, 0), 1000000, 0 },
+	{ hwmon_temp,  hwmon_temp_input,  0x74, 0,  GENMASK(15, 0), 64,      1 },
+	{ hwmon_temp,  hwmon_temp_max,    0x8c, 0,  GENMASK(15, 0), 1000,    1 },
+	{ hwmon_in,    hwmon_in_input,    0x70, 0,  GENMASK(31, 0), 1,       1 },
+	{ hwmon_in,    hwmon_in_max,      0x88, 16, GENMASK(15, 0), 1,       1 },
+	{ hwmon_curr,  hwmon_curr_input,  0x84, 0,  GENMASK(15, 0), 1000,    1 },
+	{ hwmon_curr,  hwmon_curr_max,    0x84, 16, GENMASK(15, 0), 1000,    1 },
+	{ hwmon_power, hwmon_power_input, 0x80, 0,  GENMASK(15, 0), 1000000, 1 },
+	{ hwmon_power, hwmon_power_max,   0x80, 16, GENMASK(15, 0), 1000000, 1 },
 	{ .reg_offset = TT_HWMON_ATTR_END },
 };
 
 static const struct tt_hwmon_label wh_hwmon_labels[] = {
-	{ hwmon_temp,  hwmon_temp_label,  "asic1_temp" },
-	{ hwmon_in,    hwmon_in_label,    "vcore1"     },
-	{ hwmon_curr,  hwmon_curr_label,  "current1"   },
-	{ hwmon_power, hwmon_power_label, "power1"     },
+	{ hwmon_temp,  hwmon_temp_label,  "asic1_temp",    0 },
+	{ hwmon_in,    hwmon_in_label,    "asic1_vcore",   0 },
+	{ hwmon_curr,  hwmon_curr_label,  "asic1_current", 0 },
+	{ hwmon_power, hwmon_power_label, "asic1_power",   0 },
+	{ hwmon_temp,  hwmon_temp_label,  "asic2_temp",    1 },
+	{ hwmon_in,    hwmon_in_label,    "asic2_vcore",   1 },
+	{ hwmon_curr,  hwmon_curr_label,  "asic2_current", 1 },
+	{ hwmon_power, hwmon_power_label, "asic2_power",   1 },
 	{ .name = NULL },
 };
 
 static const struct hwmon_channel_info *wh_hwmon_info[] = {
-	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_MAX),
-	HWMON_CHANNEL_INFO(in, HWMON_I_INPUT | HWMON_I_LABEL | HWMON_I_MAX),
-	HWMON_CHANNEL_INFO(curr, HWMON_C_INPUT | HWMON_C_LABEL | HWMON_C_MAX),
-	HWMON_CHANNEL_INFO(power, HWMON_P_INPUT | HWMON_P_LABEL | HWMON_P_MAX),
+	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_MAX,
+							 HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_MAX),
+	HWMON_CHANNEL_INFO(in, HWMON_I_INPUT | HWMON_I_LABEL | HWMON_I_MAX,
+						   HWMON_I_INPUT | HWMON_I_LABEL | HWMON_I_MAX),
+	HWMON_CHANNEL_INFO(curr, HWMON_C_INPUT | HWMON_C_LABEL | HWMON_C_MAX,
+							HWMON_C_INPUT | HWMON_C_LABEL | HWMON_C_MAX),
+	HWMON_CHANNEL_INFO(power, HWMON_P_INPUT | HWMON_P_LABEL | HWMON_P_MAX,
+							  HWMON_P_INPUT | HWMON_P_LABEL | HWMON_P_MAX),
 	NULL,
 };
 
@@ -133,13 +216,23 @@ static void wormhole_hwmon_init(struct wormhole_device *wh_dev) {
 	struct tt_hwmon_context *context = &tt_dev->hwmon_context;
 	struct device *hwmon_device;
 	u32 telemetry_offset;
+	u32 board_id;
 
 	if (!grayskull_read_fw_telemetry_offset(reset_unit_regs(wh_dev), &telemetry_offset))
 		goto wormhole_hwmon_init_err;
 
-	context->attributes = wh_hwmon_attributes;
+	board_id = tt_dev->pdev->subsystem_device;
+	if (!(board_id == WH_BOARD_N150 || board_id == WH_BOARD_N300)) {
+		dev_err(dev, "Unsupported board id for hwmon: 0x%x\n", board_id);
+		goto wormhole_hwmon_init_err;
+	}
+
+	context->tt_dev = tt_dev;
 	context->labels = wh_hwmon_labels;
-	context->telemetry_base = wh_dev->bar4_mapping + wh_arc_addr_to_sysreg(telemetry_offset);
+	context->attributes = wh_hwmon_attributes;
+	context->channels = (board_id == WH_BOARD_N300) ? 2 : 1;	// N300 2 channels; N150 1 channel.
+	context->telemetry_offset = wh_arc_addr_adjust(telemetry_offset);
+	context->hwmon_read = wormhole_hwmon_read;
 
 	hwmon_device = devm_hwmon_device_register_with_info(dev, "wormhole", context, &wh_hwmon_chip_info, NULL);
 	if (IS_ERR(hwmon_device))
@@ -164,6 +257,7 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 		grayskull_send_arc_fw_message_with_args(reset_unit_regs(wh_dev), WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT, auto_reset_timeout, 0, 10000, NULL);
 	}
 
+	wormhole_eth_probe(wh_dev);
 	wormhole_hwmon_init(wh_dev);
 
 	return true;
@@ -187,6 +281,85 @@ static void wormhole_reboot(struct tenstorrent_device *tt_dev) {
 	grayskull_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
 }
 
+struct TLB_16M_REG {
+	union {
+		struct {
+			u32 low32;
+			u32 high32;
+		};
+		struct {
+			u64 local_offset: 12;
+			u64 x_end: 6;
+			u64 y_end: 6;
+			u64 x_start: 6;
+			u64 y_start: 6;
+			u64 noc_sel: 1;
+			u64 mcast: 1;
+			u64 ordering: 2;
+			u64 linked: 1;
+		};
+	};
+};
+
+static u32 program_tlb(struct wormhole_device *wh_dev, unsigned int x, unsigned int y, unsigned int noc, u32 addr) {
+	struct TLB_16M_REG tlb;
+
+	tlb.low32 = 0;
+	tlb.high32 = 0;
+
+	tlb.local_offset = addr >> TLB_16M_SIZE_SHIFT;
+	tlb.x_end = x;
+	tlb.y_end = y;
+	tlb.noc_sel = noc;
+
+	iowrite32(tlb.low32, wh_dev->bar4_mapping + KERNEL_TLB_CONFIG_REGS);
+	iowrite32(tlb.high32, wh_dev->bar4_mapping + KERNEL_TLB_CONFIG_REGS + sizeof(u32));
+
+	return addr % (1u << TLB_16M_SIZE_SHIFT);
+}
+
+u32 wh_noc_read32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr)
+{
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	u32 offset;
+	u32 val;
+
+	mutex_lock(&wh_dev->tlb_mutex);
+
+	offset = program_tlb(wh_dev, x, y, 0, addr);
+	val = ioread32(wh_dev->bar4_mapping + offset);
+
+	mutex_unlock(&wh_dev->tlb_mutex);
+
+	return val;
+}
+
+void wh_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, u32 val)
+{
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	u32 offset;
+
+	mutex_lock(&wh_dev->tlb_mutex);
+
+	offset = program_tlb(wh_dev, x, y, 0, addr);
+	iowrite32(val, wh_dev->bar4_mapping + offset);
+
+	mutex_unlock(&wh_dev->tlb_mutex);
+}
+
+void wh_noc_write_block(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, const void *src, size_t size)
+{
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	u32 offset;
+
+	mutex_lock(&wh_dev->tlb_mutex);
+
+	offset = program_tlb(wh_dev, x, y, 0, addr);
+	memcpy_toio(wh_dev->bar4_mapping + offset, src, size);
+
+	mutex_unlock(&wh_dev->tlb_mutex);
+}
+
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
@@ -194,4 +367,6 @@ struct tenstorrent_device_class wormhole_class = {
 	.init_hardware = wormhole_init_hardware,
 	.cleanup_device = wormhole_cleanup,
 	.reboot = wormhole_reboot,
+	.noc_read32 = wh_noc_read32,
+	.noc_write32 = wh_noc_write32,
 };

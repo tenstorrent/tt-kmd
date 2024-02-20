@@ -36,10 +36,14 @@
 
 #define RESET_UNIT_START (0x1FF30000 - BAR4_SOC_TARGET_ADDRESS)
 #define ARC_CSM_START    (0x1FE80000 - BAR4_SOC_TARGET_ADDRESS)
+#define TLB_CONFIG_START (0x1FC00000 - BAR4_SOC_TARGET_ADDRESS)
+
+#define ARC_CSM_NOC 0x810000000ULL
 
 #define WRITE_IATU_REG(wh_dev, direction, region, reg, value) \
 	write_iatu_reg(wh_dev, IATU_##direction, region, \
 		       IATU_##reg##_##direction, (value))
+
 
 static void write_iatu_reg(struct wormhole_device *wh_dev, unsigned direction,
 			   unsigned region, unsigned reg, u32 value) {
@@ -79,6 +83,9 @@ static void update_device_index(struct wormhole_device *wh_dev) {
 
 static bool wormhole_init(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+
+	wh_dev->bar0_mapping = pci_iomap(wh_dev->tt.pdev, 0, 0);
+	if (wh_dev->bar0_mapping == NULL) goto fail_bar0;
 
 	wh_dev->bar2_mapping = pci_iomap(wh_dev->tt.pdev, 2, 0);
 	if (wh_dev->bar2_mapping == NULL) goto fail_bar2;
@@ -164,6 +171,8 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 		grayskull_send_arc_fw_message_with_args(reset_unit_regs(wh_dev), WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT, auto_reset_timeout, 0, 10000, NULL);
 	}
 
+	tlb_pool_init(&wh_dev->tlb_pool);
+	wormhole_eth_probe(wh_dev);
 	wormhole_hwmon_init(wh_dev);
 
 	return true;
@@ -173,6 +182,9 @@ static void wormhole_cleanup(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
 	grayskull_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
+
+	if (wh_dev->bar0_mapping != NULL)
+		pci_iounmap(wh_dev->tt.pdev, wh_dev->bar0_mapping);
 
 	if (wh_dev->bar2_mapping != NULL)
 		pci_iounmap(wh_dev->tt.pdev, wh_dev->bar2_mapping);
@@ -195,3 +207,60 @@ struct tenstorrent_device_class wormhole_class = {
 	.cleanup_device = wormhole_cleanup,
 	.reboot = wormhole_reboot,
 };
+
+#define TLB_CONFIG_REG_LO(index) (TLB_CONFIG_START + (index * 2 * sizeof(u32)))
+#define TLB_CONFIG_REG_HI(index) (TLB_CONFIG_REG_LO(index) + sizeof(u32))
+#define TLB_CONFIG_FIELD_COORD_SIZE 6
+void wh_program_tlb(struct wormhole_device *wh_dev, struct tlb_t *tlb) {
+	struct tlb_config *config = &tlb->config;
+	u64 local_offset = config->address / tlb->size;
+	u64 encoded = 0;
+	int offset = 0;
+	u64 local_offset_width;
+	u64 mask;
+
+	// TLB config layout differs only by the size of the local_offset field,
+	// which comes first.  These numbers are Wormhole-specific.
+	local_offset_width = tlb->size == TLB_SIZE_1M ? 16
+		: tlb->size == TLB_SIZE_2M ? 15
+		: 12;
+
+	mask = (1ULL << local_offset_width) - 1;
+	encoded |= local_offset & mask;
+	offset += local_offset_width;
+
+	mask = (1ULL << TLB_CONFIG_FIELD_COORD_SIZE) - 1;
+	encoded |= (config->x_end & mask) << offset;
+	offset += TLB_CONFIG_FIELD_COORD_SIZE;
+
+	mask = (1ULL << TLB_CONFIG_FIELD_COORD_SIZE) - 1;
+	encoded |= (config->y_end & mask) << offset;
+	offset += TLB_CONFIG_FIELD_COORD_SIZE;
+
+	mask = (1ULL << TLB_CONFIG_FIELD_COORD_SIZE) - 1;
+	encoded |= (config->x_start & mask) << offset;
+	offset += TLB_CONFIG_FIELD_COORD_SIZE;
+
+	mask = (1ULL << TLB_CONFIG_FIELD_COORD_SIZE) - 1;
+	encoded |= (config->y_start & mask) << offset;
+	offset += TLB_CONFIG_FIELD_COORD_SIZE;
+
+	encoded |= (config->noc_sel & 0x1) << offset;
+	offset += 1;
+
+	encoded |= (config->mcast & 0x1) << offset;
+	offset += 1;
+
+	encoded |= (config->ordering & 0x3) << offset;
+	offset += 2;
+
+	encoded |= (config->linked & 0x1) << offset;
+	offset += 1;
+
+	if (tlb->encoded_config == encoded)
+		return;
+
+	iowrite32((encoded >> 0x00) & 0xffffffffU, wh_dev->bar4_mapping + TLB_CONFIG_REG_LO(tlb->index));
+	iowrite32((encoded >> 0x20) & 0xffffffffU, wh_dev->bar4_mapping + TLB_CONFIG_REG_HI(tlb->index));
+	tlb->encoded_config = encoded;
+}

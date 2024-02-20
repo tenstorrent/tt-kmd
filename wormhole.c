@@ -9,6 +9,8 @@
 #include "pcie.h"
 #include "module.h"
 #include "hwmon.h"
+#include "eth.h"
+#include "tlb.h"
 
 #define WH_FW_MSG_PCIE_INDEX 0x51
 #define WH_FW_MSG_ASTATE0 0xA0
@@ -53,8 +55,9 @@ static void write_iatu_reg(struct wormhole_device *wh_dev, unsigned direction,
 	iowrite32(value, wh_dev->bar2_mapping + offset);
 }
 
-static u32 wh_arc_addr_to_sysreg(u32 arc_addr) {
-	return ARC_CSM_START + (arc_addr - 0x10000000);
+// Returns an address relative to ARC_CSM_START
+static u32 wh_arc_addr_adjust(u32 arc_addr) {
+	return (arc_addr - 0x10000000);
 }
 
 // Program the iATU so that BAR4 is directed to the system registers.
@@ -98,34 +101,105 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev) {
 fail_bar4:
 	pci_iounmap(wh_dev->tt.pdev, wh_dev->bar2_mapping);
 fail_bar2:
+	pci_iounmap(wh_dev->tt.pdev, wh_dev->bar0_mapping);
+fail_bar0:
 	return false;
 }
 
+#define NOC_ADDR_NODE_ID_BITS     6 
+#define NOC_ADDR_LOCAL_BITS       36
+static u64 encode_sys_addr(u32 chip_x, u32 chip_y, u32 noc_x, u32 noc_y, u64 offset) {
+	u64 result = chip_y; // shelf
+	u64 noc_addr_local_bits_mask = (1UL << NOC_ADDR_LOCAL_BITS) - 1;
+	result <<= 6;
+	result |= chip_x;
+	result <<= 6;
+	result |= noc_y;
+	result <<= 6;
+	result |= noc_x;
+	result <<= NOC_ADDR_LOCAL_BITS;
+	result |= (noc_addr_local_bits_mask & offset);
+	return result;
+}
+
+#define ARC_NOC_X 0
+#define ARC_NOC_Y 10
+static u32 wormhole_hwmon_read32(u64 offset, struct tt_hwmon_context *context, int channel) {
+	struct tenstorrent_device *tt_dev = context->tt_dev;
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	struct connected_eth_core *core_info;
+	bool ok;
+	u32 value;
+	u64 sys_addr;
+	u16 rack;
+
+	offset += context->telemetry_offset;
+
+	if (channel == 0) {
+		u8 __iomem *addr = wh_dev->bar4_mapping + ARC_CSM_START + offset;
+		return ioread32(addr);
+	}
+
+	if (wh_dev->num_connected_cores == 0)
+		return -EOPNOTSUPP;
+
+	offset += ARC_CSM_NOC;
+	core_info = &wh_dev->connected_eth_cores[0];
+	sys_addr = encode_sys_addr(core_info->remote_shelf_x, core_info->remote_shelf_y, ARC_NOC_X, ARC_NOC_Y, offset);
+	rack = ((u16)core_info->remote_rack_y) << 8 | core_info->remote_rack_x;
+
+	// FIXME: This must be synchronized with UMD somehow.
+	// Using eth core 0 to do the actual read.
+	ok = wormhole_eth_read32(wh_dev, 0, sys_addr, rack, &value);
+	if (!ok)
+		return -EOPNOTSUPP;
+
+	return value;
+}
+
+// N150 cards have a single ASIC, N300 cards have two.
+// Channel 1 represents the attributes/labels for the second ASIC.
 static const struct tt_hwmon_attr wh_hwmon_attributes[] = {
-	{ hwmon_temp,  hwmon_temp_input,  0x74, 0,  GENMASK(15, 0), 64   },
-	{ hwmon_temp,  hwmon_temp_max,    0x8c, 0,  GENMASK(15, 0), 1000 },
-	{ hwmon_in,    hwmon_in_input,    0x70, 0,  GENMASK(31, 0), 1    },
-	{ hwmon_in,    hwmon_in_max,      0x88, 16, GENMASK(15, 0), 1    },
-	{ hwmon_curr,  hwmon_curr_input,  0x84, 0,  GENMASK(15, 0), 1000 },
-	{ hwmon_curr,  hwmon_curr_max,    0x84, 16, GENMASK(15, 0), 1000 },
-	{ hwmon_power, hwmon_power_input, 0x80, 0,  GENMASK(15, 0), 1000000 },
-	{ hwmon_power, hwmon_power_max,   0x80, 16, GENMASK(15, 0), 1000000 },
+	{ hwmon_temp,  hwmon_temp_input,  0x74, 0,  GENMASK(15, 0), 64,		 0 },
+	{ hwmon_temp,  hwmon_temp_max,    0x8c, 0,  GENMASK(15, 0), 1000,    0 },
+	{ hwmon_in,    hwmon_in_input,    0x70, 0,  GENMASK(31, 0), 1,	     0 },
+	{ hwmon_in,    hwmon_in_max,      0x88, 16, GENMASK(15, 0), 1,		 0 },
+	{ hwmon_curr,  hwmon_curr_input,  0x84, 0,  GENMASK(15, 0), 1000,    0 },
+	{ hwmon_curr,  hwmon_curr_max,    0x84, 16, GENMASK(15, 0), 1000,    0 },
+	{ hwmon_power, hwmon_power_input, 0x80, 0,  GENMASK(15, 0), 1000000, 0 },
+	{ hwmon_power, hwmon_power_max,   0x80, 16, GENMASK(15, 0), 1000000, 0 },
+	{ hwmon_temp,  hwmon_temp_input,  0x74, 0,  GENMASK(15, 0), 64,      1 },
+	{ hwmon_temp,  hwmon_temp_max,    0x8c, 0,  GENMASK(15, 0), 1000,    1 },
+	{ hwmon_in,    hwmon_in_input,    0x70, 0,  GENMASK(31, 0), 1,       1 },
+	{ hwmon_in,    hwmon_in_max,      0x88, 16, GENMASK(15, 0), 1,       1 },
+	{ hwmon_curr,  hwmon_curr_input,  0x84, 0,  GENMASK(15, 0), 1000,    1 },
+	{ hwmon_curr,  hwmon_curr_max,    0x84, 16, GENMASK(15, 0), 1000,    1 },
+	{ hwmon_power, hwmon_power_input, 0x80, 0,  GENMASK(15, 0), 1000000, 1 },
+	{ hwmon_power, hwmon_power_max,   0x80, 16, GENMASK(15, 0), 1000000, 1 },
 	{ .reg_offset = TT_HWMON_ATTR_END },
 };
 
 static const struct tt_hwmon_label wh_hwmon_labels[] = {
-	{ hwmon_temp,  hwmon_temp_label,  "asic1_temp" },
-	{ hwmon_in,    hwmon_in_label,    "vcore1"     },
-	{ hwmon_curr,  hwmon_curr_label,  "current1"   },
-	{ hwmon_power, hwmon_power_label, "power1"     },
+	{ hwmon_temp,  hwmon_temp_label,  "asic_temp1", 0 },
+	{ hwmon_in,    hwmon_in_label,    "vcore1"    , 0 },
+	{ hwmon_curr,  hwmon_curr_label,  "current1"  , 0 },
+	{ hwmon_power, hwmon_power_label, "power1"    , 0 },
+	{ hwmon_temp,  hwmon_temp_label,  "asic_temp2", 1 },
+	{ hwmon_in,    hwmon_in_label,    "vcore2"    , 1 },
+	{ hwmon_curr,  hwmon_curr_label,  "current2"  , 1 },
+	{ hwmon_power, hwmon_power_label, "power2"    , 1 },
 	{ .name = NULL },
 };
 
 static const struct hwmon_channel_info *wh_hwmon_info[] = {
-	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_MAX),
-	HWMON_CHANNEL_INFO(in, HWMON_I_INPUT | HWMON_I_LABEL | HWMON_I_MAX),
-	HWMON_CHANNEL_INFO(curr, HWMON_C_INPUT | HWMON_C_LABEL | HWMON_C_MAX),
-	HWMON_CHANNEL_INFO(power, HWMON_P_INPUT | HWMON_P_LABEL | HWMON_P_MAX),
+	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_MAX,
+							 HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_MAX),
+	HWMON_CHANNEL_INFO(in, HWMON_I_INPUT | HWMON_I_LABEL | HWMON_I_MAX,
+						   HWMON_I_INPUT | HWMON_I_LABEL | HWMON_I_MAX),
+	HWMON_CHANNEL_INFO(curr, HWMON_C_INPUT | HWMON_C_LABEL | HWMON_C_MAX,
+							HWMON_C_INPUT | HWMON_C_LABEL | HWMON_C_MAX),
+	HWMON_CHANNEL_INFO(power, HWMON_P_INPUT | HWMON_P_LABEL | HWMON_P_MAX,
+							  HWMON_P_INPUT | HWMON_P_LABEL | HWMON_P_MAX),
 	NULL,
 };
 
@@ -144,9 +218,11 @@ static void wormhole_hwmon_init(struct wormhole_device *wh_dev) {
 	if (!grayskull_read_fw_telemetry_offset(reset_unit_regs(wh_dev), &telemetry_offset))
 		goto wormhole_hwmon_init_err;
 
+	context->tt_dev = tt_dev;
 	context->attributes = wh_hwmon_attributes;
 	context->labels = wh_hwmon_labels;
-	context->telemetry_base = wh_dev->bar4_mapping + wh_arc_addr_to_sysreg(telemetry_offset);
+	context->telemetry_offset = wh_arc_addr_adjust(telemetry_offset);
+	context->read32 = wormhole_hwmon_read32;
 
 	hwmon_device = devm_hwmon_device_register_with_info(dev, "wormhole", context, &wh_hwmon_chip_info, NULL);
 	if (IS_ERR(hwmon_device))
@@ -221,9 +297,7 @@ void wh_program_tlb(struct wormhole_device *wh_dev, struct tlb_t *tlb) {
 
 	// TLB config layout differs only by the size of the local_offset field,
 	// which comes first.  These numbers are Wormhole-specific.
-	local_offset_width = tlb->size == TLB_SIZE_1M ? 16
-		: tlb->size == TLB_SIZE_2M ? 15
-		: 12;
+	local_offset_width = tlb->size == TLB_SIZE_1M ? 16 : tlb->size == TLB_SIZE_2M ? 15 : 12;
 
 	mask = (1ULL << local_offset_width) - 1;
 	encoded |= local_offset & mask;

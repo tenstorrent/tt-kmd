@@ -135,8 +135,8 @@ struct TLB_16M_REG {
 
 #define TLB_16M_SIZE_SHIFT 24
 
-static u32 gs_arc_addr_to_sysreg(u32 arc_addr) {
-	return ARC_CSM_MEMORY_OFFSET + (arc_addr - 0x10000000);
+static u32 gs_arc_addr_adjust(u32 arc_addr) {
+	return arc_addr - 0x10000000;
 }
 
 static bool is_hardware_hung(struct pci_dev *pdev, u8 __iomem *reset_unit_regs) {
@@ -641,6 +641,12 @@ bool grayskull_read_fw_telemetry_offset(u8 __iomem *reset_unit_regs, u32 *offset
 	return true;
 }
 
+static u32 grayskull_hwmon_read32(u64 offset, struct tt_hwmon_context *context, int channel) {
+	struct tenstorrent_device *tt_dev = context->tt_dev;
+	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
+	u8 __iomem *addr = gs_dev->reg_iomap + ARC_CSM_MEMORY_OFFSET + context->telemetry_offset + offset;
+	return ioread32(addr);
+}
 
 static const struct tt_hwmon_attr gs_hwmon_attributes[] = {
 	{ hwmon_temp,  hwmon_temp_input,  0x64, 0,  GENMASK(15, 0), 64   },
@@ -675,6 +681,7 @@ static const struct hwmon_chip_info gs_hwmon_chip_info = {
 	.info = gs_hwmon_info,
 };
 
+
 static void grayskull_hwmon_init(struct grayskull_device *gs_dev) {
 	struct tenstorrent_device *tt_dev = &gs_dev->tt;
 	struct device *dev = &tt_dev->pdev->dev;
@@ -696,9 +703,11 @@ static void grayskull_hwmon_init(struct grayskull_device *gs_dev) {
 	if (!grayskull_read_fw_telemetry_offset(gs_dev->reset_unit_regs, &telemetry_offset))
 		goto grayskull_hwmon_init_err;
 
+	context->tt_dev = tt_dev;
 	context->attributes = gs_hwmon_attributes;
 	context->labels = gs_hwmon_labels;
-	context->telemetry_base = gs_dev->reg_iomap + gs_arc_addr_to_sysreg(telemetry_offset);
+	context->telemetry_offset = gs_arc_addr_adjust(telemetry_offset);
+	context->read32 = grayskull_hwmon_read32;
 
 	hwmon_device = devm_hwmon_device_register_with_info(dev, "grayskull", context, &gs_hwmon_chip_info, NULL);
 	if (IS_ERR(hwmon_device))

@@ -311,7 +311,7 @@ bool wormhole_noc_read(struct tenstorrent_device *tt_dev, struct tlb_t *tlb, str
 	memcpy_fromio(dst, iomem, size);
 
 	if (manage_tlb)
-		tlb_free(pool, tlb);
+		tlb_free(tlb);
 
 	return true;
 }
@@ -333,7 +333,7 @@ bool wormhole_noc_write(struct tenstorrent_device *tt_dev, struct tlb_t *tlb, st
 	memcpy_toio(iomem, src, size);
 
 	if (manage_tlb)
-		tlb_free(pool, tlb);
+		tlb_free(tlb);
 
 	return true;
 }

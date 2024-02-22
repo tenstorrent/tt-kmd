@@ -43,6 +43,7 @@ struct tlb_config {
 
 // TLB represents a mapping from a region of BAR0 to a chip endpoint.
 struct tlb_t {
+	struct tlb_pool *pool;
 	u32 index;	// 0 <= index < TLB_COUNT
 	u32 size;	// 1MB, 2MB, or 16MB
 
@@ -59,7 +60,7 @@ struct tlb_pool {
 
 void tlb_pool_init(struct tlb_pool *);
 struct tlb_t *tlb_alloc(struct tlb_pool *);
-void tlb_free(struct tlb_pool *, struct tlb_t *);
+void tlb_free(struct tlb_t *);
 void tlb_set_config(struct tlb_t *tlb, struct noc_addr_t *noc_addr);
 u64 tlb_encode_config(struct tlb_t *tlb, int local_offset_width);
 

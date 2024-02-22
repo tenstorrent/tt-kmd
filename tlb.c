@@ -21,6 +21,7 @@ void tlb_pool_init(struct tlb_pool *pool)
 		pool->avail[i] = false;
 		pool->tlbs[i].index = i;
 		pool->tlbs[i].size = TLB_SIZE_FROM_INDEX(i);
+		pool->tlbs[i].pool = pool;
 	}
 
 	// This is the current (Feb 2024) convention held by UMD/KMD: UMD gets all
@@ -60,8 +61,9 @@ done:
 	return tlb;
 }
 
-void tlb_free(struct tlb_pool *pool, struct tlb_t *tlb)
+void tlb_free(struct tlb_t *tlb)
 {
+	struct tlb_pool *pool = tlb->pool;
 	spin_lock(&pool->lock);
 	pool->avail[tlb->index] = true;
 	wake_up(&pool->wait_queue);

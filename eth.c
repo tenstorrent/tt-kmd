@@ -121,7 +121,7 @@ void wormhole_eth_probe(struct wormhole_device *wh_dev)
 		wh_dev->num_connected_cores++;
 	}
 
-	tlb_free(&wh_dev->tlb_pool, tlb);
+	tlb_free(tlb);
 }
 
 bool wormhole_eth_read32(struct wormhole_device *wh_dev, u32 eth_core, u64 sys_addr, u32 rack, u32 *value)
@@ -214,7 +214,7 @@ bool wormhole_eth_read32(struct wormhole_device *wh_dev, u32 eth_core, u64 sys_a
 	eth_write_reg(wh_dev, tlb, eth_core, ETH_RESP_RD_PTR_ADDR, resp_rd);
 
 wormhole_eth_read32_done:
-	tlb_free(&wh_dev->tlb_pool, tlb);
+	tlb_free(tlb);
 
 	// Response is only valid if we return true.
 	return resp_flags == ETH_CMD_RD_DATA;

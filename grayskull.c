@@ -901,7 +901,7 @@ static bool grayskull_noc_read32(struct tenstorrent_device *tt_dev, struct tlb_t
 	*val = ioread32(gs_dev->bar0_mapping + TLB_OFFSET(tlb->index) + (noc_addr->addr % tlb->size));
 
 	if (manage_tlb)
-		tlb_free(pool, tlb);
+		tlb_free(tlb);
 
 	return true;
 }
@@ -921,7 +921,7 @@ static bool grayskull_noc_write32(struct tenstorrent_device *tt_dev, struct tlb_
 	iowrite32(val, gs_dev->bar0_mapping + TLB_OFFSET(tlb->index) + (noc_addr->addr % tlb->size));
 
 	if (manage_tlb)
-		tlb_free(pool, tlb);
+		tlb_free(tlb);
 
 	return true;
 }

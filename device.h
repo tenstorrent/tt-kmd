@@ -38,6 +38,14 @@ struct tenstorrent_device {
 	struct tt_hwmon_context hwmon_context;
 };
 
+struct noc_addr_t {
+	u64 addr;
+	u32 x;
+	u32 y;
+};
+
+struct tlb_t;
+
 struct tenstorrent_device_class {
 	const char *name;
 	u32 instance_size;
@@ -47,6 +55,8 @@ struct tenstorrent_device_class {
 	void (*first_open_cb)(struct tenstorrent_device *ttdev);
 	void (*last_release_cb)(struct tenstorrent_device *ttdev);
 	void (*reboot)(struct tenstorrent_device *ttdev);
+	bool (*noc_read32)(struct tenstorrent_device *ttdev, struct tlb_t *tlb, struct noc_addr_t *addr, u32 *val);
+	bool (*noc_write32)(struct tenstorrent_device *ttdev, struct tlb_t *tlb, struct noc_addr_t *addr, u32 val);
 };
 
 void tenstorrent_device_put(struct tenstorrent_device *);

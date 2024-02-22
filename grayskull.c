@@ -790,10 +790,14 @@ void grayskull_send_curr_date(u8 __iomem* reset_unit_regs) {
 static bool grayskull_init(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
+	gs_dev->bar0_mapping = pci_iomap(tt_dev->pdev, 0, 0);
 	gs_dev->reg_iomap = pci_iomap_range(gs_dev->tt.pdev, 0, REG_IOMAP_START, REG_IOMAP_LEN);
 	gs_dev->kernel_tlb = pci_iomap_range(gs_dev->tt.pdev, KERNEL_TLB_BAR, KERNEL_TLB_START, KERNEL_TLB_LEN);
 
-	if (gs_dev->reg_iomap == NULL || gs_dev->kernel_tlb == NULL) {
+	if (gs_dev->reg_iomap == NULL || gs_dev->kernel_tlb == NULL || gs_dev->bar0_mapping == NULL) {
+		if (gs_dev->bar0_mapping != NULL)
+			pci_iounmap(gs_dev->tt.pdev, gs_dev->bar0_mapping);
+
 		if (gs_dev->reg_iomap != NULL)
 			pci_iounmap(gs_dev->tt.pdev, gs_dev->reg_iomap);
 
@@ -827,6 +831,8 @@ static bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 
 	grayskull_noc_init(gs_dev);
 
+	tlb_pool_init(&gs_dev->tlb_pool);
+
 	grayskull_hwmon_init(gs_dev);
 
 	return true;
@@ -837,6 +843,9 @@ static void grayskull_cleanup(struct tenstorrent_device *tt_dev) {
 
 	if (gs_dev->reset_unit_regs != NULL)
 		grayskull_shutdown_firmware(tt_dev->pdev, gs_dev->reset_unit_regs);
+
+	if (gs_dev->bar0_mapping != NULL)
+		pci_iounmap(gs_dev->tt.pdev, gs_dev->bar0_mapping);
 
 	if (gs_dev->reg_iomap != NULL)
 		pci_iounmap(gs_dev->tt.pdev, gs_dev->reg_iomap);
@@ -857,6 +866,66 @@ static void grayskull_last_release_handler(struct tenstorrent_device *tt_dev) {
 						0, 0, 10000, NULL);
 }
 
+#define TLB_CONFIG_REG_LO(index) (index * 2 * sizeof(u32))
+#define TLB_CONFIG_REG_HI(index) (TLB_CONFIG_REG_LO(index) + sizeof(u32))
+static void gs_program_tlb(struct grayskull_device *gs_dev, struct tlb_t *tlb) {
+	int gs_local_offset_width = tlb->size == TLB_SIZE_1M ? 12 : tlb->size == TLB_SIZE_2M ? 11 : 8;
+	u64 encoded = tlb_encode_config(tlb, gs_local_offset_width);
+
+	// Write only if the encoding has changed.
+	if (tlb->encoded_config != encoded) {
+		// reg_iomap begins at the TLB configuration registers.
+		iowrite32((encoded >> 0x00) & 0xffffffffU, gs_dev->reg_iomap + TLB_CONFIG_REG_LO(tlb->index));
+		iowrite32((encoded >> 0x20) & 0xffffffffU, gs_dev->reg_iomap + TLB_CONFIG_REG_HI(tlb->index));
+		tlb->encoded_config = encoded;
+	}
+}
+
+static void grayskull_setup_tlb(struct grayskull_device *gs_dev, struct tlb_t *tlb, struct noc_addr_t *noc_addr) {
+	tlb_set_config(tlb, noc_addr);
+	gs_program_tlb(gs_dev, tlb);
+}
+
+static bool grayskull_noc_read32(struct tenstorrent_device *tt_dev, struct tlb_t *tlb, struct noc_addr_t *noc_addr, u32 *val) {
+	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
+	struct tlb_pool *pool = &gs_dev->tlb_pool;
+	bool manage_tlb = (tlb == NULL);
+
+	if (manage_tlb)
+		tlb = tlb_alloc(pool);
+
+	if (!tlb)
+		return false;
+
+	grayskull_setup_tlb(gs_dev, tlb, noc_addr);
+	*val = ioread32(gs_dev->bar0_mapping + TLB_OFFSET(tlb->index) + (noc_addr->addr % tlb->size));
+
+	if (manage_tlb)
+		tlb_free(pool, tlb);
+
+	return true;
+}
+
+static bool grayskull_noc_write32(struct tenstorrent_device *tt_dev, struct tlb_t *tlb, struct noc_addr_t *noc_addr, u32 val) {
+	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
+	struct tlb_pool *pool = &gs_dev->tlb_pool;
+	bool manage_tlb = (tlb == NULL);
+
+	if (manage_tlb)
+		tlb = tlb_alloc(pool);
+
+	if (!tlb)
+		return false;
+
+	grayskull_setup_tlb(gs_dev, tlb, noc_addr);
+	iowrite32(val, gs_dev->bar0_mapping + TLB_OFFSET(tlb->index) + (noc_addr->addr % tlb->size));
+
+	if (manage_tlb)
+		tlb_free(pool, tlb);
+
+	return true;
+}
+
 struct tenstorrent_device_class grayskull_class = {
 	.name = "Grayskull",
 	.instance_size = sizeof(struct grayskull_device),
@@ -864,4 +933,6 @@ struct tenstorrent_device_class grayskull_class = {
 	.init_hardware = grayskull_init_hardware,
 	.cleanup_device = grayskull_cleanup,
 	.last_release_cb = grayskull_last_release_handler,
+	.noc_read32 = grayskull_noc_read32,
+	.noc_write32 = grayskull_noc_write32,
 };

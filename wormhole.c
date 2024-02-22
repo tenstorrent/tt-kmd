@@ -275,6 +275,77 @@ static void wormhole_reboot(struct tenstorrent_device *tt_dev) {
 	grayskull_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
 }
 
+#define TLB_CONFIG_REG_LO(index) (TLB_CONFIG_START + (index * 2 * sizeof(u32)))
+#define TLB_CONFIG_REG_HI(index) (TLB_CONFIG_REG_LO(index) + sizeof(u32))
+static void wh_program_tlb(struct wormhole_device *wh_dev, struct tlb_t *tlb) {
+	int wh_local_offset_width = tlb->size == TLB_SIZE_1M ? 16 : tlb->size == TLB_SIZE_2M ? 15 : 12;
+	u64 encoded = tlb_encode_config(tlb, wh_local_offset_width);
+
+	// Write only if the encoding has changed.
+	if (tlb->encoded_config != encoded) {
+		iowrite32((encoded >> 0x00) & 0xffffffffU, wh_dev->bar4_mapping + TLB_CONFIG_REG_LO(tlb->index));
+		iowrite32((encoded >> 0x20) & 0xffffffffU, wh_dev->bar4_mapping + TLB_CONFIG_REG_HI(tlb->index));
+		tlb->encoded_config = encoded;
+	}
+}
+
+void wh_setup_tlb(struct wormhole_device *wh_dev, struct tlb_t *tlb, struct noc_addr_t *noc_addr) {
+	tlb_set_config(tlb, noc_addr);
+	wh_program_tlb(wh_dev, tlb);
+}
+
+bool wormhole_noc_read(struct tenstorrent_device *tt_dev, struct tlb_t *tlb, struct noc_addr_t *noc_addr, void *dst, size_t size) {
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	struct tlb_pool *pool = &wh_dev->tlb_pool;
+	bool manage_tlb = (tlb == NULL);
+	u8 __iomem *iomem;
+
+	if (manage_tlb)
+		tlb = tlb_alloc(pool);
+
+	if (!tlb)
+		return false;
+
+	wh_setup_tlb(wh_dev, tlb, noc_addr);
+	iomem = wh_dev->bar0_mapping + TLB_OFFSET(tlb->index) + (noc_addr->addr % tlb->size);
+	memcpy_fromio(dst, iomem, size);
+
+	if (manage_tlb)
+		tlb_free(pool, tlb);
+
+	return true;
+}
+
+bool wormhole_noc_write(struct tenstorrent_device *tt_dev, struct tlb_t *tlb, struct noc_addr_t *noc_addr, const void *src, size_t size) {
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	struct tlb_pool *pool = &wh_dev->tlb_pool;
+	bool manage_tlb = (tlb == NULL);
+	u8 __iomem *iomem;
+
+	if (manage_tlb)
+		tlb = tlb_alloc(pool);
+
+	if (!tlb)
+		return false;
+
+	wh_setup_tlb(wh_dev, tlb, noc_addr);
+	iomem = wh_dev->bar0_mapping + TLB_OFFSET(tlb->index) + (noc_addr->addr % tlb->size);
+	memcpy_toio(iomem, src, size);
+
+	if (manage_tlb)
+		tlb_free(pool, tlb);
+
+	return true;
+}
+
+bool wormhole_noc_read32(struct tenstorrent_device *tt_dev, struct tlb_t *tlb, struct noc_addr_t *noc_addr, u32 *val) {
+	return wormhole_noc_read(tt_dev, tlb, noc_addr, val, sizeof(*val));
+}
+
+bool wormhole_noc_write32(struct tenstorrent_device *tt_dev, struct tlb_t *tlb, struct noc_addr_t *noc_addr, u32 val) {
+	return wormhole_noc_write(tt_dev, tlb, noc_addr, &val, sizeof(val));
+}
+
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
@@ -282,59 +353,6 @@ struct tenstorrent_device_class wormhole_class = {
 	.init_hardware = wormhole_init_hardware,
 	.cleanup_device = wormhole_cleanup,
 	.reboot = wormhole_reboot,
+	.noc_read32 = wormhole_noc_read32,
+	.noc_write32 = wormhole_noc_write32,
 };
-
-#define TLB_CONFIG_REG_LO(index) (TLB_CONFIG_START + (index * 2 * sizeof(u32)))
-#define TLB_CONFIG_REG_HI(index) (TLB_CONFIG_REG_LO(index) + sizeof(u32))
-#define TLB_CONFIG_FIELD_COORD_SIZE 6
-void wh_program_tlb(struct wormhole_device *wh_dev, struct tlb_t *tlb) {
-	struct tlb_config *config = &tlb->config;
-	u64 local_offset = config->address / tlb->size;
-	u64 encoded = 0;
-	int offset = 0;
-	u64 local_offset_width;
-	u64 mask;
-
-	// TLB config layout differs only by the size of the local_offset field,
-	// which comes first.  These numbers are Wormhole-specific.
-	local_offset_width = tlb->size == TLB_SIZE_1M ? 16 : tlb->size == TLB_SIZE_2M ? 15 : 12;
-
-	mask = (1ULL << local_offset_width) - 1;
-	encoded |= local_offset & mask;
-	offset += local_offset_width;
-
-	mask = (1ULL << TLB_CONFIG_FIELD_COORD_SIZE) - 1;
-	encoded |= (config->x_end & mask) << offset;
-	offset += TLB_CONFIG_FIELD_COORD_SIZE;
-
-	mask = (1ULL << TLB_CONFIG_FIELD_COORD_SIZE) - 1;
-	encoded |= (config->y_end & mask) << offset;
-	offset += TLB_CONFIG_FIELD_COORD_SIZE;
-
-	mask = (1ULL << TLB_CONFIG_FIELD_COORD_SIZE) - 1;
-	encoded |= (config->x_start & mask) << offset;
-	offset += TLB_CONFIG_FIELD_COORD_SIZE;
-
-	mask = (1ULL << TLB_CONFIG_FIELD_COORD_SIZE) - 1;
-	encoded |= (config->y_start & mask) << offset;
-	offset += TLB_CONFIG_FIELD_COORD_SIZE;
-
-	encoded |= (config->noc_sel & 0x1) << offset;
-	offset += 1;
-
-	encoded |= (config->mcast & 0x1) << offset;
-	offset += 1;
-
-	encoded |= (config->ordering & 0x3) << offset;
-	offset += 2;
-
-	encoded |= (config->linked & 0x1) << offset;
-	offset += 1;
-
-	if (tlb->encoded_config == encoded)
-		return;
-
-	iowrite32((encoded >> 0x00) & 0xffffffffU, wh_dev->bar4_mapping + TLB_CONFIG_REG_LO(tlb->index));
-	iowrite32((encoded >> 0x20) & 0xffffffffU, wh_dev->bar4_mapping + TLB_CONFIG_REG_HI(tlb->index));
-	tlb->encoded_config = encoded;
-}

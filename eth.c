@@ -48,18 +48,35 @@ struct eth_cmd_t {
 
 static u32 eth_read_reg(struct wormhole_device *wh_dev, struct tlb_t *tlb, u32 eth_idx, u32 addr)
 {
-	return wh_read32(wh_dev, tlb, WH_ETH_NOC0_X[eth_idx], WH_ETH_NOC0_Y[eth_idx], addr);
+	struct noc_addr_t noc_addr = {
+		.addr = addr,
+		.x = WH_ETH_NOC0_X[eth_idx],
+		.y = WH_ETH_NOC0_Y[eth_idx],
+	};
+	u32 val;
+	wormhole_noc_read32(&wh_dev->tt, tlb, &noc_addr, &val);
+	return val;
 }
 
 static void eth_write_reg(struct wormhole_device *wh_dev, struct tlb_t *tlb, u32 eth_idx, u32 addr, u32 value)
 {
-	wh_write32(wh_dev, tlb, WH_ETH_NOC0_X[eth_idx], WH_ETH_NOC0_Y[eth_idx], addr, value);
+	struct noc_addr_t noc_addr = {
+		.addr = addr,
+		.x = WH_ETH_NOC0_X[eth_idx],
+		.y = WH_ETH_NOC0_Y[eth_idx],
+	};
+	wormhole_noc_write32(&wh_dev->tt, tlb, &noc_addr, value);
 }
 
 static void eth_write_block(struct wormhole_device *wh_dev, struct tlb_t *tlb, u32 eth_idx, u32 addr, const void *src,
 			    size_t size)
 {
-	wh_memcpy_toio(wh_dev, tlb, WH_ETH_NOC0_X[eth_idx], WH_ETH_NOC0_Y[eth_idx], addr, src, size);
+	struct noc_addr_t noc_addr = {
+		.addr = addr,
+		.x = WH_ETH_NOC0_X[eth_idx],
+		.y = WH_ETH_NOC0_Y[eth_idx],
+	};
+	wormhole_noc_write(&wh_dev->tt, tlb, &noc_addr, src, size);
 }
 
 static bool eth_queue_full(u32 wr, u32 rd)

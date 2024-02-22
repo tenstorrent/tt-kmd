@@ -6,9 +6,11 @@
 
 #include <linux/types.h>
 #include "device.h"
+#include "tlb.h"
 
 struct grayskull_device {
 	struct tenstorrent_device tt;
+	u8 __iomem *bar0_mapping;
 	u8 __iomem *reg_iomap;	// everything after the TLB windows
 	u8 __iomem *kernel_tlb;	// covers one TLB window
 	u8 __iomem *reset_unit_regs;
@@ -16,6 +18,7 @@ struct grayskull_device {
 	u32 watchdog_fw_reset_vec;
 	u32 smbus_fw_reset_vec;
 	struct tt_hwmon_context *hwmon_context;
+	struct tlb_pool tlb_pool;
 };
 
 #define tt_dev_to_gs_dev(ttdev) \

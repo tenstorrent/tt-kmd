@@ -10,29 +10,6 @@
 #define TLB_SIZE_FROM_INDEX(i) \
 	((i) < TLB_COUNT_1M ? TLB_SIZE_1M : (i) < TLB_COUNT_1M + TLB_COUNT_2M ? TLB_SIZE_2M : TLB_SIZE_16M)
 
-#define TLB_1M_BASE 0
-#define TLB_2M_BASE (TLB_1M_BASE + TLB_SIZE_1M * TLB_COUNT_1M)
-#define TLB_16M_BASE (TLB_2M_BASE + TLB_SIZE_2M * TLB_COUNT_2M)
-#define TLB_OFFSET(index)                                                                             \
-	((index) < TLB_COUNT_1M		       ? TLB_1M_BASE + (index) * TLB_SIZE_1M :                \
-	 (index) < TLB_COUNT_1M + TLB_COUNT_2M ? TLB_2M_BASE + ((index)-TLB_COUNT_1M) * TLB_SIZE_2M : \
-						 TLB_16M_BASE + ((index)-TLB_COUNT_1M - TLB_COUNT_2M) * TLB_SIZE_16M)
-
-static u32 tlb_read32(u8 __iomem *bar0, struct tlb_t *tlb, u32 offset)
-{
-	return ioread32(bar0 + TLB_OFFSET(tlb->index) + (offset % tlb->size));
-}
-
-static void tlb_write32(u8 __iomem *bar0, struct tlb_t *tlb, u32 offset, u32 value)
-{
-	iowrite32(value, bar0 + TLB_OFFSET(tlb->index) + (offset % tlb->size));
-}
-
-static void tlb_memcpy_toio(u8 __iomem *bar0, struct tlb_t *tlb, u32 offset, const void *src, size_t n)
-{
-	memcpy_toio(bar0 + TLB_OFFSET(tlb->index) + (offset % tlb->size), src, n);
-}
-
 void tlb_pool_init(struct tlb_pool *pool)
 {
 	int i;
@@ -91,33 +68,41 @@ void tlb_free(struct tlb_pool *pool, struct tlb_t *tlb)
 	spin_unlock(&pool->lock);
 }
 
-void tlb_set_config(struct tlb_t *tlb, u64 address, u64 x, u64 y)
+void tlb_set_config(struct tlb_t *tlb, struct noc_addr_t *noc_addr)
 {
 	struct tlb_config *config = &tlb->config;
 	memset(config, 0, sizeof(*config));
 
-	config->address = address / tlb->size;
-	config->x_end = x;
-	config->y_end = y;
+	config->address = noc_addr->addr / tlb->size;
+	config->x_end = noc_addr->x;
+	config->y_end = noc_addr->y;
+	// TODO: if noc_addr_t becomes more sophisticated, set the appropriate
+	// fields in the tlb_config struct.
 }
 
-u32 wh_read32(struct wormhole_device *wh, struct tlb_t *tlb, u32 x, u32 y, u64 addr)
+static void set_field(u64 *reg, u64 value, int *offset, int width)
 {
-	tlb_set_config(tlb, addr, x, y);
-	wh_program_tlb(wh, tlb);
-	return tlb_read32(wh->bar0_mapping, tlb, addr);
+	u64 mask = (1ULL << width) - 1;
+	*reg |= (value & mask) << *offset;
+	*offset += width;
 }
 
-void wh_write32(struct wormhole_device *wh, struct tlb_t *tlb, u32 x, u32 y, u64 addr, u32 value)
+u64 tlb_encode_config(struct tlb_t *tlb, int local_offset_width)
 {
-	tlb_set_config(tlb, addr, x, y);
-	wh_program_tlb(wh, tlb);
-	tlb_write32(wh->bar0_mapping, tlb, addr, value);
-}
+	struct tlb_config *config = &tlb->config;
+	u64 local_offset = config->address / tlb->size;
+	u64 encoded = 0;
+	int offset = 0;
 
-void wh_memcpy_toio(struct wormhole_device *wh, struct tlb_t *tlb, u32 x, u32 y, u64 addr, const void *src, size_t size)
-{
-	tlb_set_config(tlb, addr, x, y);
-	wh_program_tlb(wh, tlb);
-	tlb_memcpy_toio(wh->bar0_mapping, tlb, addr, src, size);
+	set_field(&encoded, local_offset, &offset, local_offset_width);
+	set_field(&encoded, config->x_end, &offset, 6);
+	set_field(&encoded, config->y_end, &offset, 6);
+	set_field(&encoded, config->x_start, &offset, 6);
+	set_field(&encoded, config->y_start, &offset, 6);
+	set_field(&encoded, config->noc_sel, &offset, 1);
+	set_field(&encoded, config->mcast, &offset, 1);
+	set_field(&encoded, config->ordering, &offset, 2);
+	set_field(&encoded, config->linked, &offset, 1);
+
+	return encoded;
 }

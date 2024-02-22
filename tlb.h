@@ -5,6 +5,8 @@
 #include <linux/spinlock.h>
 #include <linux/wait.h>
 
+#include "device.h"
+
 #ifndef TTDRIVER_TLB_H_INCLUDED
 #define TTDRIVER_TLB_H_INCLUDED
 
@@ -15,6 +17,15 @@
 #define TLB_COUNT_2M 10
 #define TLB_COUNT_16M 20
 #define TLB_COUNT (156 + 10 + 20)
+
+#define TLB_1M_BASE 0
+#define TLB_2M_BASE (TLB_1M_BASE + TLB_SIZE_1M * TLB_COUNT_1M)
+#define TLB_16M_BASE (TLB_2M_BASE + TLB_SIZE_2M * TLB_COUNT_2M)
+#define TLB_OFFSET(index)                                                                             \
+	((index) < TLB_COUNT_1M		       ? TLB_1M_BASE + (index) * TLB_SIZE_1M :                \
+	 (index) < TLB_COUNT_1M + TLB_COUNT_2M ? TLB_2M_BASE + ((index)-TLB_COUNT_1M) * TLB_SIZE_2M : \
+						 TLB_16M_BASE + ((index)-TLB_COUNT_1M - TLB_COUNT_2M) * TLB_SIZE_16M)
+
 
 struct wormhole_device;
 
@@ -49,12 +60,8 @@ struct tlb_pool {
 void tlb_pool_init(struct tlb_pool *);
 struct tlb_t *tlb_alloc(struct tlb_pool *);
 void tlb_free(struct tlb_pool *, struct tlb_t *);
-void tlb_set_config(struct tlb_t *, u64 address, u64 x, u64 y);
+void tlb_set_config(struct tlb_t *tlb, struct noc_addr_t *noc_addr);
+u64 tlb_encode_config(struct tlb_t *tlb, int local_offset_width);
 
-// Read/write to a chip endpoint using a TLB.
-// If necessary, the TLB will mapped.
-u32 wh_read32(struct wormhole_device *, struct tlb_t *, u32 x, u32 y, u64 addr);
-void wh_write32(struct wormhole_device *, struct tlb_t *, u32 x, u32 y, u64 addr, u32 value);
-void wh_memcpy_toio(struct wormhole_device *, struct tlb_t *, u32 x, u32 y, u64 addr, const void *src, size_t size);
 
 #endif

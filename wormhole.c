@@ -110,16 +110,12 @@ fail_bar2:
 	return false;
 }
 
-
 #define ARC_NOC_X 0
 #define ARC_NOC_Y 10
 static int wormhole_hwmon_read(u64 offset, struct tt_hwmon_context *context, int channel, long *val) {
 	struct tenstorrent_device *tt_dev = context->tt_dev;
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
-	struct eth_addr_t *remote_addr;
-	u32 eth_channel;
-	u8 lock_index;
-	bool ok;
+	u32 i;
 
 	offset += context->telemetry_offset;
 
@@ -136,27 +132,27 @@ static int wormhole_hwmon_read(u64 offset, struct tt_hwmon_context *context, int
 	// via the NOC rather than via PCI BAR.
 	offset += ARC_CSM_NOC;
 
-	// Use the first connected core to determine the remote chip's address.
-	remote_addr = &wh_dev->connected_eth_cores[0].remote;
+	// Find a connected core to perform the read.
+	for (i = 0; i < wh_dev->num_connected_cores; i++) {
+		u32 eth_channel = wh_dev->connected_eth_cores[i].eth_channel;
+		struct eth_addr_t *remote_addr = &wh_dev->connected_eth_cores[i].remote;
+		u8 lock_index = TENSTORRENT_LOCK_ETH(eth_channel);
 
-	// Use eth core 0 to do the actual read.
-	eth_channel = 0;
-	lock_index = TENSTORRENT_LOCK_ETH(eth_channel);
-
-	// FIXME: UMD must use the KMD locking API to avoid conflicts here.
-	if (!test_and_set_bit(lock_index, tt_dev->resource_lock)) {
-		u32 value;
-		ok = wormhole_remote_read32(wh_dev, eth_channel, remote_addr, ARC_NOC_X, ARC_NOC_Y, offset, &value);
-		*val = value;
-		clear_bit(lock_index, tt_dev->resource_lock);
-	} else {
-		return -EBUSY;
+		// Check if userspace is using the core.
+		if (!test_and_set_bit(lock_index, tt_dev->resource_lock)) {
+			u32 value;
+			bool ok = wormhole_remote_read32(wh_dev, eth_channel, remote_addr, ARC_NOC_X, ARC_NOC_Y, offset, &value);
+			*val = value;
+			clear_bit(lock_index, tt_dev->resource_lock);
+			if (ok)
+				return 0;
+			else
+				dev_warn(&tt_dev->pdev->dev, "Failed to read from ETH core %u\n", eth_channel);
+		}
 	}
 
-	if (!ok)
-		return -EOPNOTSUPP;
-
-	return 0;
+	// We couldn't find a core to use or the ones we tried failed.
+	return -EBUSY;
 }
 
 // N150 cards have a single ASIC, N300 cards have two.

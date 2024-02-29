@@ -44,6 +44,7 @@ static const u8 WH_ETH_NOC0_Y[WH_ETH_CORE_COUNT] = { 0, 0, 0, 0, 0, 0, 0, 0, 6, 
  * @data: Number of bytes to read or write.
  * @flags: Flags indicating the type of operation or status of the response.
  * @rack: Rack coordinates of the remote chip.
+ * Remaining fields are unused by this driver.
  */
 struct eth_cmd_t {
 	uint64_t sys_addr;
@@ -106,11 +107,8 @@ void wormhole_eth_probe(struct wormhole_device *wh_dev)
 		u32 remote_shelf = wh_noc_read32(tt, x, y, ETH_REMOTE_SHELF_ADDR);
 		u32 rack_shelf = wh_noc_read32(tt, x, y, ETH_LOCAL_RACK_SHELF_ADDR);
 
-		if (fw_version < ETH_MIN_FW_VERSION) {
-			dev_info(&tt->pdev->dev, "ETH FW version: %u is too old.\n", fw_version);
-			// Make the assumption that all ETH cores are running the same FW.
-			return;
-		}
+		if (fw_version < ETH_MIN_FW_VERSION)
+			continue;
 
 		if (port_status == ETH_STATUS_UNKNOWN || port_status == ETH_STATUS_NOT_CONNECTED)
 			continue;

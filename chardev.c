@@ -285,8 +285,16 @@ static long ioctl_get_device_info(struct chardev_private *priv,
 	return 0;
 }
 
+// This replaces tenstorrent_query_mappings from ioctl.h with a version
+// that uses a flexible array member rather than a zero-length array.
+// This keeps UBSAN from triggering when we write the output mappings.
+struct tenstorrent_query_mappings_flex {
+	struct tenstorrent_query_mappings_in in;
+	struct tenstorrent_mapping out_mappings[];
+};
+
 static long ioctl_query_mappings(struct chardev_private *priv,
-				 struct tenstorrent_query_mappings __user *arg)
+				 struct tenstorrent_query_mappings_flex __user *arg)
 {
 	struct tenstorrent_mapping mappings[6];
 	struct tenstorrent_mapping *next_mapping;
@@ -352,11 +360,11 @@ static long ioctl_query_mappings(struct chardev_private *priv,
 	if (U32_MAX / sizeof(struct tenstorrent_mapping) < extra_mappings_to_clear)
 		return -EFAULT;
 
-	if (copy_to_user(&arg->out.mappings, &mappings,
+	if (copy_to_user(&arg->out_mappings, &mappings,
 			 valid_mappings_to_copy * sizeof(struct tenstorrent_mapping)))
 		return -EFAULT;
 
-	if (clear_user(&arg->out.mappings[valid_mappings_to_copy],
+	if (clear_user(&arg->out_mappings[valid_mappings_to_copy],
 		       extra_mappings_to_clear * sizeof(struct tenstorrent_mapping)))
 		return -EFAULT;
 
@@ -695,7 +703,7 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			break;
 
 		case TENSTORRENT_IOCTL_QUERY_MAPPINGS:
-			ret = ioctl_query_mappings(priv, (struct tenstorrent_query_mappings __user *)arg);
+			ret = ioctl_query_mappings(priv, (struct tenstorrent_query_mappings_flex __user *)arg);
 			break;
 
 		case TENSTORRENT_IOCTL_ALLOCATE_DMA_BUF:

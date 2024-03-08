@@ -128,6 +128,13 @@ static int wormhole_hwmon_read(u64 offset, struct tt_hwmon_context *context, int
 	if (wh_dev->num_connected_cores == 0)
 		return -EOPNOTSUPP;
 
+	mutex_lock(&tt_dev->chardev_mutex);
+	if (tt_dev->open_handles_that_havent_used_lock_api > 0) {
+		mutex_unlock(&tt_dev->chardev_mutex);
+		return -EBUSY;
+	}
+	mutex_unlock(&tt_dev->chardev_mutex);
+
 	// Need to do a remote read, so adjust the offset - the ARC will be accessed
 	// via the NOC rather than via PCI BAR.
 	offset += ARC_CSM_NOC;

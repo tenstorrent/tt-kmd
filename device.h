@@ -30,6 +30,7 @@ struct tenstorrent_device {
 
 	struct mutex chardev_mutex;
 	unsigned int chardev_open_count;
+	uint open_handles_that_havent_used_lock_api;
 
 	struct notifier_block reboot_notifier;
 

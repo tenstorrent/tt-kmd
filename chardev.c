@@ -167,6 +167,7 @@ struct chardev_private {
 	struct list_head pinnings;	// struct pinned_page_range.list
 
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
+	bool have_i_used_lock_api;
 };
 
 static dev_t tt_device_id;
@@ -626,6 +627,13 @@ static long ioctl_lock_ctl(struct chardev_private *priv,
 	memset(&in, 0, sizeof(in));
 	memset(&out, 0, sizeof(out));
 
+	if (!priv->have_i_used_lock_api) {
+		priv->have_i_used_lock_api = true;
+		mutex_lock(&priv->device->chardev_mutex);
+		priv->device->open_handles_that_havent_used_lock_api--;
+		mutex_unlock(&priv->device->chardev_mutex);
+	}
+
 	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
 		return -EFAULT;
 
@@ -836,6 +844,7 @@ static void increment_cdev_open_count(struct tenstorrent_device *tt_dev) {
 	if (!tt_dev->chardev_open_count && tt_dev->dev_class->first_open_cb)
 		tt_dev->dev_class->first_open_cb(tt_dev);
 	tt_dev->chardev_open_count++;
+	tt_dev->open_handles_that_havent_used_lock_api++;
 	mutex_unlock(&tt_dev->chardev_mutex);
 }
 
@@ -860,6 +869,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 
 	hash_init(private_data->dmabufs);
 	INIT_LIST_HEAD(&private_data->pinnings);
+	private_data->have_i_used_lock_api = false;
 
 	kref_get(&tt_dev->kref);
 	private_data->device = tt_dev;
@@ -881,6 +891,12 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	unsigned int bitpos;
 
 	decrement_cdev_open_count(tt_dev);
+
+	if (!priv->have_i_used_lock_api) {
+		mutex_lock(&tt_dev->chardev_mutex);
+		tt_dev->open_handles_that_havent_used_lock_api--;
+		mutex_unlock(&tt_dev->chardev_mutex);
+	}
 
 	hash_for_each_safe(priv->dmabufs, i, tmp_dmabuf, dmabuf, hash_chain) {
 		dma_free_coherent(&tt_dev->pdev->dev, dmabuf->size, dmabuf->ptr, dmabuf->phys);

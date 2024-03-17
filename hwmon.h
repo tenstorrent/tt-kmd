@@ -16,18 +16,28 @@ struct tt_hwmon_attr {
 	u32 shift;
 	u32 mask;
 	u32 multiplier;
+	int channel;
 };
 
 struct tt_hwmon_label {
 	enum hwmon_sensor_types type;
 	u32 attr;
 	const char *name;
+	int channel;
 };
 
 struct tt_hwmon_context {
+	struct tenstorrent_device *tt_dev;
 	const struct tt_hwmon_label *labels;
 	const struct tt_hwmon_attr *attributes;
-	u8 __iomem *telemetry_base;
+
+	u32 channels;
+
+	// telemetry_offset is relative to the start of ARC CSM for local reads;
+	// for remote reads, add it to the NOC endpoint address for the remote ARC.
+	u32 telemetry_offset;	// Relative to ARC_CSM_START
+
+	int (*hwmon_read)(u64 offset, struct tt_hwmon_context *context, int channel, long *val);
 };
 
 extern const struct hwmon_ops tt_hwmon_ops;

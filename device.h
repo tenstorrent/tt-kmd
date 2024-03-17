@@ -30,6 +30,7 @@ struct tenstorrent_device {
 
 	struct mutex chardev_mutex;
 	unsigned int chardev_open_count;
+	uint open_handles_that_havent_used_lock_api;
 
 	struct notifier_block reboot_notifier;
 
@@ -47,6 +48,8 @@ struct tenstorrent_device_class {
 	void (*first_open_cb)(struct tenstorrent_device *ttdev);
 	void (*last_release_cb)(struct tenstorrent_device *ttdev);
 	void (*reboot)(struct tenstorrent_device *ttdev);
+	u32 (*noc_read32)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr);
+	void (*noc_write32)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, u32 data);
 };
 
 void tenstorrent_device_put(struct tenstorrent_device *);

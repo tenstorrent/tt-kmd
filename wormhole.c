@@ -24,6 +24,14 @@
 #define IATU_LOWER_TARGET_ADDR_INBOUND	0x14
 #define IATU_UPPER_TARGET_ADDR_INBOUND	0x18
 
+#define IATU_REGION_CTRL_1_OUTBOUND	0x00
+#define IATU_REGION_CTRL_2_OUTBOUND	0x04
+#define IATU_LOWER_BASE_ADDR_OUTBOUND	0x08
+#define IATU_UPPER_BASE_ADDR_OUTBOUND	0x0C
+#define IATU_LIMIT_ADDR_OUTBOUND	0x10
+#define IATU_LOWER_TARGET_ADDR_OUTBOUND	0x14
+#define IATU_UPPER_TARGET_ADDR_OUTBOUND	0x18
+
 // IATU_REGION_CTRL_2_INBOUND fields
 #define REGION_EN (1 << 31)
 #define BAR_MATCH_MODE (1 << 30)
@@ -187,6 +195,32 @@ static void wormhole_reboot(struct tenstorrent_device *tt_dev) {
 	grayskull_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
 }
 
+/**
+ * wormhole_setup_outbound_iatu() - Configure address translation for outbound
+ * Tensix DMA.
+ *
+ * 0 <= @iatu_index < 16
+ * @src - source address in the chip PCIE core
+ * @dst - destination system bus address
+ * @limit - limit of the translation window
+ *
+ * Context: DMA must be idle.
+ */
+static void wormhole_setup_outbound_iatu(struct tenstorrent_device *tt_dev, u32 iatu_index, u64 src, u64 dst, u64 limit) {
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	const u32 region_ctrl_2 = 0x88280000;
+	const u32 target_lo = dst & 0xFFFFFFFF;
+	const u32 target_hi = (dst >> 32) & 0xFFFFFFFF;
+
+	WRITE_IATU_REG(wh_dev, OUTBOUND, iatu_index, REGION_CTRL_1, 0);
+	WRITE_IATU_REG(wh_dev, OUTBOUND, iatu_index, REGION_CTRL_2, region_ctrl_2);
+	WRITE_IATU_REG(wh_dev, OUTBOUND, iatu_index, LOWER_BASE_ADDR, src & 0xFFFFFFFF);
+	WRITE_IATU_REG(wh_dev, OUTBOUND, iatu_index, UPPER_BASE_ADDR, 0);
+	WRITE_IATU_REG(wh_dev, OUTBOUND, iatu_index, LIMIT_ADDR, limit & 0xFFFFFFFF);
+	WRITE_IATU_REG(wh_dev, OUTBOUND, iatu_index, LOWER_TARGET_ADDR, target_lo);
+	WRITE_IATU_REG(wh_dev, OUTBOUND, iatu_index, UPPER_TARGET_ADDR, target_hi);
+}
+
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
@@ -194,4 +228,5 @@ struct tenstorrent_device_class wormhole_class = {
 	.init_hardware = wormhole_init_hardware,
 	.cleanup_device = wormhole_cleanup,
 	.reboot = wormhole_reboot,
+	.setup_outbound_iatu = wormhole_setup_outbound_iatu,
 };

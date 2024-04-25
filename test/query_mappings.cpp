@@ -40,6 +40,7 @@ void VerifyKnownIds(const std::vector<tenstorrent_mapping> &mappings)
         TENSTORRENT_MAPPING_RESOURCE1_WC,
         TENSTORRENT_MAPPING_RESOURCE2_UC,
         TENSTORRENT_MAPPING_RESOURCE2_WC,
+        TENSTORRENT_MAPPING_RESOURCE_DMA,
     };
 
     for (const auto &mapping : mappings)
@@ -128,8 +129,12 @@ void VerifyNoOverlap(const std::vector<tenstorrent_mapping> &mappings)
 // Verify that size > 0. Verify that base & size are multiples of the page size.
 void VerifySizes(const std::vector<tenstorrent_mapping> &mappings)
 {
+    auto zero_size_ok = [](const tenstorrent_mapping &m) {
+        return m.mapping_id == TENSTORRENT_MAPPING_UNUSED || m.mapping_id == TENSTORRENT_MAPPING_RESOURCE_DMA;
+    };
+
     if (std::any_of(mappings.begin(), mappings.end(),
-                    [](const auto &m) { return m.mapping_id != TENSTORRENT_MAPPING_UNUSED && m.mapping_size == 0; }))
+                    [=](const auto &m) { return !zero_size_ok(m) && m.mapping_size == 0; }))
         THROW_TEST_FAILURE("Zero-size mapping in QUERY_MAPPINGS results.");
 
     auto pagesize = page_size();
@@ -196,7 +201,7 @@ void VerifyMmap(int dev_fd, const std::vector<tenstorrent_mapping> &mappings)
 {
     for (const auto &m : mappings)
     {
-        if (m.mapping_id != TENSTORRENT_MAPPING_UNUSED)
+        if (m.mapping_id != TENSTORRENT_MAPPING_UNUSED && m.mapping_size != 0)
         {
             void *p = mmap(nullptr, m.mapping_size, PROT_READ | PROT_WRITE, MAP_SHARED, dev_fd, m.mapping_base);
             if (p == MAP_FAILED)

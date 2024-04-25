@@ -15,6 +15,7 @@ void TestDmaBuf(const EnumeratedDevice &dev);
 void TestPinPages(const EnumeratedDevice &dev);
 void TestLock(const EnumeratedDevice &dev);
 void TestHwmon(const EnumeratedDevice &dev);
+void TestHugePages(const EnumeratedDevice &dev);
 
 int main(int argc, char *argv[])
 {
@@ -37,6 +38,7 @@ int main(int argc, char *argv[])
         TestPinPages(d);
         TestLock(d);
         TestHwmon(d);
+        TestHugePages(d);
 
         at_least_one_device = true;
     }

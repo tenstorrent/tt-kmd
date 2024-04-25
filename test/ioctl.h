@@ -20,6 +20,7 @@
 #define TENSTORRENT_IOCTL_RESET_DEVICE		_IO(TENSTORRENT_IOCTL_MAGIC, 6)
 #define TENSTORRENT_IOCTL_PIN_PAGES		_IO(TENSTORRENT_IOCTL_MAGIC, 7)
 #define TENSTORRENT_IOCTL_LOCK_CTL		_IO(TENSTORRENT_IOCTL_MAGIC, 8)
+#define TENSTORRENT_IOCTL_HUGEPAGE_SETUP	_IO(TENSTORRENT_IOCTL_MAGIC, 9)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -29,10 +30,11 @@
 #define TENSTORRENT_MAPPING_RESOURCE1_WC	4
 #define TENSTORRENT_MAPPING_RESOURCE2_UC	5
 #define TENSTORRENT_MAPPING_RESOURCE2_WC	6
+#define TENSTORRENT_MAPPING_RESOURCE_DMA	7
 
 #define TENSTORRENT_MAX_DMA_BUFS	256
 
-#define TT_RESOURCE_LOCK_COUNT 64
+#define TENSTORRENT_RESOURCE_LOCK_COUNT 64
 
 struct tenstorrent_get_device_info_in {
 	__u32 output_size_bytes;
@@ -47,6 +49,7 @@ struct tenstorrent_get_device_info_out {
 	__u16 bus_dev_fn;	// [0:2] function, [3:7] device, [8:15] bus
 	__u16 max_dma_buf_size_log2;	// Since 1.0
 	__u16 pci_domain;		// Since 1.23
+	__s32 numa_node;		// Since 1.28; -1 if not NUMA
 };
 
 struct tenstorrent_get_device_info {
@@ -176,6 +179,12 @@ struct tenstorrent_lock_ctl_out {
 struct tenstorrent_lock_ctl {
 	struct tenstorrent_lock_ctl_in in;
 	struct tenstorrent_lock_ctl_out out;
+};
+
+#define TENSTORRENT_MAX_HUGEPAGES_PER_CARD 4
+struct tenstorrent_hugepage_setup {
+	__u32 num_hugepages;
+	__u64 virt_addrs[TENSTORRENT_MAX_HUGEPAGES_PER_CARD];
 };
 
 #endif

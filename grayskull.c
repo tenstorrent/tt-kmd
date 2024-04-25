@@ -803,8 +803,6 @@ static void grayskull_setup_outbound_iatu(struct tenstorrent_device *tt_dev, u32
 	const u32 target_hi = (dst >> 32) & 0xFFFFFFFF;
 	u8 __iomem *tlb = gs_dev->kernel_tlb + tlb_offset;
 
-	pr_info("Setting up iATU %d: src %016llx dst %016llx limit %016llx\n", iatu_index, src, dst, limit);
-
 	iowrite32(0x200000, gs_dev->reset_unit_regs + 0x78);
 	iowrite32(0x200000, gs_dev->reset_unit_regs + 0x7C);
 

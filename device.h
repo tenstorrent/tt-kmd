@@ -36,6 +36,10 @@ struct tenstorrent_device {
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
 
 	struct tt_hwmon_context hwmon_context;
+
+	size_t num_hugepages;		// 1G hugepages; 0 <= num_hugepages <= 4
+	struct page *hugepages[4];
+	dma_addr_t hugepages_dma[4];
 };
 
 struct tenstorrent_device_class {
@@ -51,5 +55,6 @@ struct tenstorrent_device_class {
 };
 
 void tenstorrent_device_put(struct tenstorrent_device *);
+void tenstorrent_cleanup_hugepages(struct tenstorrent_device *);
 
 #endif

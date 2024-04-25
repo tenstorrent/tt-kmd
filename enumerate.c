@@ -9,9 +9,11 @@
 #include <linux/version.h>
 
 #include "enumerate.h"
+#include "device.h"
 #include "interrupt.h"
 #include "chardev.h"
 #include "grayskull.h"
+#include "pcie.h"
 #include "module.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
@@ -76,7 +78,14 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	mutex_init(&tt_dev->chardev_mutex);
 
-	tt_dev->dma_capable = (dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(dma_address_bits ?: 32)) == 0);
+	// The PCIE controller is capable of 64-bit addressing, but the Tensix cores
+	// have a limited aperture through which they can access the system bus.
+	// With no address translation, this aperture corresponds to system bus
+	// address range 0x0000'0000 to 0xFFFD'FFFF.  However, the PCIE controller
+	// allows for remapping of the aperture to any 64-bit address range.  Hence,
+	// DMA mask is set to 64 bits to allow for greater flexibility in either
+	// IOVA (if system IOMMU is enabled) or PA (if system IOMMU is disabled).
+	tt_dev->dma_capable = (dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(dma_address_bits ?: 64)) == 0);
 	pci_set_master(dev);
 	pci_enable_pcie_error_reporting(dev);
 
@@ -102,6 +111,8 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 static void tenstorrent_pci_remove(struct pci_dev *dev)
 {
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(dev);
+
+	tenstorrent_cleanup_hugepages(tt_dev);
 
 	// These remove child sysfs entries which must happen before remove returns.
 	tenstorrent_unregister_device(tt_dev);

@@ -22,6 +22,31 @@
 #include "ioctl.h"
 #include "pcie.h"
 
+#define ONE_GIG (1UL << 30)
+#define ONE_MEG (1UL << 20)
+
+
+static int tt_dev_setup_iatu_hugepages(struct tenstorrent_device *tt_dev) {
+	u64 limit = ONE_GIG - 1;
+	u64 src = 0;
+	int i;
+
+	for (i = 0; i < tt_dev->num_hugepages; ++i) {
+		dma_addr_t dma_addr = tt_dev->hugepages_dma[i];
+
+		if (!tt_dev->dev_class->setup_outbound_iatu) {
+			dev_err(&tt_dev->pdev->dev, "Couldn't set up outbound address translation.\n");
+			return -1;
+		}
+
+		tt_dev->dev_class->setup_outbound_iatu(tt_dev, i, src, dma_addr, limit);
+		limit += ONE_GIG;
+		src += ONE_GIG;
+	}
+	return 0;
+}
+
+
 // In Linux 5.0, dma_alloc_coherent always zeroes memory and dma_zalloc_coherent
 // was removed.
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
@@ -133,6 +158,7 @@ static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npage
 #define MMAP_OFFSET_RESOURCE1_WC	(U64_C(3) << 32)
 #define MMAP_OFFSET_RESOURCE2_UC	(U64_C(4) << 32)
 #define MMAP_OFFSET_RESOURCE2_WC	(U64_C(5) << 32)
+#define MMAP_OFFSET_RESOURCE_TENSIX_DMA	(U64_C(6) << 32)
 
 // tenstorrent_allocate_dma_buf_in.buf_index is u8 so that sets a limit of
 // U8_MAX DMA buffers per fd. 32-bit mmap offsets are divided by PAGE_SIZE,
@@ -251,10 +277,20 @@ void tenstorrent_unregister_device(struct tenstorrent_device *tt_dev)
 	cdev_device_del(&tt_dev->chardev, &tt_dev->dev);
 }
 
+void tenstorrent_cleanup_hugepages(struct tenstorrent_device *tt_dev)
+{
+	int i;
+	for (i = 0; i < tt_dev->num_hugepages; ++i) {
+		dma_unmap_page(&tt_dev->pdev->dev, tt_dev->hugepages_dma[i], ONE_GIG, DMA_BIDIRECTIONAL);
+		put_page(tt_dev->hugepages[i]);
+	}
+	tt_dev->num_hugepages = 0;
+}
+
 static long ioctl_get_device_info(struct chardev_private *priv,
 				  struct tenstorrent_get_device_info __user *arg)
 {
-	const struct pci_dev *pdev = priv->device->pdev;
+	struct pci_dev *pdev = priv->device->pdev;
 	u32 bytes_to_copy;
 
 	struct tenstorrent_get_device_info_out in;
@@ -273,6 +309,7 @@ static long ioctl_get_device_info(struct chardev_private *priv,
 	out.bus_dev_fn = PCI_DEVID(pdev->bus->number, pdev->devfn);
 	out.max_dma_buf_size_log2 = MAX_DMA_BUF_SIZE_LOG2;
 	out.pci_domain = pci_domain_nr(pdev->bus);
+	out.numa_node = dev_to_node(&pdev->dev);
 
 	if (clear_user(&arg->out, in.output_size_bytes) != 0)
 		return -EFAULT;
@@ -296,14 +333,15 @@ struct tenstorrent_query_mappings_flex {
 static long ioctl_query_mappings(struct chardev_private *priv,
 				 struct tenstorrent_query_mappings_flex __user *arg)
 {
-	struct tenstorrent_mapping mappings[6];
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_mapping mappings[7];
 	struct tenstorrent_mapping *next_mapping;
 
 	u32 valid_mappings_to_copy;
 	u32 extra_mappings_to_clear;
 	u32 valid_mappings;
 
-	int resource_len;
+	ssize_t resource_len;
 
 	struct tenstorrent_query_mappings_in in;
 	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
@@ -350,6 +388,13 @@ static long ioctl_query_mappings(struct chardev_private *priv,
 		next_mapping->mapping_size = resource_len;
 		next_mapping++;
 	}
+
+	// TODO: Reserve top 256MiB of 4GiB range for platform use.
+	resource_len = tt_dev->num_hugepages * ONE_GIG;
+	next_mapping->mapping_id = TENSTORRENT_MAPPING_RESOURCE_DMA;
+	next_mapping->mapping_base = MMAP_OFFSET_RESOURCE_TENSIX_DMA;
+	next_mapping->mapping_size = resource_len;
+	next_mapping++;
 
 	valid_mappings = next_mapping - mappings;
 
@@ -500,6 +545,7 @@ static long ioctl_get_driver_info(struct chardev_private *priv,
 static long ioctl_reset_device(struct chardev_private *priv,
 			       struct tenstorrent_reset_device __user *arg)
 {
+	struct tenstorrent_device *tt_dev = priv->device;
 	struct pci_dev *pdev = priv->device->pdev;
 	bool ok;
 	u32 bytes_to_copy;
@@ -523,6 +569,8 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	} else {
 		return -EINVAL;
 	}
+
+	tt_dev_setup_iatu_hugepages(tt_dev);
 
 	out.output_size_bytes = sizeof(out);
 	out.result = !ok;
@@ -689,6 +737,72 @@ static long ioctl_lock_ctl(struct chardev_private *priv,
 	return 0;
 }
 
+static long ioctl_hugepage_setup(struct chardev_private *priv, struct tenstorrent_hugepage_setup __user *arg) {
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_hugepage_setup data;
+	int i;
+	int dev_node;
+	int ret;
+
+	memset(&data, 0, sizeof(data));
+
+	if (copy_from_user(&data, arg, sizeof(data)))
+		return -EFAULT;
+
+	if (data.num_hugepages > TENSTORRENT_MAX_HUGEPAGES_PER_CARD)
+		return -EINVAL;
+
+	mutex_lock(&priv->mutex);
+
+	tenstorrent_cleanup_hugepages(tt_dev);
+
+	dev_node = dev_to_node(&tt_dev->pdev->dev);
+
+	for (i = 0; i < data.num_hugepages; ++i) {
+		dma_addr_t dma_addr;
+		struct page *page;
+		int node;
+
+		if (get_user_pages(data.virt_addrs[i], 1, FOLL_WRITE, &page, NULL) < 0)
+			goto err;
+
+		if (!PageHuge(page))
+			goto err;	// Not huge
+
+		if (compound_order(page) != 18)
+			goto err;	// Not 1G huge
+
+		node = page_to_nid(page);
+		if (dev_node != -1 && node != dev_node) {
+			put_page(page);
+			dev_err(&tt_dev->pdev->dev, "Mismatch between device (%d) and hugepage (%d) NUMA nodes", node, dev_node);
+			goto err;	// Not on the same node
+		}
+
+		// On 5.4.0 (Ubuntu 20.04) this is bugged with IOMMU on and dma_mask set
+		// to 32 bits: it'll return 0 for dma_addr rather than failing.  With
+		// IOMMU off it'll try to use swiotlb - not what we want!
+		dma_addr = dma_map_page(&priv->device->pdev->dev, page, 0, ONE_GIG, DMA_BIDIRECTIONAL);
+		if (dma_addr == 0 || dma_mapping_error(&priv->device->pdev->dev, dma_addr)) {
+			put_page(page);
+			goto err;
+		}
+
+		tt_dev->num_hugepages++;
+		tt_dev->hugepages[i] = page;
+		tt_dev->hugepages_dma[i] = dma_addr;
+	}
+
+	ret = tt_dev_setup_iatu_hugepages(tt_dev);
+	mutex_unlock(&priv->mutex);
+	return ret;
+
+err:
+	tenstorrent_cleanup_hugepages(tt_dev);
+	mutex_unlock(&priv->mutex);
+	return -EINVAL;
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	long ret = -EINVAL;
@@ -728,6 +842,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_LOCK_CTL:
 			ret = ioctl_lock_ctl(priv, (struct tenstorrent_lock_ctl __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_HUGEPAGE_SETUP:
+			ret = ioctl_hugepage_setup(priv, (struct tenstorrent_hugepage_setup __user *)arg);
 			break;
 
 		default:
@@ -792,6 +910,7 @@ static int tt_cdev_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct chardev_private *priv = file->private_data;
 	struct pci_dev *pdev = priv->device->pdev;
+	struct tenstorrent_device *tt_dev = priv->device;
 
 	// We multiplex various mappable entities into a single character
 	// device using the mapping offset to determine which entity you get.
@@ -799,6 +918,7 @@ static int tt_cdev_mmap(struct file *file, struct vm_area_struct *vma)
 	// - PCI BAR 0/2/4 uncacheable mapping
 	// - PCI BAR 0/2/4 write-combining mapping
 	// - DMA buffer mapping
+	// - Tensix DMA buffer mapping
 
 	if (vma_target_range(vma, MMAP_OFFSET_RESOURCE0_UC, pci_resource_len(pdev, 0))) {
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
@@ -824,6 +944,26 @@ static int tt_cdev_mmap(struct file *file, struct vm_area_struct *vma)
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 		return map_pci_bar(pdev, vma, 4);
 
+	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE_TENSIX_DMA, tt_dev->num_hugepages * ONE_GIG)) {
+		unsigned long vsize = vma->vm_end - vma->vm_start;
+		unsigned long psize = tt_dev->num_hugepages * ONE_GIG;
+		size_t i;
+
+		if (vsize > psize)
+			return -EINVAL;
+
+		for (i = 0; i < tt_dev->num_hugepages; ++i) {
+			unsigned long offset = i * ONE_GIG;
+			struct page *page = tt_dev->hugepages[i];
+
+			if (offset >= vsize)
+				break;
+			if (remap_pfn_range(vma, vma->vm_start + offset, page_to_pfn(page), min(vsize - offset, ONE_GIG), vma->vm_page_prot)) {
+				return -EINVAL;
+			}
+		}
+
+		return 0;
 	} else {
 		struct dmabuf *dmabuf = vma_dmabuf_target(priv, vma);
 		if (dmabuf != NULL)

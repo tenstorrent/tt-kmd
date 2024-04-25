@@ -778,6 +778,48 @@ void grayskull_send_curr_date(u8 __iomem* reset_unit_regs) {
 						packed_datetime_low, packed_datetime_high, 1000, NULL);
 }
 
+#define IATU_CONFIG_BASE 0x300000
+/**
+ * grayskull_setup_outbound_iatu() - Configure address translation for outbound
+ * Tensix DMA.
+ *
+ * 0 <= @iatu_index < 16
+ * @src - source address in the chip PCIE core
+ * @dst - destination system bus address
+ * @limit - limit of the translation window
+ *
+ * Context: DMA must be idle.  @dst must be aligned to the effective size of the
+ * translation window.  For example, if the effective size is 256MiB, then the
+ * low 28 bits of @dst must be unset.
+ */
+static void grayskull_setup_outbound_iatu(struct tenstorrent_device *tt_dev, u32 iatu_index, u64 src, u64 dst, u64 limit) {
+	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
+	const u32 tlb_offset = program_tlb(gs_dev, 0, 4, 0, IATU_CONFIG_BASE + (iatu_index * 0x200));
+	const u32 ctrl1 = 0x0;
+	const u32 ctrl2 = 0x88280000;
+	const u32 base_lo = iatu_index * (1UL << 30);
+	const u32 base_hi = 0;
+	const u32 target_lo = dst & 0xFFFFFFFF;
+	const u32 target_hi = (dst >> 32) & 0xFFFFFFFF;
+	u8 __iomem *tlb = gs_dev->kernel_tlb + tlb_offset;
+
+	pr_info("Setting up iATU %d: src %016llx dst %016llx limit %016llx\n", iatu_index, src, dst, limit);
+
+	iowrite32(0x200000, gs_dev->reset_unit_regs + 0x78);
+	iowrite32(0x200000, gs_dev->reset_unit_regs + 0x7C);
+
+	iowrite32(ctrl1, tlb + 0x00);
+	iowrite32(ctrl2, tlb + 0x04);
+	iowrite32(base_lo, tlb + 0x08);
+	iowrite32(base_hi, tlb + 0x0C);
+	iowrite32(limit & 0xFFFFFFFF, tlb + 0x10);
+	iowrite32(target_lo, tlb + 0x14);
+	iowrite32(target_hi, tlb + 0x18);
+
+	iowrite32(0x0, gs_dev->reset_unit_regs + 0x78);
+	iowrite32(0x0, gs_dev->reset_unit_regs + 0x7C);
+}
+
 static bool grayskull_init(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
@@ -855,4 +897,5 @@ struct tenstorrent_device_class grayskull_class = {
 	.init_hardware = grayskull_init_hardware,
 	.cleanup_device = grayskull_cleanup,
 	.last_release_cb = grayskull_last_release_handler,
+	.setup_outbound_iatu = grayskull_setup_outbound_iatu,
 };

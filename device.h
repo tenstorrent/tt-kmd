@@ -47,6 +47,7 @@ struct tenstorrent_device_class {
 	void (*first_open_cb)(struct tenstorrent_device *ttdev);
 	void (*last_release_cb)(struct tenstorrent_device *ttdev);
 	void (*reboot)(struct tenstorrent_device *ttdev);
+	void (*setup_outbound_iatu)(struct tenstorrent_device *ttdev, u32 iatu_index, u64 src, u64 dst, u64 limit);
 };
 
 void tenstorrent_device_put(struct tenstorrent_device *);

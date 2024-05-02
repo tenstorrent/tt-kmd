@@ -49,6 +49,20 @@ static void write_iatu_reg(struct wormhole_device *wh_dev, unsigned direction,
 	iowrite32(value, wh_dev->bar2_mapping + offset);
 }
 
+static struct tt_attribute_data wh_attributes[] = {
+	{ __ATTR(tt_aiclk,  S_IRUGO, tt_show_attribute, NULL), 0x60, 0xFFFF },
+	{ __ATTR(tt_axiclk, S_IRUGO, tt_show_attribute, NULL), 0x64, 0xFFFF },
+	{ __ATTR(tt_arcclk, S_IRUGO, tt_show_attribute, NULL), 0x68, 0xFFFF },
+	{ __ATTR(tt_card_type, S_IRUGO, tt_show_card_type, NULL), 0x10, 0x0 },
+	{ __ATTR(tt_serial, S_IRUGO, tt_show_card_serial, NULL), 0x10, 0x0 },
+	{ __ATTR(tt_arc_fw_ver, S_IRUGO, tt_show_fw_ver, NULL), 0x18, 0x0 },
+	{ __ATTR(tt_eth_fw_ver, S_IRUGO, tt_show_eth_fw_ver, NULL), 0x2c, 0x0 },
+	{ __ATTR(tt_m3bl_fw_ver, S_IRUGO, tt_show_fw_ver, NULL), 0x30, 0x0 },
+	{ __ATTR(tt_m3app_fw_ver, S_IRUGO, tt_show_fw_ver, NULL), 0x34, 0x0 },
+	{ __ATTR(tt_ttflash_ver, S_IRUGO, tt_show_fw_ver, NULL), 0xb8, 0x0 },
+	{ __ATTR_NULL, 0, 0 }
+};
+
 static u32 wh_arc_addr_to_sysreg(u32 arc_addr) {
 	return ARC_CSM_START + (arc_addr - 0x10000000);
 }
@@ -165,6 +179,8 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 	}
 
 	wormhole_hwmon_init(wh_dev);
+
+	tt_dev->attributes = wh_attributes;
 
 	return true;
 }

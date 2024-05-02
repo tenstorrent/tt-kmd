@@ -36,6 +36,7 @@ struct tenstorrent_device {
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
 
 	struct tt_hwmon_context hwmon_context;
+	struct tt_attribute_data *attributes;
 };
 
 struct tenstorrent_device_class {

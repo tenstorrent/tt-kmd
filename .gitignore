@@ -1,0 +1,8 @@
+*~
+*.o
+*.ko
+*.mod
+*.cmd
+Module.symvers
+modules.order
+tenstorrent.mod.c

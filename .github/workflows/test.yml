@@ -1,0 +1,37 @@
+name: 'test'
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+
+  build-dkms:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+    - run: |
+        sudo apt update
+        sudo apt install -y dkms
+        sudo dkms add .
+        sudo dkms install tenstorrent/1.27.1
+
+  build-make:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+    - run: |
+        sudo apt update
+        sudo apt install -y make
+        make -j $(nproc)
+    - uses: actions/upload-artifact@v4
+      with:
+        name: driver-${{ matrix.os }}
+        path: tenstorrent.ko

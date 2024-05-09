@@ -1,0 +1,13 @@
+name: 'check-white-space'
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check-white-space:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - run: test/checkws *.c *.h

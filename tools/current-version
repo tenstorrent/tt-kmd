@@ -1,0 +1,6 @@
+#! /bin/bash
+
+# SPDX-FileCopyrightText: © 2024 Tenstorrent Inc.
+# SPDX-License-Identifier: GPL-2.0-only
+
+sed -nE "s/^[[:space:]]*PACKAGE_VERSION[[:space:]]*=[[:space:]]*\"([^\"]+)\"/\\1/p" dkms.conf

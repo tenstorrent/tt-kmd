@@ -135,8 +135,8 @@ struct TLB_16M_REG {
 
 #define TLB_16M_SIZE_SHIFT 24
 
-static u32 gs_arc_addr_to_sysreg(u32 arc_addr) {
-	return ARC_CSM_MEMORY_OFFSET + (arc_addr - 0x10000000);
+static u32 gs_arc_addr_adjust(u32 arc_addr) {
+	return arc_addr - 0x10000000;
 }
 
 static bool is_hardware_hung(struct pci_dev *pdev, u8 __iomem *reset_unit_regs) {
@@ -641,6 +641,13 @@ bool grayskull_read_fw_telemetry_offset(u8 __iomem *reset_unit_regs, u32 *offset
 	return true;
 }
 
+static int grayskull_hwmon_read(u64 offset, struct tt_hwmon_context *context, int channel, long *val) {
+	struct tenstorrent_device *tt_dev = context->tt_dev;
+	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
+	u8 __iomem *addr = gs_dev->reg_iomap + ARC_CSM_MEMORY_OFFSET + context->telemetry_offset + offset;
+	*val = ioread32(addr);
+	return 0;
+}
 
 static const struct tt_hwmon_attr gs_hwmon_attributes[] = {
 	{ hwmon_temp,  hwmon_temp_input,  0x64, 0,  GENMASK(15, 0), 64   },
@@ -655,10 +662,10 @@ static const struct tt_hwmon_attr gs_hwmon_attributes[] = {
 };
 
 static const struct tt_hwmon_label gs_hwmon_labels[] = {
-	{ hwmon_temp,  hwmon_temp_label,  "asic_temp" },
-	{ hwmon_in,    hwmon_in_label,    "vcore"     },
-	{ hwmon_curr,  hwmon_curr_label,  "current"   },
-	{ hwmon_power, hwmon_power_label, "power"     },
+	{ hwmon_temp,  hwmon_temp_label,  "asic1_temp"    },
+	{ hwmon_in,    hwmon_in_label,    "asic1_vcore"   },
+	{ hwmon_curr,  hwmon_curr_label,  "asic1_current" },
+	{ hwmon_power, hwmon_power_label, "asic1_power"   },
 	{ .name = NULL },
 };
 
@@ -696,9 +703,12 @@ static void grayskull_hwmon_init(struct grayskull_device *gs_dev) {
 	if (!grayskull_read_fw_telemetry_offset(gs_dev->reset_unit_regs, &telemetry_offset))
 		goto grayskull_hwmon_init_err;
 
+	context->tt_dev = tt_dev;
 	context->attributes = gs_hwmon_attributes;
 	context->labels = gs_hwmon_labels;
-	context->telemetry_base = gs_dev->reg_iomap + gs_arc_addr_to_sysreg(telemetry_offset);
+	context->channels = 1;
+	context->telemetry_offset = gs_arc_addr_adjust(telemetry_offset);
+	context->hwmon_read = grayskull_hwmon_read;
 
 	hwmon_device = devm_hwmon_device_register_with_info(dev, "grayskull", context, &gs_hwmon_chip_info, NULL);
 	if (IS_ERR(hwmon_device))
@@ -848,6 +858,18 @@ static void grayskull_last_release_handler(struct tenstorrent_device *tt_dev) {
 						0, 0, 10000, NULL);
 }
 
+static u32 grayskull_noc_read32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr) {
+	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
+	u32 offset = program_tlb(gs_dev, x, y, 0, addr);
+	return ioread32(gs_dev->kernel_tlb + offset);
+}
+
+static void grayskull_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, u32 val) {
+	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
+	u32 offset = program_tlb(gs_dev, x, y, 0, addr);
+	iowrite32(val, gs_dev->kernel_tlb + offset);
+}
+
 struct tenstorrent_device_class grayskull_class = {
 	.name = "Grayskull",
 	.instance_size = sizeof(struct grayskull_device),
@@ -855,4 +877,6 @@ struct tenstorrent_device_class grayskull_class = {
 	.init_hardware = grayskull_init_hardware,
 	.cleanup_device = grayskull_cleanup,
 	.last_release_cb = grayskull_last_release_handler,
+	.noc_read32 = grayskull_noc_read32,
+	.noc_write32 = grayskull_noc_write32,
 };

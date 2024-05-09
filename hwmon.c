@@ -13,14 +13,17 @@ static umode_t tt_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types 
 	const struct tt_hwmon_attr *attribute = ctx->attributes;
 	const struct tt_hwmon_label *label = ctx->labels;
 
+	if (channel >= ctx->channels)
+		return 0;
+
 	while (attribute->reg_offset != TT_HWMON_ATTR_END) {
-		if (attribute->type == type && attribute->attr == attr)
+		if (attribute->type == type && attribute->attr == attr && attribute->channel == channel)
 			return S_IRUGO;
 		attribute++;
 	}
 
 	while (label->name != NULL) {
-		if (label->type == type && label->attr == attr)
+		if (label->type == type && label->attr == attr && label->channel == channel)
 			return S_IRUGO;
 		label++;
 	}
@@ -29,19 +32,26 @@ static umode_t tt_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types 
 }
 
 static int tt_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long *val) {
-	const struct tt_hwmon_context *ctx = dev_get_drvdata(dev);
+	struct tt_hwmon_context *ctx = dev_get_drvdata(dev);
 	const struct tt_hwmon_attr *attribute = ctx->attributes;
 
 	while (attribute->reg_offset != TT_HWMON_ATTR_END) {
-		if (attribute->type == type && attribute->attr == attr) {
-			u32 value = ioread32(ctx->telemetry_base + attribute->reg_offset);
+		long value;
+		int r;
+
+		if (attribute->type != type || attribute->attr != attr || attribute->channel != channel) {
+			attribute++;
+			continue;
+		}
+
+		r = ctx->hwmon_read(attribute->reg_offset, ctx, channel, &value);
+		if (r == 0) {
 			value >>= attribute->shift;
 			value &= attribute->mask;
 			value *= attribute->multiplier;
 			*val = value;
-			return 0;
 		}
-		attribute++;
+		return r;
 	}
 
 	return -EOPNOTSUPP;
@@ -53,7 +63,7 @@ static int tt_hwmon_read_string(struct device *dev, enum hwmon_sensor_types type
 	const struct tt_hwmon_label *label = ctx->labels;
 
 	while (label->name != NULL) {
-		if (label->type == type && label->attr == attr) {
+		if (label->type == type && label->attr == attr && label->channel == channel) {
 			*str = label->name;
 			return 0;
 		}
@@ -68,4 +78,3 @@ const struct hwmon_ops tt_hwmon_ops = {
 	.read = tt_hwmon_read,
 	.read_string = tt_hwmon_read_string,
 };
-

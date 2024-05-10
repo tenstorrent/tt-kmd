@@ -1,0 +1,17 @@
+name: mass-build-test
+
+on:
+    push:
+    pull_request:
+    workflow_dispatch:
+
+jobs:
+    mass-build-test:
+        runs-on: ubuntu-22.04
+        steps:
+            - uses: actions/checkout@v4
+            - run: |
+                sudo apt update
+                sudo apt install -y dkms git libelf-dev
+                git clone https://github.com/gregkh/linux /tmp/linux
+                test/mass-build-test . /tmp/linux v5.2 v6.15

@@ -132,7 +132,7 @@ static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npage
 // tenstorrent_allocate_dma_buf_in.buf_index is u8 so that sets a limit of
 // U8_MAX DMA buffers per fd. 32-bit mmap offsets are divided by PAGE_SIZE,
 // so PAGE_SIZE << 32 is the largest possible offset.
-#define MMAP_OFFSET_DMA_BUF		((u64)(PAGE_SIZE-U8_MAX) << 32)
+#define MMAP_OFFSET_DMA_BUF		((u64)(PAGE_SIZE-U8_MAX-1) << 32)
 
 #define MMAP_SIZE_DMA_BUF (U64_C(1) << 32)
 

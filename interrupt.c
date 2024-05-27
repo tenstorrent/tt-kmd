@@ -20,8 +20,7 @@ static irqreturn_t irq_handler(int irq, void *device)
 
 bool tenstorrent_enable_interrupts(struct tenstorrent_device *tt_dev)
 {
-	// MSI-X capability exists in GS but is not fully implemented
-	if (pci_alloc_irq_vectors(tt_dev->pdev, 1, 1, PCI_IRQ_LEGACY | PCI_IRQ_MSI) <= 0)
+	if (pci_alloc_irq_vectors(tt_dev->pdev, 1, 1, PCI_IRQ_ALL_TYPES) <= 0)
 		goto out_pci_alloc_irq_vectors_failed;
 
 	if (request_irq(pci_irq_vector(tt_dev->pdev, 0), irq_handler,

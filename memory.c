@@ -122,12 +122,12 @@ static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npage
 // These are the mmap offsets for various resources. In the user-kernel
 // interface they are dynamic (TENSTORRENT_IOCTL_QUERY_MAPPINGS and
 // TENSTORRENT_IOCTL_ALLOCATE_DMA_BUF), but they are actually hard-coded.
-#define MMAP_OFFSET_RESOURCE0_UC	(U64_C(0) << 32)
-#define MMAP_OFFSET_RESOURCE0_WC	(U64_C(1) << 32)
-#define MMAP_OFFSET_RESOURCE1_UC	(U64_C(2) << 32)
-#define MMAP_OFFSET_RESOURCE1_WC	(U64_C(3) << 32)
-#define MMAP_OFFSET_RESOURCE2_UC	(U64_C(4) << 32)
-#define MMAP_OFFSET_RESOURCE2_WC	(U64_C(5) << 32)
+#define MMAP_OFFSET_RESOURCE0_UC	(U64_C(0) << 35)
+#define MMAP_OFFSET_RESOURCE0_WC	(U64_C(1) << 35)
+#define MMAP_OFFSET_RESOURCE1_UC	(U64_C(2) << 35)
+#define MMAP_OFFSET_RESOURCE1_WC	(U64_C(3) << 35)
+#define MMAP_OFFSET_RESOURCE2_UC	(U64_C(4) << 35)
+#define MMAP_OFFSET_RESOURCE2_WC	(U64_C(5) << 35)
 
 // tenstorrent_allocate_dma_buf_in.buf_index is u8 so that sets a limit of
 // U8_MAX DMA buffers per fd. 32-bit mmap offsets are divided by PAGE_SIZE,

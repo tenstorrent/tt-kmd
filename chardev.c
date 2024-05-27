@@ -16,6 +16,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/version.h>
 #include <linux/hashtable.h>
+#include <linux/vmalloc.h>
 
 #include "device.h"
 #include "enumerate.h"

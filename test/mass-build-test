@@ -1,6 +1,6 @@
 #! /usr/bin/python3
 
-# SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2024 Tenstorrent Inc.
 # SPDX-License-Identifier: GPL-2.0-only
 
 """
@@ -12,7 +12,6 @@ Stops on first build failure.
 """
 
 import argparse
-import contextlib
 from functools import lru_cache
 import os
 from pathlib import Path
@@ -20,26 +19,6 @@ import re
 import subprocess
 import sys
 from typing import Optional, List, NamedTuple, Dict, Tuple
-
-def path_search(name: str) -> Optional[Path]:
-    path = os.getenv("PATH", ".")
-
-    for path_dir in map(Path, path.split(":")):
-        candidate = path_dir / name
-        with contextlib.suppress(OSError):
-            if candidate.is_file() and os.access(candidate, os.X_OK, effective_ids=os.supports_effective_ids):
-                return candidate.absolute()
-
-    return None
-
-def path_search_or_else(name: str) -> Path:
-    p = path_search(name)
-    if p is None:
-        raise FileNotFoundError(f"Could not find {name} in PATH.")
-    return p
-
-git = path_search_or_else("git")
-make = path_search_or_else("make")
 
 @lru_cache(1)
 def make_j() -> str:
@@ -52,17 +31,17 @@ def subprocess_check_output_merged(args: List[str], working_dir: Path) -> bytes:
     return subprocess.check_output(args, cwd=working_dir, stderr=subprocess.STDOUT)
 
 def prepare_kernel(kernel_dir: Path, ver: str) -> bool:
-    subprocess_check_output_merged([git, "clean", "-dfx"], kernel_dir)
-    subprocess_check_output_merged([git, "reset", "--hard"], kernel_dir)
-    subprocess_check_output_merged([git, "checkout", ver], kernel_dir)
-    subprocess_check_output_merged([make, make_j(), "defconfig"], kernel_dir)
-    subprocess_check_output_merged([make, make_j(), "modules_prepare"], kernel_dir)
+    subprocess_check_output_merged(["git", "clean", "-dfx"], kernel_dir)
+    subprocess_check_output_merged(["git", "reset", "--hard"], kernel_dir)
+    subprocess_check_output_merged(["git", "checkout", ver], kernel_dir)
+    subprocess_check_output_merged(["make", make_j(), "defconfig"], kernel_dir)
+    subprocess_check_output_merged(["make", make_j(), "modules_prepare"], kernel_dir)
 
 def build_module(module_dir: Path, kernel_dir: Path) -> None:
-    subprocess_check_output_merged([make, make_j(), "clean"], module_dir)
+    subprocess_check_output_merged(["make", make_j(), "clean"], module_dir)
 
     # We're building against an incompletely-built kernel tree, so modpost can't find symbol versions.
-    subprocess_check_output_merged([make, make_j(), f"KDIR={kernel_dir.absolute()}", "KBUILD_MODPOST_WARN=1"], module_dir)
+    subprocess_check_output_merged(["make", make_j(), f"KDIR={kernel_dir.absolute()}", "KBUILD_MODPOST_WARN=1"], module_dir)
 
 class KernelVersion(NamedTuple):
     major: int
@@ -96,7 +75,7 @@ def insert_version_if_latest(test_versions: Dict[Tuple[int,int], KernelVersion],
 
 def convert_ref_to_kernel_version(kernel_dir: Path, ref: str) -> Optional[KernelVersion]:
     try:
-        tag_output = subprocess.check_output([git, "tag", "--points-at", ref, "--sort=creatordate"],
+        tag_output = subprocess.check_output(["git", "tag", "--points-at", ref, "--sort=creatordate"],
                                              cwd=kernel_dir, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to list tags pointing to {ref} in {kernel_dir}.\n" + e.stderr.decode(errors='replace'))
@@ -105,7 +84,7 @@ def convert_ref_to_kernel_version(kernel_dir: Path, ref: str) -> Optional[Kernel
 
 def version_tags_between(kernel_dir: Path, start: str, end: str, use_latest_point: bool) -> List[str]:
     try:
-        tag_output = subprocess.check_output([git, "tag", "--contains", start, "--no-contains", end, "--sort=creatordate"],
+        tag_output = subprocess.check_output(["git", "tag", "--contains", start, "--no-contains", end, "--sort=creatordate"],
                                              cwd=kernel_dir, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to list tags between {start} and {end} in {kernel_dir}.\n" + e.stderr.decode(errors='replace'))
@@ -127,7 +106,7 @@ def version_tags_between(kernel_dir: Path, start: str, end: str, use_latest_poin
     if end_version is not None:
         if use_latest_point:
             try:
-                tag_output = subprocess.check_output([git, "tag", "--contains", end, "--sort=creatordate"],
+                tag_output = subprocess.check_output(["git", "tag", "--contains", end, "--sort=creatordate"],
                                                      cwd=kernel_dir, stderr=subprocess.PIPE)
             except subprocess.CalledProcessError as e:
                 raise RuntimeError(f"Failed to list tags starting from {end} in {kernel_dir}.\n" + e.stderr.decode(errors='replace'))

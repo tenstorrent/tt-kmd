@@ -135,6 +135,18 @@ struct TLB_16M_REG {
 
 #define TLB_16M_SIZE_SHIFT 24
 
+
+static struct tt_attribute_data gs_attributes[] = {
+	{ __ATTR(tt_aiclk,  S_IRUGO, tt_show_attribute, NULL), 0x50, 0xFFFF },
+	{ __ATTR(tt_axiclk, S_IRUGO, tt_show_attribute, NULL), 0x54, 0xFFFF },
+	{ __ATTR(tt_arcclk, S_IRUGO, tt_show_attribute, NULL), 0x58, 0xFFFF },
+	{ __ATTR(tt_card_type, S_IRUGO, tt_show_card_type, NULL), 0x10, 0x0 },
+	{ __ATTR(tt_serial, S_IRUGO, tt_show_card_serial, NULL), 0x10, 0x0 },
+	{ __ATTR(tt_arc_fw_ver, S_IRUGO, tt_show_fw_ver, NULL), 0x18, 0xFFFFFF },
+	{ __ATTR(tt_ttflash_ver, S_IRUGO, tt_show_fw_ver, NULL), 0x98, 0x0 },
+	{ __ATTR_NULL, 0, 0 }
+};
+
 static u32 gs_arc_addr_to_sysreg(u32 arc_addr) {
 	return ARC_CSM_MEMORY_OFFSET + (arc_addr - 0x10000000);
 }
@@ -819,6 +831,8 @@ static bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 	grayskull_noc_init(gs_dev);
 
 	grayskull_hwmon_init(gs_dev);
+
+	tt_dev->attributes = gs_attributes;
 
 	return true;
 }

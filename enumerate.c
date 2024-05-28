@@ -81,6 +81,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	pci_enable_pcie_error_reporting(dev);
 
 	pci_set_drvdata(dev, tt_dev);
+	dev_set_drvdata(&tt_dev->dev, tt_dev);
 
 	tt_dev->interrupt_enabled = tenstorrent_enable_interrupts(tt_dev);
 
@@ -96,12 +97,25 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 		register_reboot_notifier(&tt_dev->reboot_notifier);
 	}
 
+	if (tt_dev->attributes) {
+		struct tt_attribute_data *data = tt_dev->attributes;
+		for (; data->attr.attr.name; data++)
+			device_create_file(&tt_dev->dev, &data->attr);
+	}
+
 	return 0;
 }
 
 static void tenstorrent_pci_remove(struct pci_dev *dev)
 {
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(dev);
+
+	if (tt_dev->attributes) {
+		struct tt_attribute_data *data = tt_dev->attributes;
+		for (; data->attr.attr.name; data++)
+			device_remove_file(&tt_dev->dev, &data->attr);
+	}
+
 
 	// These remove child sysfs entries which must happen before remove returns.
 	tenstorrent_unregister_device(tt_dev);

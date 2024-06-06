@@ -304,7 +304,7 @@ static long ioctl_query_mappings(struct chardev_private *priv,
 	u32 extra_mappings_to_clear;
 	u32 valid_mappings;
 
-	int resource_len;
+	resource_size_t resource_len;
 
 	struct tenstorrent_query_mappings_in in;
 	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
@@ -741,7 +741,7 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 // Is the mapping target range contained entirely with start - start+len?
 // start and len must be page-aligned.
-static bool vma_target_range(struct vm_area_struct *vma, u64 start, u64 len)
+static bool vma_target_range(struct vm_area_struct *vma, u64 start, resource_size_t len)
 {
 	unsigned long mapping_len_pg = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
 	unsigned long mapping_end_pg = vma->vm_pgoff + mapping_len_pg;
@@ -783,8 +783,8 @@ static struct dmabuf *vma_dmabuf_target(struct chardev_private *priv,
 
 static int map_pci_bar(struct pci_dev *pdev, struct vm_area_struct *vma, unsigned int bar)
 {
-	u64 bar_start = pci_resource_start(pdev, bar);
-	u64 bar_len = pci_resource_len(pdev, bar);
+	resource_size_t bar_start = pci_resource_start(pdev, bar);
+	resource_size_t bar_len = pci_resource_len(pdev, bar);
 
 	return vm_iomap_memory(vma, bar_start, bar_len);
 }

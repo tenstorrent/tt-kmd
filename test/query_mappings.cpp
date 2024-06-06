@@ -10,6 +10,8 @@
 // Verify that not giving enough space for outputs results in the initial subset being returned.
 
 #include <algorithm>
+#include <iomanip>
+#include <iostream>
 #include <iterator>
 #include <set>
 #include <string>
@@ -141,6 +143,28 @@ void VerifySizes(const std::vector<tenstorrent_mapping> &mappings)
     if (std::any_of(mappings.begin(), mappings.end(),
                     [=](const auto &m) { return m.mapping_id != TENSTORRENT_MAPPING_UNUSED && m.mapping_base % pagesize != 0; }))
         THROW_TEST_FAILURE("Mapping base is not a multiple of page size in QUERY_MAPPINGS results.");
+}
+
+void PrintMappings(const std::vector<tenstorrent_mapping>& mappings)
+{
+    static const char *names[] = {
+        [TENSTORRENT_MAPPING_UNUSED] = "TENSTORRENT_MAPPING_UNUSED",
+        [TENSTORRENT_MAPPING_RESOURCE0_UC] = "TENSTORRENT_MAPPING_RESOURCE0_UC",
+        [TENSTORRENT_MAPPING_RESOURCE0_WC] = "TENSTORRENT_MAPPING_RESOURCE0_WC",
+        [TENSTORRENT_MAPPING_RESOURCE1_UC] = "TENSTORRENT_MAPPING_RESOURCE1_UC",
+        [TENSTORRENT_MAPPING_RESOURCE1_WC] = "TENSTORRENT_MAPPING_RESOURCE1_WC",
+        [TENSTORRENT_MAPPING_RESOURCE2_UC] = "TENSTORRENT_MAPPING_RESOURCE2_UC",
+        [TENSTORRENT_MAPPING_RESOURCE2_WC] = "TENSTORRENT_MAPPING_RESOURCE2_WC",
+    };
+
+    for (const tenstorrent_mapping &m : mappings)
+    {
+        const char *name = "unknown";
+        if (m.mapping_id < sizeof(names) / sizeof(names[0]))
+            name = names[m.mapping_id];
+
+        std::cout << m.mapping_id << ' ' << name << ' ' << std::hex << m.mapping_base << '+' << m.mapping_size << std::dec << '\n';
+    }
 }
 
 std::vector<tenstorrent_mapping> QueryMappingsCount(int dev_fd, std::uint32_t count)

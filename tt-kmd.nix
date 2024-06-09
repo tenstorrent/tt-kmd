@@ -8,7 +8,7 @@ let gs-drv = { stdenv, lib, fetchFromGitHub, kernel, kmod } :
           owner = "tenstorrent";
           repo = "tt-kmd";
           rev = "ttkmd-${version}";
-          sha256 = "/Cx9ndn1k5yRN7WGEu8UhuwGE9QObMWJA8dZ/ffyAJQ=";
+          sha256 = "sha256-TcYOEqXEqyipLEfHUHKC3VA8tXuEo05EObiRVe+J4PE=";
         };
 
         sourceRoot = "";

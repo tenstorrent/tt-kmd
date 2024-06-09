@@ -2,7 +2,7 @@
 let gs-drv = { stdenv, lib, fetchFromGitHub, kernel, kmod } :
       stdenv.mkDerivation rec {
         name = "tt-kmd-${version}-${kernel.version}";
-        version = "1.26";
+        version = "1.27.1";
 
         src = fetchFromGitHub {
           owner = "tenstorrent";

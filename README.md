@@ -28,7 +28,32 @@ For NixOS users, add:
 ```nix
 "${builtins.fetchTarball "https://github.com/tenstorrent/tt-kmd/archive/main.tar.gz"}/tt-kmd.nix"
 ```
-to the imports list in your `configuration.nix`. The module will load on the next boot. 
+to the imports list in your `configuration.nix`. The module will load on the next boot.
+
+Make sure to add the following to your `configuration.nix` as well:
+
+``` nix
+boot.kernelParams = ["hugepagesz=1GB"
+                     "hugepages=1"
+                     "iommu=pt"
+                     "nr_hugepages=1" ];
+
+  systemd.mounts = [
+      {
+        where = "/dev/hugepages";
+        enable = false;
+      }
+      { where = "/dev/hugepages/hugepages-1G";
+          enable  = true;
+          what  = "hugetlbfs";
+          type  = "hugetlbfs";
+          options = "pagesize=1G";
+          requiredBy  = [ "basic.target" ];
+      }
+    ];
+```
+
+This sets up IOMMU passthrough mode and hugepages.
 
 ### To uninstall:
 ```

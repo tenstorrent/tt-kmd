@@ -56,10 +56,11 @@ static struct tt_attribute_data wh_attributes[] = {
 	{ __ATTR(tt_card_type, S_IRUGO, tt_show_card_type, NULL), 0x10, 0x0 },
 	{ __ATTR(tt_serial, S_IRUGO, tt_show_card_serial, NULL), 0x10, 0x0 },
 	{ __ATTR(tt_arc_fw_ver, S_IRUGO, tt_show_fw_ver, NULL), 0x18, 0x0 },
-	{ __ATTR(tt_eth_fw_ver, S_IRUGO, tt_show_eth_fw_ver, NULL), 0x2c, 0x0 },
+	{ __ATTR(tt_eth_fw_ver, S_IRUGO, tt_show_eth_fw_ver, NULL), 0x2C, 0x0 },
 	{ __ATTR(tt_m3bl_fw_ver, S_IRUGO, tt_show_fw_ver, NULL), 0x30, 0x0 },
 	{ __ATTR(tt_m3app_fw_ver, S_IRUGO, tt_show_fw_ver, NULL), 0x34, 0x0 },
-	{ __ATTR(tt_ttflash_ver, S_IRUGO, tt_show_fw_ver, NULL), 0xb8, 0x0 },
+	{ __ATTR(tt_ttflash_ver, S_IRUGO, tt_show_fw_ver, NULL), 0xB8, 0x0 },
+	{ __ATTR(tt_fw_bundle_ver, S_IRUGO, tt_show_fw_ver, NULL), 0xC4, 0x0 },
 	{ __ATTR_NULL, 0, 0 }
 };
 

@@ -160,6 +160,8 @@ static void wormhole_hwmon_init(struct wormhole_device *wh_dev) {
 	if (IS_ERR(hwmon_device))
 		goto wormhole_hwmon_init_err;
 
+	tt_dev->attributes = wh_attributes;
+
 	return;
 
 wormhole_hwmon_init_err:
@@ -179,9 +181,13 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 		grayskull_send_arc_fw_message_with_args(reset_unit_regs(wh_dev), WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT, auto_reset_timeout, 0, 10000, NULL);
 	}
 
-	wormhole_hwmon_init(wh_dev);
+	return true;
+}
 
-	tt_dev->attributes = wh_attributes;
+static bool wormhole_post_hardware_init(struct tenstorrent_device *tt_dev) {
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+
+	wormhole_hwmon_init(wh_dev);
 
 	return true;
 }
@@ -213,6 +219,7 @@ struct tenstorrent_device_class wormhole_class = {
 	.instance_size = sizeof(struct wormhole_device),
 	.init_device = wormhole_init,
 	.init_hardware = wormhole_init_hardware,
+	.post_hardware_init = wormhole_post_hardware_init,
 	.cleanup_hardware = wormhole_cleanup_hardware,
 	.cleanup_device = wormhole_cleanup,
 	.reboot = wormhole_reboot,

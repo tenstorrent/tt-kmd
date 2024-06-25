@@ -717,6 +717,7 @@ static void grayskull_hwmon_init(struct grayskull_device *gs_dev) {
 	if (IS_ERR(hwmon_device))
 		goto grayskull_hwmon_init_err;
 
+	tt_dev->attributes = gs_attributes;
 
 	return;
 
@@ -831,9 +832,13 @@ static bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 
 	grayskull_noc_init(gs_dev);
 
-	grayskull_hwmon_init(gs_dev);
+	return true;
+}
 
-	tt_dev->attributes = gs_attributes;
+static bool grayskull_post_hardware_init(struct tenstorrent_device *tt_dev) {
+	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
+
+	grayskull_hwmon_init(gs_dev);
 
 	return true;
 }
@@ -872,6 +877,7 @@ struct tenstorrent_device_class grayskull_class = {
 	.instance_size = sizeof(struct grayskull_device),
 	.init_device = grayskull_init,
 	.init_hardware = grayskull_init_hardware,
+	.post_hardware_init = grayskull_post_hardware_init,
 	.cleanup_hardware = grayskull_cleanup_hardware,
 	.cleanup_device = grayskull_cleanup,
 	.last_release_cb = grayskull_last_release_handler,

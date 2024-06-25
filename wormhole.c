@@ -208,12 +208,6 @@ static void wormhole_cleanup(struct tenstorrent_device *tt_dev) {
 		pci_iounmap(wh_dev->tt.pdev, wh_dev->bar4_mapping);
 }
 
-static void wormhole_reboot(struct tenstorrent_device *tt_dev) {
-	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
-
-	grayskull_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
-}
-
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
@@ -222,5 +216,5 @@ struct tenstorrent_device_class wormhole_class = {
 	.post_hardware_init = wormhole_post_hardware_init,
 	.cleanup_hardware = wormhole_cleanup_hardware,
 	.cleanup_device = wormhole_cleanup,
-	.reboot = wormhole_reboot,
+	.reboot = wormhole_cleanup_hardware,
 };

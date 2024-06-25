@@ -144,6 +144,7 @@ static struct tt_attribute_data gs_attributes[] = {
 	{ __ATTR(tt_serial, S_IRUGO, tt_show_card_serial, NULL), 0x10, 0x0 },
 	{ __ATTR(tt_arc_fw_ver, S_IRUGO, tt_show_fw_ver, NULL), 0x18, 0xFFFFFF },
 	{ __ATTR(tt_ttflash_ver, S_IRUGO, tt_show_fw_ver, NULL), 0x98, 0x0 },
+	{ __ATTR(tt_fw_bundle_ver, S_IRUGO, tt_show_fw_ver, NULL), 0x9C, 0x0 },
 	{ __ATTR_NULL, 0, 0 }
 };
 

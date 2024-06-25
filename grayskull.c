@@ -838,11 +838,15 @@ static bool grayskull_init_hardware(struct tenstorrent_device *tt_dev) {
 	return true;
 }
 
-static void grayskull_cleanup(struct tenstorrent_device *tt_dev) {
+static void grayskull_cleanup_hardware(struct tenstorrent_device *tt_dev) {
 	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
 	if (gs_dev->reset_unit_regs != NULL)
 		grayskull_shutdown_firmware(tt_dev->pdev, gs_dev->reset_unit_regs);
+}
+
+static void grayskull_cleanup(struct tenstorrent_device *tt_dev) {
+	struct grayskull_device *gs_dev = tt_dev_to_gs_dev(tt_dev);
 
 	if (gs_dev->reg_iomap != NULL)
 		pci_iounmap(gs_dev->tt.pdev, gs_dev->reg_iomap);
@@ -868,6 +872,7 @@ struct tenstorrent_device_class grayskull_class = {
 	.instance_size = sizeof(struct grayskull_device),
 	.init_device = grayskull_init,
 	.init_hardware = grayskull_init_hardware,
+	.cleanup_hardware = grayskull_cleanup_hardware,
 	.cleanup_device = grayskull_cleanup,
 	.last_release_cb = grayskull_last_release_handler,
 };

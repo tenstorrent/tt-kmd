@@ -142,6 +142,7 @@ static void tt_dev_release(struct kref *tt_dev_kref) {
 	if (tt_dev->dev_class->reboot)
 		unregister_reboot_notifier(&tt_dev->reboot_notifier);
 
+	tt_dev->dev_class->cleanup_hardware(tt_dev);
 	tt_dev->dev_class->cleanup_device(tt_dev);
 
 	pci_disable_pcie_error_reporting(pdev);

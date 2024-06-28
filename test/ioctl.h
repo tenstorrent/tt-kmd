@@ -20,6 +20,7 @@
 #define TENSTORRENT_IOCTL_RESET_DEVICE		_IO(TENSTORRENT_IOCTL_MAGIC, 6)
 #define TENSTORRENT_IOCTL_PIN_PAGES		_IO(TENSTORRENT_IOCTL_MAGIC, 7)
 #define TENSTORRENT_IOCTL_LOCK_CTL		_IO(TENSTORRENT_IOCTL_MAGIC, 8)
+#define TENSTORRENT_IOCTL_MAP_PEER_BAR		_IO(TENSTORRENT_IOCTL_MAGIC, 9)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -32,7 +33,7 @@
 
 #define TENSTORRENT_MAX_DMA_BUFS	256
 
-#define TT_RESOURCE_LOCK_COUNT 64
+#define TENSTORRENT_RESOURCE_LOCK_COUNT 64
 
 struct tenstorrent_get_device_info_in {
 	__u32 output_size_bytes;
@@ -140,7 +141,8 @@ struct tenstorrent_reset_device {
 };
 
 // tenstorrent_pin_pages_in.flags
-#define TENSTORRENT_PIN_PAGES_CONTIGUOUS 1
+#define TENSTORRENT_PIN_PAGES_CONTIGUOUS 1	// ttkmd verifies that the pages are physically contiguous
+#define TENSTORRENT_PIN_PAGES_INTO_IOMMU 2	// ttkmd uses iommu to map pages, need not be physically contiguous
 
 struct tenstorrent_pin_pages_in {
 	__u32 output_size_bytes;
@@ -176,6 +178,24 @@ struct tenstorrent_lock_ctl_out {
 struct tenstorrent_lock_ctl {
 	struct tenstorrent_lock_ctl_in in;
 	struct tenstorrent_lock_ctl_out out;
+};
+
+struct tenstorrent_map_peer_bar_in {
+	__u32 peer_fd;
+	__u32 peer_bar_index;
+	__u32 peer_bar_offset;
+	__u32 peer_bar_length;
+	__u32 flags;
+};
+
+struct tenstorrent_map_peer_bar_out {
+	__u64 dma_address;
+	__u64 reserved;
+};
+
+struct tenstorrent_map_peer_bar {
+	struct tenstorrent_map_peer_bar_in in;
+	struct tenstorrent_map_peer_bar_out out;
 };
 
 #endif

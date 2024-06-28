@@ -17,11 +17,14 @@
 #include <linux/version.h>
 #include <linux/hashtable.h>
 #include <linux/vmalloc.h>
+#include <linux/file.h>
+#include <linux/iommu.h>
 
 #include "device.h"
 #include "enumerate.h"
 #include "ioctl.h"
 #include "pcie.h"
+#include "sg_helpers.h"
 
 // In Linux 5.0, dma_alloc_coherent always zeroes memory and dma_zalloc_coherent
 // was removed.
@@ -157,6 +160,15 @@ struct pinned_page_range {
 
 	unsigned long page_count;
 	struct page **pages;	// vmalloc/vfree
+
+	struct sg_table dma_mapping;	// alloc_chained_sgt_for_pages / free_chained_sgt
+};
+
+struct peer_resource_mapping {
+	struct list_head list;
+
+	dma_addr_t mapped_address;
+	size_t size;
 };
 
 // This is our device-private data assocated with each open character device fd.
@@ -166,6 +178,7 @@ struct chardev_private {
 	struct mutex mutex;
 	DECLARE_HASHTABLE(dmabufs, DMABUF_HASHTABLE_BITS);	// keyed on by dmabuf.index, chained on struct dmabuf.hash_chain
 	struct list_head pinnings;	// struct pinned_page_range.list
+	struct list_head peer_mappings; // struct peer_resource_mapping.list
 
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
 };
@@ -539,6 +552,24 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	return 0;
 }
 
+static bool is_iommu_translated(struct device *dev)
+{
+	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
+	return domain && domain->type != IOMMU_DOMAIN_IDENTITY;
+}
+
+static bool is_pin_pages_size_safe(u64 size)
+{
+	// With IOMMU enabled on 5.4 and 36-bit DMA address limit, 2GB pinnings would succeed,
+	// but then soft lockup on process exit. (tt_cdev_release -> unmap_sg -> __unmap_single -> iommu_unmap_page)
+	// This doesn't happen in 5.15, but I don't know exactly when it was fixed.
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 4, 0)
+	return size <= 1 << 30;
+#else
+	return true;
+#endif
+}
+
 static long ioctl_pin_pages(struct chardev_private *priv,
 			    struct tenstorrent_pin_pages __user *arg)
 {
@@ -546,8 +577,8 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 	struct page **pages;
 	int pages_pinned;
 	struct pinned_page_range *pinning;
+	struct sg_table dma_mapping = {0};
 	long ret;
-	int i;
 	u32 bytes_to_copy;
 
 	struct tenstorrent_pin_pages_in in;
@@ -561,7 +592,11 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 	if (!PAGE_ALIGNED(in.virtual_address) || !PAGE_ALIGNED(in.size) || in.size == 0)
 		return -EINVAL;
 
-	if (!(in.flags & TENSTORRENT_PIN_PAGES_CONTIGUOUS))
+	if (!is_pin_pages_size_safe(in.size))
+		return -EINVAL;
+
+	if (in.flags != TENSTORRENT_PIN_PAGES_CONTIGUOUS
+	    && in.flags != TENSTORRENT_PIN_PAGES_INTO_IOMMU)
 		return -EINVAL;
 
 	pinning = kmalloc(sizeof(*pinning), GFP_KERNEL);
@@ -589,20 +624,69 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 		goto err_unpin_pages;
 	}
 
-	for (i = 1; i < pages_pinned; i++) {
-		if (page_to_pfn(pages[i]) != page_to_pfn(pages[i-1]) + 1) {
-			pr_err("pages discontiguous at %d\n", i);
-			ret = -EINVAL;
+	if (is_iommu_translated(&priv->device->pdev->dev)) {
+		struct scatterlist *sg;
+		unsigned int i;
+		dma_addr_t expected_next_address;
+		unsigned long total_dma_len = 0;
+
+		if (!alloc_chained_sgt_for_pages(&dma_mapping, pages, nr_pages)) {
+			pr_warn("alloc_chained_sgt_for_pages failed for %lu pages, probably out of memory.\n", nr_pages);
+			ret = -ENOMEM;
 			goto err_unpin_pages;
 		}
+
+		mutex_lock(&priv->mutex);
+
+		ret = dma_map_sgtable(&priv->device->pdev->dev, &dma_mapping, DMA_BIDIRECTIONAL, 0);
+
+		if (ret != 0) {
+			pr_err("dma_map_sg failed.\n");
+			goto err_unlock_priv;
+		}
+
+		// This can only happen due to a misconfiguration or a bug.
+		for_each_sgtable_dma_sg((&dma_mapping), sg, i) {
+			if (i > 0 && sg_dma_address(sg) != expected_next_address) {
+				pr_err("discontiguous mapping\n");
+				ret = -EINVAL;
+			}
+
+			expected_next_address = sg_dma_address(sg) + sg_dma_len(sg);
+			total_dma_len += sg_dma_len(sg);
+		}
+
+		if (total_dma_len != nr_pages * PAGE_SIZE) {
+			pr_err("dma-mapped (%lX) != original length (%lX).\n", total_dma_len, nr_pages * PAGE_SIZE);
+			ret = -EINVAL;
+		}
+
+		if (ret != 0) {
+			debug_print_sgtable(&dma_mapping);
+			goto err_dma_unmap;
+		}
+
+		out.physical_address = sg_dma_address(dma_mapping.sgl);
+	} else {
+		int i;
+
+		for (i = 1; i < pages_pinned; i++) {
+			if (page_to_pfn(pages[i]) != page_to_pfn(pages[i-1]) + 1) {
+				pr_err("pages discontiguous at %d\n", i);
+				ret = -EINVAL;
+				goto err_unpin_pages;
+			}
+		}
+
+		out.physical_address = page_to_phys(pages[0]);
+
+		mutex_lock(&priv->mutex);
 	}
 
 	pinning->page_count = nr_pages;
 	pinning->pages = pages;
+	pinning->dma_mapping = dma_mapping;
 
-	out.physical_address = page_to_phys(pages[0]);
-
-	mutex_lock(&priv->mutex);
 	list_add(&pinning->list, &priv->pinnings);
 	mutex_unlock(&priv->mutex);
 
@@ -616,6 +700,11 @@ static long ioctl_pin_pages(struct chardev_private *priv,
 
 	return 0;
 
+err_dma_unmap:
+	dma_unmap_sgtable(&priv->device->pdev->dev, &dma_mapping, DMA_BIDIRECTIONAL, 0);
+err_unlock_priv:
+	free_chained_sgt(&dma_mapping);
+	mutex_unlock(&priv->mutex);
 err_unpin_pages:
 	unpin_user_pages_dirty_lock(pages, pages_pinned, false);
 err_vfree_pages:
@@ -690,6 +779,115 @@ static long ioctl_lock_ctl(struct chardev_private *priv,
 	return 0;
 }
 
+static long ioctl_map_peer_bar(struct chardev_private *priv,
+			       struct tenstorrent_map_peer_bar __user *arg) {
+
+	struct file *peer_file;
+	struct chardev_private *peer_priv;
+	struct peer_resource_mapping *peer_mapping;
+	resource_size_t resource_len;
+	phys_addr_t phys_addr;
+	dma_addr_t mapping;
+	int ret;
+
+	struct tenstorrent_map_peer_bar_in in;
+	struct tenstorrent_map_peer_bar_out out;
+
+	memset(&in, 0, sizeof(in));
+	memset(&out, 0, sizeof(out));
+
+	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
+		return -EFAULT;
+
+	if (in.flags != 0)
+		return -EINVAL;
+
+	if (in.peer_bar_index >= PCI_NUM_RESOURCES)
+		return -EINVAL;
+
+	if (in.peer_bar_length == 0)
+		return -EINVAL;
+
+	peer_file = fget(in.peer_fd);
+	if (!peer_file)
+		return -EBADF;
+
+	if (peer_file->f_op != &chardev_fops) {
+		ret = -EINVAL;
+		goto err_fput;
+	}
+
+	peer_priv = peer_file->private_data;
+
+	if (peer_priv->device == priv->device) {
+		ret = -EINVAL;
+		goto err_fput;
+	}
+
+	if (peer_priv->device->dev_class != priv->device->dev_class) {
+		ret = -EINVAL;
+		goto err_fput;
+	}
+
+	peer_mapping = kmalloc(sizeof(*peer_mapping), GFP_KERNEL);
+	if (!peer_mapping) {
+		ret = -ENOMEM;
+		goto err_fput;
+	}
+
+	// Avoid deadlocks on concurrent calls to IOCTL_MAP_PEER_BAR
+	// by locking in a globally-consistent order.
+	if (priv->device < peer_priv->device) {
+		mutex_lock(&priv->mutex);
+		mutex_lock(&peer_priv->mutex);
+	} else {
+		mutex_lock(&peer_priv->mutex);
+		mutex_lock(&priv->mutex);
+	}
+
+	resource_len = pci_resource_len(peer_priv->device->pdev, in.peer_bar_index);
+	if (in.peer_bar_offset >= resource_len || in.peer_bar_length > resource_len - in.peer_bar_offset) {
+		ret = -EINVAL;
+		goto err_unlock;
+	}
+
+	phys_addr = pci_resource_start(peer_priv->device->pdev, in.peer_bar_index) + in.peer_bar_offset;
+
+	mapping = dma_map_resource(&priv->device->pdev->dev, phys_addr, in.peer_bar_length, DMA_BIDIRECTIONAL, 0);
+	ret = dma_mapping_error(&priv->device->pdev->dev, mapping);
+	if (ret != 0)
+		goto err_unlock;
+
+	peer_mapping->mapped_address = mapping;
+	peer_mapping->size = in.peer_bar_length;
+
+	list_add(&peer_mapping->list, &priv->peer_mappings);
+
+	mutex_unlock(&priv->mutex);
+	mutex_unlock(&peer_priv->mutex);
+
+	fput(peer_file);
+
+	out.dma_address = mapping;
+
+	if (copy_to_user(&arg->out, &out, sizeof(out)) != 0)
+		return -EFAULT;
+
+	return 0;
+
+err_unlock:
+	mutex_unlock(&priv->mutex);
+	mutex_unlock(&peer_priv->mutex);
+
+	kfree(peer_mapping);
+
+err_fput:
+	fput(peer_file);
+
+	return ret;
+}
+
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	long ret = -EINVAL;
@@ -729,6 +927,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_LOCK_CTL:
 			ret = ioctl_lock_ctl(priv, (struct tenstorrent_lock_ctl __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_MAP_PEER_BAR:
+			ret = ioctl_map_peer_bar(priv, (struct tenstorrent_map_peer_bar __user *)arg);
 			break;
 
 		default:
@@ -869,6 +1071,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 
 	hash_init(private_data->dmabufs);
 	INIT_LIST_HEAD(&private_data->pinnings);
+	INIT_LIST_HEAD(&private_data->peer_mappings);
 
 	kref_get(&tt_dev->kref);
 	private_data->device = tt_dev;
@@ -888,6 +1091,7 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	struct dmabuf *dmabuf;
 	unsigned int i;
 	unsigned int bitpos;
+	struct peer_resource_mapping *peer_mapping, *tmp_peer_mapping;
 
 	decrement_cdev_open_count(tt_dev);
 
@@ -899,11 +1103,21 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	}
 
 	list_for_each_entry_safe(pinning, tmp_pinning, &priv->pinnings, list) {
+		dma_unmap_sgtable(&priv->device->pdev->dev, &pinning->dma_mapping, DMA_BIDIRECTIONAL, 0);
+		free_chained_sgt(&pinning->dma_mapping);
+
 		unpin_user_pages_dirty_lock(pinning->pages, pinning->page_count, true);
 		vfree(pinning->pages);
 
 		list_del(&pinning->list);
 		kfree(pinning);
+	}
+
+	list_for_each_entry_safe(peer_mapping, tmp_peer_mapping, &priv->peer_mappings, list) {
+		dma_unmap_resource(&priv->device->pdev->dev, peer_mapping->mapped_address, peer_mapping->size, DMA_BIDIRECTIONAL, 0);
+
+		list_del(&peer_mapping->list);
+		kfree(peer_mapping);
 	}
 
 	// Release all locally held resources.

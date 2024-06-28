@@ -77,6 +77,9 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	mutex_init(&tt_dev->chardev_mutex);
 
 	tt_dev->dma_capable = (dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(dma_address_bits ?: 32)) == 0);
+	dma_set_max_seg_size(&dev->dev, UINT_MAX);
+	dma_set_seg_boundary(&dev->dev, ULONG_MAX);
+
 	pci_set_master(dev);
 	pci_enable_pcie_error_reporting(dev);
 

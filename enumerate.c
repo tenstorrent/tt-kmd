@@ -7,6 +7,7 @@
 #include <linux/idr.h>
 #include <linux/mutex.h>
 #include <linux/version.h>
+#include <linux/pm.h>
 
 #include "enumerate.h"
 #include "interrupt.h"
@@ -157,6 +158,30 @@ void tenstorrent_device_put(struct tenstorrent_device *tt_dev) {
 	kref_put(&tt_dev->kref, tt_dev_release);
 }
 
+static int tenstorrent_suspend(struct device *dev) {
+	struct pci_dev *pdev = to_pci_dev(dev);
+	struct tenstorrent_device *tt_dev = pci_get_drvdata(pdev);
+
+	tt_dev->dev_class->cleanup_hardware(tt_dev);
+
+	return 0;
+}
+
+static int tenstorrent_resume(struct device *dev) {
+	struct pci_dev *pdev = to_pci_dev(dev);
+	struct tenstorrent_device *tt_dev = pci_get_drvdata(pdev);
+
+	int ret = tt_dev->dev_class->init_hardware(tt_dev);
+
+	// Suspend invalidates the saved state.
+	if (ret == 0)
+		pci_save_state(pdev);
+
+	return ret;
+}
+
+static SIMPLE_DEV_PM_OPS(tenstorrent_pm_ops, tenstorrent_suspend, tenstorrent_resume);
+
 extern const struct pci_device_id tenstorrent_ids[];
 static struct pci_driver tenstorrent_pci_driver = {
 	.name = TENSTORRENT,
@@ -164,6 +189,8 @@ static struct pci_driver tenstorrent_pci_driver = {
 	.probe = tenstorrent_pci_probe,
 	.remove = tenstorrent_pci_remove,
 	.shutdown = tenstorrent_pci_remove,
+
+	.driver.pm = &tenstorrent_pm_ops,
 };
 
 int tenstorrent_pci_register_driver(void)

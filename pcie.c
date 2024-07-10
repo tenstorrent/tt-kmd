@@ -13,6 +13,12 @@
 #include "grayskull.h"
 
 #define FW_MSG_PCIE_RETRAIN 0xB6
+#define INTERFACE_TIMER_CONTROL_OFF 0x930
+#define INTERFACE_TIMER_TARGET_OFF 0x934
+
+#define INTERFACE_TIMER_TARGET 0x1
+#define INTERFACE_TIMER_EN 0x1
+#define INTERFACE_FORCE_PENDING 0x10
 
 static bool poll_pcie_link_up(struct pci_dev *pdev, u32 timeout_ms) {
 	u16 tt_vendor_id;
@@ -115,4 +121,11 @@ bool complete_pcie_init(struct tenstorrent_device *tt_dev, u8 __iomem* reset_uni
 	}
 
 	return false;
+}
+
+bool pcie_timer_interrupt(struct pci_dev *pdev)
+{
+	pci_write_config_dword(pdev, INTERFACE_TIMER_TARGET_OFF, INTERFACE_TIMER_TARGET);
+	pci_write_config_dword(pdev, INTERFACE_TIMER_CONTROL_OFF, INTERFACE_TIMER_EN | INTERFACE_FORCE_PENDING);
+	return true;
 }

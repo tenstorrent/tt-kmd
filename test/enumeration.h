@@ -15,6 +15,7 @@ struct EnumeratedDevice
     std::string path;
     PciBusDeviceFunction location;
     dev_t node;
+    bool iommu_translated;
 };
 
 std::vector<EnumeratedDevice> EnumerateDevices(void);

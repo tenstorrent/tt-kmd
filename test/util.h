@@ -42,3 +42,5 @@ std::string readlink_str(const std::string &link_name);
 std::string sysfs_dir_for_bdf(PciBusDeviceFunction bdf);
 
 unsigned page_size();
+
+int make_anonymous_temp();

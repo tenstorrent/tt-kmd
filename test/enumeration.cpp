@@ -112,6 +112,19 @@ std::map<dev_t, PciBusDeviceFunction> EnumeratePciDevices()
     return devices;
 }
 
+bool IsIommuTranslated(PciBusDeviceFunction bdf)
+{
+    try
+    {
+        auto iommu_type = read_file(sysfs_dir_for_bdf(bdf) + "/iommu_group/type");
+        return iommu_type.substr(0, 3) == "DMA";
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
 std::vector<EnumeratedDevice> EnumerateDevices(void)
 {
     auto driver_devices = EnumerateDriverDevices();
@@ -133,7 +146,7 @@ std::vector<EnumeratedDevice> EnumerateDevices(void)
     for (const auto &driver_dev : driver_devices)
     {
         dev_t dev = driver_dev.first;
-        devices.push_back({driver_dev.second, pci_devices[dev], dev});
+        devices.push_back({driver_dev.second, pci_devices[dev], dev, IsIommuTranslated(pci_devices[dev])});
     }
 
     return devices;

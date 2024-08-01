@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstring>
 
+#include <stdlib.h>
 #include <sys/types.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -145,4 +146,28 @@ std::string PciBusDeviceFunction::format() const
     snprintf(buf, sizeof(buf), format, domain, bus, device, function);
 
     return buf;
+}
+
+int make_anonymous_temp()
+{
+    const char *tmpdir_env = getenv("TMPDIR");
+
+    std::string template_str = (tmpdir_env && tmpdir_env[0]) ? tmpdir_env : "/tmp/";
+    if (template_str.back() != '/')
+    {
+        template_str.push_back('/');
+    }
+
+    template_str += "ttkmd_test_XXXXXX";
+
+    std::vector<char> filename_buf(template_str.begin(), template_str.end());
+    filename_buf.push_back('\0');
+
+    int fd = mkstemp(filename_buf.data());
+    if (fd == -1)
+        throw_system_error("creating temporary file.");
+
+    unlink(filename_buf.data());
+
+    return fd;
 }

@@ -17,6 +17,17 @@ struct PciBusDeviceFunction
     std::string format() const;
 };
 
+
+inline bool operator == (const PciBusDeviceFunction &l, const PciBusDeviceFunction &r)
+{
+    return l.domain == r.domain && l.bus == r.bus && l.device == r.device && l.function == r.function;
+}
+
+inline bool operator != (const PciBusDeviceFunction &l, const PciBusDeviceFunction &r)
+{
+    return !(l == r);
+}
+
 template <class T>
 static inline void zero(T* p)
 {

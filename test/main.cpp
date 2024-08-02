@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
+// SPDX-FileCopyrightText: © 2024 Tenstorrent Inc.
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <iostream>
@@ -15,6 +15,7 @@ void TestDmaBuf(const EnumeratedDevice &dev);
 void TestPinPages(const EnumeratedDevice &dev);
 void TestLock(const EnumeratedDevice &dev);
 void TestHwmon(const EnumeratedDevice &dev);
+void TestMapPeerBar(const EnumeratedDevice &dev1, const EnumeratedDevice &dev2);
 
 int main(int argc, char *argv[])
 {
@@ -39,6 +40,14 @@ int main(int argc, char *argv[])
         TestHwmon(d);
 
         at_least_one_device = true;
+    }
+
+    for (unsigned int i = 0; i < devs.size(); i++)
+    {
+        for (unsigned int j = 0; j < devs.size(); j++)
+        {
+            TestMapPeerBar(devs[i], devs[j]);
+        }
     }
 
     if (!at_least_one_device)

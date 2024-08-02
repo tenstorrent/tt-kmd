@@ -1,11 +1,11 @@
-# SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2024 Tenstorrent Inc.
 # SPDX-License-Identifier: GPL-2.0-only
 
 all::
 
 PROG := ttkmd_test
 
-TEST_SOURCES := get_device_info.cpp query_mappings.cpp dma_buf.cpp pin_pages.cpp config_space.cpp lock.cpp hwmon.cpp
+TEST_SOURCES := get_device_info.cpp query_mappings.cpp dma_buf.cpp pin_pages.cpp config_space.cpp lock.cpp hwmon.cpp map_peer_bar.cpp
 
 CORE_SOURCES := enumeration.cpp util.cpp devfd.cpp main.cpp test_failure.cpp
 SOURCES := $(CORE_SOURCES) $(TEST_SOURCES)

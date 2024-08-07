@@ -15,7 +15,7 @@ MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Tenstorrent AI kernel driver");
 MODULE_VERSION(TTDRIVER_VER);
 
-static uint max_devices = 16;
+static uint max_devices = 32;
 module_param(max_devices, uint, 0444);
 MODULE_PARM_DESC(max_devices, "Maximum number of tenstorrent devices (chips) to support.");
 

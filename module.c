@@ -9,7 +9,7 @@
 #include "chardev.h"
 #include "enumerate.h"
 
-#define TTDRIVER_VER "1.28"
+#define TTDRIVER_VER "1.29"
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Tenstorrent AI kernel driver");

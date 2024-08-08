@@ -8,11 +8,15 @@
 #include "pcie.h"
 #include "module.h"
 
+#define MAX_MRRS 4096
+
 static bool blackhole_init(struct tenstorrent_device *tt_dev) {
 	return true;
 }
 
 static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev) {
+	struct pci_dev *pdev = tt_dev->pdev;
+	pcie_set_readrq(pdev, MAX_MRRS);
 	return true;
 }
 

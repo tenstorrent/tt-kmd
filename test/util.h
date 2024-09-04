@@ -28,6 +28,12 @@ inline bool operator != (const PciBusDeviceFunction &l, const PciBusDeviceFuncti
     return !(l == r);
 }
 
+struct Freer
+{
+    template <class T>
+    void operator() (T* p) const { std::free(p); }
+};
+
 template <class T>
 static inline void zero(T* p)
 {

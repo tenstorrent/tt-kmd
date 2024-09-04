@@ -61,3 +61,10 @@ std::string sysfs_dir_for_bdf(PciBusDeviceFunction bdf);
 unsigned page_size();
 
 int make_anonymous_temp();
+
+template <class T, class U>
+T round_up(T x, U alignment)
+{
+    auto remainder = x % alignment;
+    return x + ((remainder == 0) ? 0 : alignment) - remainder;
+}

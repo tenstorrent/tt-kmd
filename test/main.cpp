@@ -16,6 +16,7 @@ void TestDmaBuf(const EnumeratedDevice &dev);
 void TestPinPages(const EnumeratedDevice &dev);
 void TestLock(const EnumeratedDevice &dev);
 void TestHwmon(const EnumeratedDevice &dev);
+void TestIoctlOverrun(const EnumeratedDevice &dev);
 void TestMapPeerBar(const EnumeratedDevice &dev1, const EnumeratedDevice &dev2);
 
 int main(int argc, char *argv[])
@@ -40,6 +41,7 @@ int main(int argc, char *argv[])
         TestPinPages(d);
         TestLock(d);
         TestHwmon(d);
+        TestIoctlOverrun(d);
 
         at_least_one_device = true;
     }

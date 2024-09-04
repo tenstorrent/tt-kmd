@@ -8,6 +8,7 @@
 #include "enumeration.h"
 #include "test_failure.h"
 
+void TestGetDriverInfo(const EnumeratedDevice &dev);
 void TestGetDeviceInfo(const EnumeratedDevice &dev);
 void TestConfigSpace(const EnumeratedDevice &dev, bool check_aer);
 void TestQueryMappings(const EnumeratedDevice &dev);
@@ -31,6 +32,7 @@ int main(int argc, char *argv[])
     {
         std::cout << "Testing " << d.path << " @ " << d.location.format() << '\n';
 
+        TestGetDriverInfo(d);
         TestGetDeviceInfo(d);
         TestConfigSpace(d, check_aer);
         TestQueryMappings(d);

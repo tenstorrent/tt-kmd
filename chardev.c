@@ -110,7 +110,7 @@ static long ioctl_get_device_info(struct chardev_private *priv,
 	const struct pci_dev *pdev = priv->device->pdev;
 	u32 bytes_to_copy;
 
-	struct tenstorrent_get_device_info_out in;
+	struct tenstorrent_get_device_info_in in;
 	struct tenstorrent_get_device_info_out out;
 	memset(&in, 0, sizeof(in));
 	memset(&out, 0, sizeof(out));
@@ -132,7 +132,7 @@ static long ioctl_get_device_info(struct chardev_private *priv,
 
 	bytes_to_copy = min(in.output_size_bytes, (u32)sizeof(out));
 
-	if (copy_to_user(&arg->out, &out, sizeof(out)) != 0)
+	if (copy_to_user(&arg->out, &out, bytes_to_copy) != 0)
 		return -EFAULT;
 
 	return 0;
@@ -143,7 +143,7 @@ static long ioctl_get_driver_info(struct chardev_private *priv,
 {
 	u32 bytes_to_copy;
 
-	struct tenstorrent_get_driver_info_out in;
+	struct tenstorrent_get_driver_info_in in;
 	struct tenstorrent_get_driver_info_out out;
 	memset(&in, 0, sizeof(in));
 	memset(&out, 0, sizeof(out));
@@ -159,7 +159,7 @@ static long ioctl_get_driver_info(struct chardev_private *priv,
 
 	bytes_to_copy = min(in.output_size_bytes, (u32)sizeof(out));
 
-	if (copy_to_user(&arg->out, &out, sizeof(out)) != 0)
+	if (copy_to_user(&arg->out, &out, bytes_to_copy) != 0)
 		return -EFAULT;
 
 	return 0;
@@ -200,7 +200,7 @@ static long ioctl_reset_device(struct chardev_private *priv,
 
 	bytes_to_copy = min(in.output_size_bytes, (u32)sizeof(out));
 
-	if (copy_to_user(&arg->out, &out, sizeof(out)) != 0)
+	if (copy_to_user(&arg->out, &out, bytes_to_copy) != 0)
 		return -EFAULT;
 
 	return 0;

@@ -8,6 +8,7 @@
 #include "enumeration.h"
 #include "test_failure.h"
 
+void TestGetDriverInfo(const EnumeratedDevice &dev);
 void TestGetDeviceInfo(const EnumeratedDevice &dev);
 void TestConfigSpace(const EnumeratedDevice &dev, bool check_aer);
 void TestQueryMappings(const EnumeratedDevice &dev);
@@ -15,6 +16,8 @@ void TestDmaBuf(const EnumeratedDevice &dev);
 void TestPinPages(const EnumeratedDevice &dev);
 void TestLock(const EnumeratedDevice &dev);
 void TestHwmon(const EnumeratedDevice &dev);
+void TestIoctlOverrun(const EnumeratedDevice &dev);
+void TestIoctlZeroing(const EnumeratedDevice &dev);
 void TestMapPeerBar(const EnumeratedDevice &dev1, const EnumeratedDevice &dev2);
 
 int main(int argc, char *argv[])
@@ -31,6 +34,7 @@ int main(int argc, char *argv[])
     {
         std::cout << "Testing " << d.path << " @ " << d.location.format() << '\n';
 
+        TestGetDriverInfo(d);
         TestGetDeviceInfo(d);
         TestConfigSpace(d, check_aer);
         TestQueryMappings(d);
@@ -38,6 +42,8 @@ int main(int argc, char *argv[])
         TestPinPages(d);
         TestLock(d);
         TestHwmon(d);
+        TestIoctlOverrun(d);
+        TestIoctlZeroing(d);
 
         at_least_one_device = true;
     }

@@ -37,12 +37,6 @@
 namespace
 {
 
-struct Freer
-{
-    template <class T>
-    void operator() (T* p) const { std::free(p); }
-};
-
 struct Unmapper
 {
     std::size_t page_count;

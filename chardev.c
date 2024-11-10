@@ -316,6 +316,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			ret = ioctl_map_peer_bar(priv, (struct tenstorrent_map_peer_bar __user *)arg);
 			break;
 
+		case TENSTORRENT_IOCTL_UNPIN_PAGES:
+			ret = ioctl_unpin_pages(priv, (struct tenstorrent_unpin_pages __user *)arg);
+			break;
+
 		default:
 			ret = -EINVAL;
 			break;

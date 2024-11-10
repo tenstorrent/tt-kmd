@@ -143,7 +143,21 @@ struct pinned_page_range {
 	struct page **pages;	// vmalloc/vfree
 
 	struct sg_table dma_mapping;	// alloc_chained_sgt_for_pages / free_chained_sgt
+	u64 virtual_address;
 };
+
+static void unpin_pinned_page_range(struct chardev_private *priv,
+	struct pinned_page_range *pinning)
+{
+	dma_unmap_sgtable(&priv->device->pdev->dev, &pinning->dma_mapping, DMA_BIDIRECTIONAL, 0);
+	free_chained_sgt(&pinning->dma_mapping);
+
+	unpin_user_pages_dirty_lock(pinning->pages, pinning->page_count, true);
+	vfree(pinning->pages);
+
+	list_del(&pinning->list);
+	kfree(pinning);
+}
 
 struct peer_resource_mapping {
 	struct list_head list;
@@ -473,6 +487,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	pinning->page_count = nr_pages;
 	pinning->pages = pages;
 	pinning->dma_mapping = dma_mapping;
+	pinning->virtual_address = in.virtual_address;
 
 	list_add(&pinning->list, &priv->pinnings);
 	mutex_unlock(&priv->mutex);
@@ -498,6 +513,42 @@ err_vfree_pages:
 	vfree(pages);
 err_free_pinning:
 	kfree(pinning);
+	return ret;
+}
+
+long ioctl_unpin_pages(struct chardev_private *priv,
+		       struct tenstorrent_unpin_pages __user *arg)
+{
+	struct tenstorrent_unpin_pages_in in = {0};
+	struct pinned_page_range *pinning, *tmp_pinning;
+	unsigned long nr_pages;
+	long ret = -EINVAL;
+
+	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
+		return -EFAULT;
+
+	nr_pages = in.size >> PAGE_SHIFT;
+
+	if (in.reserved != 0 || in.size == 0 || nr_pages == 0)
+		return -EINVAL;
+
+	mutex_lock(&priv->mutex);
+
+	list_for_each_entry_safe(pinning, tmp_pinning, &priv->pinnings, list) {
+		if (pinning->virtual_address != in.virtual_address)
+			continue;
+
+		if (pinning->page_count != nr_pages) {
+			ret = -EINVAL;
+			break;
+		}
+
+		unpin_pinned_page_range(priv, pinning);
+		ret = 0;
+		break;
+	}
+
+	mutex_unlock(&priv->mutex);
 	return ret;
 }
 
@@ -720,14 +771,7 @@ void tenstorrent_memory_cleanup(struct chardev_private *priv)
 	}
 
 	list_for_each_entry_safe(pinning, tmp_pinning, &priv->pinnings, list) {
-		dma_unmap_sgtable(&priv->device->pdev->dev, &pinning->dma_mapping, DMA_BIDIRECTIONAL, 0);
-		free_chained_sgt(&pinning->dma_mapping);
-
-		unpin_user_pages_dirty_lock(pinning->pages, pinning->page_count, true);
-		vfree(pinning->pages);
-
-		list_del(&pinning->list);
-		kfree(pinning);
+		unpin_pinned_page_range(priv, pinning);
 	}
 
 	list_for_each_entry_safe(peer_mapping, tmp_peer_mapping, &priv->peer_mappings, list) {

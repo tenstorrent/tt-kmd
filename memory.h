@@ -24,6 +24,8 @@ long ioctl_free_dma_buf(struct chardev_private *priv,
 			struct tenstorrent_free_dma_buf __user *arg);
 long ioctl_pin_pages(struct chardev_private *priv,
 		     struct tenstorrent_pin_pages __user *arg);
+long ioctl_unpin_pages(struct chardev_private *priv,
+		     struct tenstorrent_unpin_pages __user *arg);
 long ioctl_map_peer_bar(struct chardev_private *priv,
 			struct tenstorrent_map_peer_bar __user *arg);
 

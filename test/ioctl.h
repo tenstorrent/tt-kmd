@@ -21,6 +21,7 @@
 #define TENSTORRENT_IOCTL_PIN_PAGES		_IO(TENSTORRENT_IOCTL_MAGIC, 7)
 #define TENSTORRENT_IOCTL_LOCK_CTL		_IO(TENSTORRENT_IOCTL_MAGIC, 8)
 #define TENSTORRENT_IOCTL_MAP_PEER_BAR		_IO(TENSTORRENT_IOCTL_MAGIC, 9)
+#define TENSTORRENT_IOCTL_UNPIN_PAGES		_IO(TENSTORRENT_IOCTL_MAGIC, 10)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -152,6 +153,21 @@ struct tenstorrent_pin_pages_in {
 
 struct tenstorrent_pin_pages_out {
 	__u64 physical_address;
+};
+
+// unpinning subset of a pinned buffer is not supported
+struct tenstorrent_unpin_pages_in {
+	__u64 virtual_address;	// original VA used to pin, not current VA if remapped
+	__u64 size;
+	__u64 reserved;
+};
+
+struct tenstorrent_unpin_pages_out {
+};
+
+struct tenstorrent_unpin_pages {
+	struct tenstorrent_unpin_pages_in in;
+	struct tenstorrent_unpin_pages_out out;
 };
 
 struct tenstorrent_pin_pages {

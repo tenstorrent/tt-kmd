@@ -357,6 +357,86 @@ void VerifyPinPagesNotContiguous(const EnumeratedDevice &dev)
 
 }
 
+void VerifyUnpinPagesSimple(const EnumeratedDevice &dev)
+{
+    auto page_size = getpagesize();
+
+    struct tenstorrent_pin_pages pin_pages;
+    struct tenstorrent_unpin_pages unpin_pages;
+
+    void *p = std::aligned_alloc(page_size, page_size);
+    std::unique_ptr<void, Freer> page(p);
+
+    DevFd dev_fd(dev.path);
+
+    zero(&pin_pages);
+    pin_pages.in.output_size_bytes = sizeof(pin_pages.out);
+
+    pin_pages.in.flags = TENSTORRENT_PIN_PAGES_CONTIGUOUS;
+    pin_pages.in.virtual_address = reinterpret_cast<uintptr_t>(page.get());
+    pin_pages.in.size = page_size;
+
+    if (ioctl(dev_fd.get(), TENSTORRENT_IOCTL_PIN_PAGES, &pin_pages) != 0)
+        THROW_TEST_FAILURE("PIN_PAGES failed single-page pin.");
+
+    zero(&unpin_pages);
+    unpin_pages.in.virtual_address = reinterpret_cast<uintptr_t>(page.get());
+    unpin_pages.in.size = page_size;
+
+    if (ioctl(dev_fd.get(), TENSTORRENT_IOCTL_UNPIN_PAGES, &unpin_pages) != 0)
+        THROW_TEST_FAILURE("UNPIN_PAGES failed single-page unpin.");
+}
+
+void VerifyUnpinPagesBadSize(const EnumeratedDevice &dev)
+{
+    auto page_size = getpagesize();
+
+    struct tenstorrent_pin_pages pin_pages;
+    struct tenstorrent_unpin_pages unpin_pages;
+
+    void *p = std::aligned_alloc(page_size, page_size);
+    std::unique_ptr<void, Freer> page(p);
+
+    DevFd dev_fd(dev.path);
+
+    zero(&pin_pages);
+    pin_pages.in.output_size_bytes = sizeof(pin_pages.out);
+
+    pin_pages.in.flags = TENSTORRENT_PIN_PAGES_CONTIGUOUS;
+    pin_pages.in.virtual_address = reinterpret_cast<uintptr_t>(page.get());
+    pin_pages.in.size = page_size;
+
+    if (ioctl(dev_fd.get(), TENSTORRENT_IOCTL_PIN_PAGES, &pin_pages) != 0)
+        THROW_TEST_FAILURE("PIN_PAGES failed single-page pin.");
+
+    {
+        zero(&unpin_pages);
+        unpin_pages.in.virtual_address = reinterpret_cast<uintptr_t>(page.get());
+        unpin_pages.in.size = 0;
+
+        if (ioctl(dev_fd.get(), TENSTORRENT_IOCTL_UNPIN_PAGES, &unpin_pages) != -1)
+            THROW_TEST_FAILURE("UNPIN_PAGES succeeded with size = 0");
+    }
+
+    {
+        zero(&unpin_pages);
+        unpin_pages.in.virtual_address = reinterpret_cast<uintptr_t>(page.get());
+        unpin_pages.in.size = page_size / 2;
+
+        if (ioctl(dev_fd.get(), TENSTORRENT_IOCTL_UNPIN_PAGES, &unpin_pages) != -1)
+            THROW_TEST_FAILURE("UNPIN_PAGES succeeded with size = page_size/2.");
+    }
+
+    {
+        zero(&unpin_pages);
+        unpin_pages.in.virtual_address = reinterpret_cast<uintptr_t>(page.get());
+        unpin_pages.in.size = page_size * 2;
+
+        if (ioctl(dev_fd.get(), TENSTORRENT_IOCTL_UNPIN_PAGES, &unpin_pages) != -1)
+            THROW_TEST_FAILURE("UNPIN_PAGES succeeded with size = page_size*2.");
+    }
+}
+
 void TestPinPages(const EnumeratedDevice &dev)
 {
     VerifyPinPagesSimple(dev);
@@ -366,4 +446,6 @@ void TestPinPages(const EnumeratedDevice &dev)
     VerifyPinPagesMultipleRanges(dev);
     VerifyPinPagesContiguous(dev);
     VerifyPinPagesNotContiguous(dev);
+    VerifyUnpinPagesSimple(dev);
+    VerifyUnpinPagesBadSize(dev);
 }

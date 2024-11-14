@@ -46,6 +46,7 @@ static void write_iatu_reg(struct wormhole_device *wh_dev, unsigned direction,
 	u32 offset = IATU_BASE + (2 * region + direction) * IATU_REGION_STRIDE
 		   + reg;
 
+	pr_info("iatu: writing %08x to %08x\n", value, offset);
 	iowrite32(value, wh_dev->bar2_mapping + offset);
 }
 
@@ -97,9 +98,11 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev) {
 
 	wh_dev->bar2_mapping = pci_iomap(wh_dev->tt.pdev, 2, 0);
 	if (wh_dev->bar2_mapping == NULL) goto fail_bar2;
+	pr_info("mapped bar2 OK\n");
 
 	wh_dev->bar4_mapping = pci_iomap(wh_dev->tt.pdev, 4, 0);
 	if (wh_dev->bar4_mapping == NULL) goto fail_bar4;
+	pr_info("mapped bar4 OK\n");
 
 	return true;
 

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
+// SPDX-FileCopyrightText: © 2024 Tenstorrent Inc.
 // SPDX-License-Identifier: GPL-2.0-only
 
 // Verify that all resource IDs are known to us.
@@ -128,6 +128,7 @@ void VerifyNoOverlap(const std::vector<tenstorrent_mapping> &mappings)
 }
 
 // Verify that size > 0. Verify that base & size are multiples of the page size.
+// Verify that the size is not too large and that mapping_base is not too high.
 void VerifySizes(const std::vector<tenstorrent_mapping> &mappings)
 {
     if (std::any_of(mappings.begin(), mappings.end(),
@@ -143,6 +144,16 @@ void VerifySizes(const std::vector<tenstorrent_mapping> &mappings)
     if (std::any_of(mappings.begin(), mappings.end(),
                     [=](const auto &m) { return m.mapping_id != TENSTORRENT_MAPPING_UNUSED && m.mapping_base % pagesize != 0; }))
         THROW_TEST_FAILURE("Mapping base is not a multiple of page size in QUERY_MAPPINGS results.");
+
+    if (std::any_of(mappings.begin(), mappings.end(),
+                    [](const auto &m) { return m.mapping_size > std::numeric_limits<std::uint64_t>::max() - m.mapping_base; }))
+        THROW_TEST_FAILURE("Mapping region wraps around.");
+
+    std::uint64_t mmap_offset_limit_for_32b = (std::uint64_t)1 << 44; // 32 + log(PAGE_SIZE)
+
+    if (std::any_of(mappings.begin(), mappings.end(),
+                    [=](const auto &m) { return m.mapping_size + m.mapping_base >= mmap_offset_limit_for_32b; }))
+        THROW_TEST_FAILURE("Mapping base/size do not fit into 32-bit mmap offset.");
 }
 
 void PrintMappings(const std::vector<tenstorrent_mapping>& mappings)

@@ -42,6 +42,7 @@ struct tenstorrent_device {
 struct tenstorrent_device_class {
 	const char *name;
 	u32 instance_size;
+	u32 dma_address_bits;
 	bool (*init_device)(struct tenstorrent_device *ttdev);
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);
 	bool (*post_hardware_init)(struct tenstorrent_device *ttdev);

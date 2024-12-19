@@ -7,6 +7,7 @@
 ## Supported hardware:
 * Grayskull
 * Wormhole
+* Blackhole
 
 The driver registers device files named `/dev/tenstorrent/%d`, one for each enumerated device.
 
@@ -18,7 +19,7 @@ The driver registers device files named `/dev/tenstorrent/%d`, one for each enum
     * `dnf install epel-release && dnf install dkms` (Enterprise Linux based)
 ```
 sudo dkms add .
-sudo dkms install tenstorrent/1.30
+sudo dkms install tenstorrent/1.30-bh
 sudo modprobe tenstorrent
 ```
 (or reboot, driver will auto-load next boot)
@@ -26,6 +27,5 @@ sudo modprobe tenstorrent
 ### To uninstall:
 ```
 sudo modprobe -r tenstorrent
-sudo dkms remove tenstorrent/1.30 --all
+sudo dkms remove tenstorrent/1.30-bh --all
 ```
-

@@ -875,6 +875,7 @@ static void grayskull_last_release_handler(struct tenstorrent_device *tt_dev) {
 struct tenstorrent_device_class grayskull_class = {
 	.name = "Grayskull",
 	.instance_size = sizeof(struct grayskull_device),
+	.dma_address_bits = 32,
 	.init_device = grayskull_init,
 	.init_hardware = grayskull_init_hardware,
 	.post_hardware_init = grayskull_post_hardware_init,

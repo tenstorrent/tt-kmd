@@ -9,6 +9,10 @@
 
 struct blackhole_device {
 	struct tenstorrent_device tt;
+
+	struct mutex kernel_tlb_mutex;	// Guards access to kernel_tlb
+	u8 __iomem *tlb_regs;   // All TLB registers
+	u8 __iomem *kernel_tlb; // Topmost 2M window, reserved for kernel
 };
 
 #define tt_dev_to_bh_dev(ttdev) \

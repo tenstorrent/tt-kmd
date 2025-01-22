@@ -11,7 +11,7 @@ struct blackhole_device {
 	struct tenstorrent_device tt;
 };
 
-#define tt_dev_to_wh_dev(ttdev) \
+#define tt_dev_to_bh_dev(ttdev) \
 	container_of((tt_dev), struct blackhole_device, tt)
 
 #endif

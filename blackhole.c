@@ -23,6 +23,19 @@
 #define KERNEL_TLB_START (KERNEL_TLB_INDEX * TLB_2M_WINDOW_SIZE)
 #define KERNEL_TLB_LEN TLB_2M_WINDOW_SIZE
 
+// ARC owns telemetry
+#define ARC_X 8
+#define ARC_Y 0
+#define RESET_SCRATCH(N) (0x80030400 + ((N) * 4))
+#define ARC_TELEMETRY_PTR RESET_SCRATCH(13)
+#define ARC_TELEMETRY_DATA RESET_SCRATCH(12)
+
+// These are from ARC FW telemetry.h, guaranteed not to change
+#define TELEMETRY_VCORE 6
+#define TELEMETRY_POWER 7
+#define TELEMETRY_CURRENT 8
+#define TELEMETRY_ASIC_TEMP 11
+
 struct TLB_2M_REG {
 	union {
 		struct {
@@ -80,6 +93,175 @@ static u32 noc_read32(struct blackhole_device *bh, u32 x, u32 y, u64 addr) {
 	return val;
 }
 
+struct blackhole_hwmon_label {
+	enum hwmon_sensor_types type;
+	u32 attr;
+	const char *label;
+};
+
+struct blackhole_hwmon_attr {
+	u32 tag_id;
+	enum hwmon_sensor_types type;
+	u32 attr;
+	u32 addr;
+};
+
+static const struct blackhole_hwmon_label bh_hwmon_labels[] = {
+	{ hwmon_temp,  hwmon_temp_label,  "asic_temp" },
+	{ hwmon_in,    hwmon_in_label,    "vcore"     },
+	{ hwmon_curr,  hwmon_curr_label,  "current"   },
+	{ hwmon_power, hwmon_power_label, "power"     },
+};
+
+// Addresses are set by telemetry_probe
+static struct blackhole_hwmon_attr bh_hwmon_attrs[] = {
+	{ TELEMETRY_ASIC_TEMP, hwmon_temp,  hwmon_temp_input,  0x0 },
+	{ TELEMETRY_VCORE,     hwmon_in,    hwmon_in_input,    0x0 },
+	{ TELEMETRY_CURRENT,   hwmon_curr,  hwmon_curr_input,  0x0 },
+	{ TELEMETRY_POWER,     hwmon_power, hwmon_power_input, 0x0 },
+};
+
+static umode_t bh_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type, u32 attr, int channel) {
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(bh_hwmon_labels); ++i) {
+		if (type == bh_hwmon_labels[i].type && attr == bh_hwmon_labels[i].attr) {
+			return S_IRUGO;
+		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(bh_hwmon_attrs); ++i) {
+		if (type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {
+			return S_IRUGO;
+		}
+	}
+
+	return 0;
+}
+
+static int bh_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long *val) {
+	struct blackhole_device *bh = dev_get_drvdata(dev);
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(bh_hwmon_attrs); ++i) {
+		if (type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {
+			u32 raw;
+
+			if (bh_hwmon_attrs[i].addr == 0)
+				return -ENOTSUPP;
+
+			raw = noc_read32(bh, ARC_X, ARC_Y, bh_hwmon_attrs[i].addr);
+
+			if (type == hwmon_temp) {
+				u32 int_part = raw >> 16;
+				u32 frac_part = raw & 0xFFFF;
+				*val = (int_part * 1000) + ((frac_part * 1000) / 0x10000);
+			} else if (type == hwmon_curr) {
+				*val = raw * 1000;     // Convert A to mA
+			} else if (type == hwmon_power) {
+				*val = raw * 1000000;  // Convert W to uW
+			} else if (type == hwmon_in) {
+				*val = raw;            // Reported in mV
+			}
+			return 0;
+		}
+	}
+
+	return -ENOTSUPP;
+}
+
+static int bh_hwmon_read_string(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel,
+				   const char **str) {
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(bh_hwmon_labels); i++) {
+		if (type == bh_hwmon_labels[i].type && attr == bh_hwmon_labels[i].attr) {
+			*str = bh_hwmon_labels[i].label;
+			return 0;
+		}
+	}
+
+	return -EOPNOTSUPP;
+}
+
+static const struct hwmon_channel_info *bh_hwmon_channel_info[] = {
+	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT | HWMON_T_LABEL),
+	HWMON_CHANNEL_INFO(in, HWMON_I_INPUT | HWMON_I_LABEL),
+	HWMON_CHANNEL_INFO(curr, HWMON_C_INPUT | HWMON_C_LABEL),
+	HWMON_CHANNEL_INFO(power, HWMON_P_INPUT | HWMON_P_LABEL),
+	NULL,
+};
+
+static const struct hwmon_ops bh_hwmon_ops = {
+	.is_visible = bh_hwmon_is_visible,
+	.read = bh_hwmon_read,
+	.read_string = bh_hwmon_read_string,
+};
+
+static const struct hwmon_chip_info bh_hwmon_chip_info = {
+	.ops = &bh_hwmon_ops,
+	.info = bh_hwmon_channel_info,
+};
+
+static int telemetry_probe(struct tenstorrent_device *tt_dev) {
+	struct device *hwmon_device;
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	u32 base_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_PTR);
+	u32 data_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_DATA);
+	u32 version = noc_read32(bh, ARC_X, ARC_Y, base_addr);
+	u32 major_ver = (version >> 16) & 0xFF;
+	u32 minor_ver = (version >> 8) & 0xFF;
+	u32 patch_ver = version & 0xFF;
+	u32 tags_addr = base_addr + 8;
+	u32 num_entries;
+	u32 i, j;
+
+	if (major_ver > 1) {
+		dev_err(&tt_dev->pdev->dev, "Unsupported telemetry version %u.%u.%u\n", major_ver, minor_ver, patch_ver);
+		return -ENOTSUPP;
+	}
+
+	num_entries = noc_read32(bh, ARC_X, ARC_Y, base_addr + 4);
+
+	bh->hwmon_attr_addrs = kzalloc(sizeof(u64) * ARRAY_SIZE(bh_hwmon_attrs), GFP_KERNEL);
+	if (!bh->hwmon_attr_addrs)
+		return -ENOMEM;
+
+	bh->sysfs_attr_addrs = kzalloc(sizeof(u64) * ARRAY_SIZE(bh_attributes), GFP_KERNEL);
+	if (!bh->sysfs_attr_addrs) {
+		kfree(bh->hwmon_attr_addrs);
+		bh->hwmon_attr_addrs = NULL;
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < num_entries; ++i) {
+		u32 tag_entry = noc_read32(bh, ARC_X, ARC_Y, tags_addr + (i * 4));
+		u16 tag_id = tag_entry & 0xFFFF;
+		u16 offset = (tag_entry >> 16) & 0xFFFF;
+		u32 addr = data_addr + (offset * 4);
+
+		// Check if this tag is one hwmon cares about
+		for (j = 0; j < ARRAY_SIZE(bh_hwmon_attrs); ++j) {
+			if (bh_hwmon_attrs[j].tag_id == tag_id) {
+				bh_hwmon_attrs[j].addr = addr;
+				break;
+			}
+		}
+	}
+
+	hwmon_device = devm_hwmon_device_register_with_info(&bh->tt.pdev->dev, "blackhole", bh, &bh_hwmon_chip_info, NULL);
+
+	if (IS_ERR(hwmon_device)) {
+		kfree(bh->hwmon_attr_addrs);
+		kfree(bh->sysfs_attr_addrs);
+		bh->hwmon_attr_addrs = NULL;
+		bh->sysfs_attr_addrs = NULL;
+		return PTR_ERR(hwmon_device);
+	}
+
+	return 0;
+}
+
 static bool blackhole_init(struct tenstorrent_device *tt_dev) {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 
@@ -94,6 +276,8 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev) {
 			pci_iounmap(bh->tt.pdev, bh->kernel_tlb);
 		return false;
 	}
+
+	telemetry_probe(tt_dev);
 
 	return true;
 }
@@ -118,6 +302,9 @@ static void blackhole_cleanup(struct tenstorrent_device *tt_dev) {
 		pci_iounmap(tt_dev->pdev, bh->tlb_regs);
 	if (bh->kernel_tlb)
 		pci_iounmap(tt_dev->pdev, bh->kernel_tlb);
+
+	kfree(bh->hwmon_attr_addrs);
+	kfree(bh->sysfs_attr_addrs);
 }
 
 struct tenstorrent_device_class blackhole_class = {

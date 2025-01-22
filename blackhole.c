@@ -31,10 +31,16 @@
 #define ARC_TELEMETRY_DATA RESET_SCRATCH(12)
 
 // These are from ARC FW telemetry.h, guaranteed not to change
+#define TELEMETRY_BOARD_ID 1
 #define TELEMETRY_VCORE 6
 #define TELEMETRY_POWER 7
 #define TELEMETRY_CURRENT 8
 #define TELEMETRY_ASIC_TEMP 11
+#define TELEMETRY_AICLK 14
+#define TELEMETRY_AXICLK 15
+#define TELEMETRY_ARCCLK 16
+#define TELEMETRY_BM_APP_FW_VERSION 26
+#define TELEMETRY_FLASH_BUNDLE_VERSION 28
 
 struct TLB_2M_REG {
 	union {
@@ -103,7 +109,6 @@ struct blackhole_hwmon_attr {
 	u32 tag_id;
 	enum hwmon_sensor_types type;
 	u32 attr;
-	u32 addr;
 };
 
 static const struct blackhole_hwmon_label bh_hwmon_labels[] = {
@@ -113,13 +118,88 @@ static const struct blackhole_hwmon_label bh_hwmon_labels[] = {
 	{ hwmon_power, hwmon_power_label, "power"     },
 };
 
-// Addresses are set by telemetry_probe
-static struct blackhole_hwmon_attr bh_hwmon_attrs[] = {
-	{ TELEMETRY_ASIC_TEMP, hwmon_temp,  hwmon_temp_input,  0x0 },
-	{ TELEMETRY_VCORE,     hwmon_in,    hwmon_in_input,    0x0 },
-	{ TELEMETRY_CURRENT,   hwmon_curr,  hwmon_curr_input,  0x0 },
-	{ TELEMETRY_POWER,     hwmon_power, hwmon_power_input, 0x0 },
+static const struct blackhole_hwmon_attr bh_hwmon_attrs[] = {
+	{ TELEMETRY_ASIC_TEMP, hwmon_temp,  hwmon_temp_input  },
+	{ TELEMETRY_VCORE,     hwmon_in,    hwmon_in_input    },
+	{ TELEMETRY_CURRENT,   hwmon_curr,  hwmon_curr_input  },
+	{ TELEMETRY_POWER,     hwmon_power, hwmon_power_input },
 };
+
+// Prototypes for device_attribute show functions
+static ssize_t bh_show_attribute(struct device *dev, struct device_attribute *attr, char *buf);
+static ssize_t bh_show_card_serial(struct device *dev, struct device_attribute *attr, char *buf);
+static ssize_t bh_show_fw_ver(struct device *dev, struct device_attribute *attr, char *buf);
+
+// The reg_offset and mask fields in tt_attribute_data are unused by Blackhole
+static const struct tt_attribute_data bh_attributes[] = {
+	{ __ATTR(tt_aiclk,  S_IRUGO, bh_show_attribute, NULL) },
+	{ __ATTR(tt_axiclk, S_IRUGO, bh_show_attribute, NULL) },
+	{ __ATTR(tt_arcclk, S_IRUGO, bh_show_attribute, NULL) },
+	{ __ATTR(tt_serial, S_IRUGO, bh_show_card_serial, NULL) },
+	{ __ATTR(tt_m3app_fw_ver, S_IRUGO, bh_show_fw_ver, NULL) },
+	{ __ATTR(tt_fw_bundle_ver, S_IRUGO, bh_show_fw_ver, NULL) },
+	{ __ATTR_NULL }
+};
+
+// Must match bh_attributes array
+static const int bh_attributes_ids[] = {
+	TELEMETRY_AICLK,
+	TELEMETRY_AXICLK,
+	TELEMETRY_ARCCLK,
+	TELEMETRY_BOARD_ID,
+	TELEMETRY_BM_APP_FW_VERSION,
+	TELEMETRY_FLASH_BUNDLE_VERSION,
+	-1,
+};
+
+static ssize_t bh_show_attribute(struct device *dev, struct device_attribute *attr, char *buf) {
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	struct tt_attribute_data *data = container_of(attr, struct tt_attribute_data, attr);
+	unsigned i = data - bh_attributes;
+	u64 addr = bh->sysfs_attr_addrs[i];
+	u32 value = 0;
+
+	if (addr != 0)
+		value = noc_read32(bh, ARC_X, ARC_Y, addr);
+
+	return snprintf(buf, PAGE_SIZE, "%u\n", value);
+}
+
+static ssize_t bh_show_card_serial(struct device *dev, struct device_attribute *attr, char *buf) {
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	struct tt_attribute_data *data = container_of(attr, struct tt_attribute_data, attr);
+	unsigned i = data - bh_attributes;
+	u64 addr = bh->sysfs_attr_addrs[i];
+	u32 board_id_hi = 0;
+	u32 board_id_lo = 0;
+
+	if (addr != 0) {
+		board_id_hi = noc_read32(bh, ARC_X, ARC_Y, addr + 0);
+		board_id_lo = noc_read32(bh, ARC_X, ARC_Y, addr + 4);
+	}
+	return scnprintf(buf, PAGE_SIZE, "%08X%08X\n", board_id_hi, board_id_lo);
+}
+
+static ssize_t bh_show_fw_ver(struct device *dev, struct device_attribute *attr, char *buf) {
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct tt_attribute_data *data = container_of(attr, struct tt_attribute_data, attr);
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	unsigned i = data - bh_attributes;
+	u64 addr = bh->sysfs_attr_addrs[i];
+	u32 fw_ver = 0;
+	u32 major, minor, patch, ver;
+
+	if (addr != 0)
+		fw_ver = noc_read32(bh, ARC_X, ARC_Y, addr);
+
+	major = (fw_ver >> 24) & 0xFF;
+	minor = (fw_ver >> 16) & 0xFF;
+	patch = (fw_ver >>  8) & 0xFF;
+	ver = fw_ver & 0xFF;
+	return scnprintf(buf, PAGE_SIZE, "%u.%u.%u.%u\n", major, minor, patch, ver);
+}
 
 static umode_t bh_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type, u32 attr, int channel) {
 	int i;
@@ -147,10 +227,10 @@ static int bh_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 a
 		if (type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {
 			u32 raw;
 
-			if (bh_hwmon_attrs[i].addr == 0)
+			if (bh->hwmon_attr_addrs == 0)
 				return -ENOTSUPP;
 
-			raw = noc_read32(bh, ARC_X, ARC_Y, bh_hwmon_attrs[i].addr);
+			raw = noc_read32(bh, ARC_X, ARC_Y, bh->hwmon_attr_addrs[i]);
 
 			if (type == hwmon_temp) {
 				u32 int_part = raw >> 16;
@@ -240,10 +320,18 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev) {
 		u16 offset = (tag_entry >> 16) & 0xFFFF;
 		u32 addr = data_addr + (offset * 4);
 
-		// Check if this tag is one hwmon cares about
+		// First, check if this tag is one hwmon cares about
 		for (j = 0; j < ARRAY_SIZE(bh_hwmon_attrs); ++j) {
 			if (bh_hwmon_attrs[j].tag_id == tag_id) {
-				bh_hwmon_attrs[j].addr = addr;
+				bh->hwmon_attr_addrs[j] = addr;
+				break;
+			}
+		}
+
+		// Check if it's a device attribute we will expose in sysfs
+		for (j = 0; j < ARRAY_SIZE(bh_attributes_ids); ++j) {
+			if (bh_attributes_ids[j] == tag_id) {
+				bh->sysfs_attr_addrs[j] = addr;
 				break;
 			}
 		}
@@ -258,6 +346,8 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev) {
 		bh->sysfs_attr_addrs = NULL;
 		return PTR_ERR(hwmon_device);
 	}
+
+	tt_dev->attributes = bh_attributes;
 
 	return 0;
 }
@@ -277,8 +367,6 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev) {
 		return false;
 	}
 
-	telemetry_probe(tt_dev);
-
 	return true;
 }
 
@@ -289,6 +377,7 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev) {
 }
 
 static bool blackhole_post_hardware_init(struct tenstorrent_device *tt_dev) {
+	telemetry_probe(tt_dev);
 	return true;
 }
 

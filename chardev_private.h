@@ -33,6 +33,8 @@ struct chardev_private {
 	struct list_head peer_mappings; // struct peer_resource_mapping.list
 
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
+
+	struct list_head node;	// for struct tenstorrent_device::open_fds
 };
 
 struct chardev_private *get_tenstorrent_priv(struct file *f);

@@ -38,7 +38,7 @@ struct tenstorrent_device {
 	struct tt_hwmon_context hwmon_context;
 	struct tt_attribute_data *attributes;
 
-	struct list_head open_fds;
+	struct list_head open_fds_list;	// List of struct chardev_private, linked through open_fds field
 };
 
 struct tenstorrent_device_class {

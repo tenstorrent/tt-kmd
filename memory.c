@@ -763,6 +763,8 @@ void tenstorrent_memory_cleanup(struct chardev_private *priv)
 	unsigned int i;
 	struct peer_resource_mapping *peer_mapping, *tmp_peer_mapping;
 
+	mutex_lock(&priv->mutex);
+
 	hash_for_each_safe(priv->dmabufs, i, tmp_dmabuf, dmabuf, hash_chain) {
 		dma_free_coherent(&tt_dev->pdev->dev, dmabuf->size, dmabuf->ptr, dmabuf->phys);
 
@@ -780,4 +782,6 @@ void tenstorrent_memory_cleanup(struct chardev_private *priv)
 		list_del(&peer_mapping->list);
 		kfree(peer_mapping);
 	}
+
+	mutex_unlock(&priv->mutex);
 }

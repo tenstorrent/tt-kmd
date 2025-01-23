@@ -8,12 +8,15 @@
 #include <linux/mutex.h>
 #include <linux/version.h>
 #include <linux/pm.h>
+#include <linux/list.h>
 
 #include "enumerate.h"
 #include "interrupt.h"
 #include "chardev.h"
 #include "grayskull.h"
 #include "module.h"
+#include "memory.h"
+#include "chardev_private.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
 #define pci_enable_pcie_error_reporting(dev) do { } while (0)
@@ -116,6 +119,11 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 static void tenstorrent_pci_remove(struct pci_dev *dev)
 {
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(dev);
+	struct chardev_private *priv, *tmp;
+
+	list_for_each_entry_safe(priv, tmp, &tt_dev->open_fds_list, open_fd) {
+		tenstorrent_memory_cleanup(priv);
+	}
 
 	if (tt_dev->attributes) {
 		struct tt_attribute_data *data = tt_dev->attributes;

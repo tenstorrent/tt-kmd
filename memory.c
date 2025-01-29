@@ -13,6 +13,10 @@
 #include <linux/file.h>
 #include <linux/vmalloc.h>
 
+#if CONFIG_X86
+#include <asm/set_memory.h>
+#endif
+
 #include "chardev_private.h"
 #include "device.h"
 #include "memory.h"
@@ -397,8 +401,8 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	if (!is_pin_pages_size_safe(in.size))
 		return -EINVAL;
 
-	if (in.flags != 0 && in.flags != TENSTORRENT_PIN_PAGES_CONTIGUOUS)
-		return -EINVAL;
+	// if (in.flags != 0 && in.flags != TENSTORRENT_PIN_PAGES_CONTIGUOUS)
+		// return -EINVAL;
 
 	pinning = kmalloc(sizeof(*pinning), GFP_KERNEL);
 	if (!pinning)
@@ -490,6 +494,20 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	pinning->virtual_address = in.virtual_address;
 
 	list_add(&pinning->list, &priv->pinnings);
+
+#if CONFIG_X86
+	set_pages_array_wb(pages, nr_pages);
+	if (in.flags & TENSTORRENT_PIN_PAGES_WC) {
+		int r = set_pages_array_wc(pages, nr_pages);
+		if (r != 0)
+			pr_warn("set_pages_array_wc failed: %d (%lu pages)\n", r, nr_pages);
+	} else if (in.flags & TENSTORRENT_PIN_PAGES_UC) {
+		int r = set_pages_array_uc(pages, nr_pages);
+		if (r != 0)
+			pr_warn("set_pages_array_uc failed: %d (%lu pages)\n", r, nr_pages);
+	}
+#endif
+
 	mutex_unlock(&priv->mutex);
 
 	if (clear_user(&arg->out, in.output_size_bytes) != 0)

@@ -144,6 +144,8 @@ struct tenstorrent_reset_device {
 
 // tenstorrent_pin_pages_in.flags
 #define TENSTORRENT_PIN_PAGES_CONTIGUOUS 1	// app attests that the pages are physically contiguous
+#define TENSTORRENT_PIN_PAGES_WC 2
+#define TENSTORRENT_PIN_PAGES_UC 4
 
 struct tenstorrent_pin_pages_in {
 	__u32 output_size_bytes;

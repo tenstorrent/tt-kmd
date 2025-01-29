@@ -17,6 +17,7 @@
 #include <string>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 #include <sys/ioctl.h>
 #include <sys/mman.h>

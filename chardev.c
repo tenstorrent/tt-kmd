@@ -95,6 +95,8 @@ int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 	tt_dev->dev.id = tt_dev->ordinal;
 	dev_set_name(&tt_dev->dev, TENSTORRENT "/%d", tt_dev->ordinal);
 
+	INIT_LIST_HEAD(&tt_dev->open_fds_list);
+
 	cdev_init(&tt_dev->chardev, &chardev_fops);
 	return cdev_device_add(&tt_dev->chardev, &tt_dev->dev);
 }
@@ -376,6 +378,10 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	private_data->device = tt_dev;
 	file->private_data = private_data;
 
+	mutex_lock(&tt_dev->chardev_mutex);
+	list_add(&private_data->open_fd, &tt_dev->open_fds_list);
+	mutex_unlock(&tt_dev->chardev_mutex);
+
 	increment_cdev_open_count(tt_dev);
 
 	return 0;
@@ -399,6 +405,10 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	}
 
 	tenstorrent_device_put(tt_dev);
+
+	mutex_lock(&tt_dev->chardev_mutex);
+	list_del(&priv->open_fd);
+	mutex_unlock(&tt_dev->chardev_mutex);
 
 	kfree(file->private_data);
 	file->private_data = NULL;

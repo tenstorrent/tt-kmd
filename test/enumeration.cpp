@@ -125,6 +125,21 @@ bool IsIommuTranslated(PciBusDeviceFunction bdf)
     }
 }
 
+DeviceType IdentityDeviceType(PciBusDeviceFunction bdf)
+{
+    std::string device_str = read_file(sysfs_dir_for_bdf(bdf) + "/device");
+    unsigned long device_id = std::stoul(device_str, nullptr, 16);
+
+    switch (device_id)
+    {
+        case 0xfaca: return Grayskull;
+        case 0x401e: return Wormhole;
+        case 0xb140: return Blackhole;
+
+        default: throw std::runtime_error("Unknown device " + device_str + " at " + bdf.format() + '.');
+    }
+}
+
 std::vector<EnumeratedDevice> EnumerateDevices(void)
 {
     auto driver_devices = EnumerateDriverDevices();
@@ -146,7 +161,7 @@ std::vector<EnumeratedDevice> EnumerateDevices(void)
     for (const auto &driver_dev : driver_devices)
     {
         dev_t dev = driver_dev.first;
-        devices.push_back({driver_dev.second, pci_devices[dev], dev, IsIommuTranslated(pci_devices[dev])});
+        devices.push_back({driver_dev.second, pci_devices[dev], dev, IsIommuTranslated(pci_devices[dev]), IdentityDeviceType(pci_devices[dev])});
     }
 
     return devices;

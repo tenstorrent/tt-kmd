@@ -266,7 +266,8 @@ void VerifyPinPagesNotContiguous(const EnumeratedDevice &dev)
     auto page_size = getpagesize();
 
     // Create the 2-page temporary file.
-    int temp_fd = make_anonymous_temp();
+    // 6.8 fails to pin temporary files but works with shared memory objects.
+    int temp_fd = make_shared_mem();
 
     if (ftruncate(temp_fd, 2 * page_size))
         throw_system_error("failed to resize temporary file.");

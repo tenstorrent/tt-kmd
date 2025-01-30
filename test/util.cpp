@@ -7,10 +7,15 @@
 #include <system_error>
 #include <cerrno>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 
 #include <stdlib.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/random.h>
+#include <fcntl.h>
 #include <dirent.h>
 #include <unistd.h>
 
@@ -169,5 +174,37 @@ int make_anonymous_temp()
 
     unlink(filename_buf.data());
 
+    return fd;
+}
+
+namespace
+{
+std::uint32_t get_random_u32()
+{
+    std::uint32_t x;
+
+    // Once urandom has been initialized reads of up to 256 bytes will be atomic.
+    ssize_t err = getrandom(&x, sizeof(x), 0);
+    if (err != sizeof(x)) throw_system_error("getrandom");
+
+    return x;
+}
+}
+
+int make_shared_mem()
+{
+    char name[] = "/ttkmd_test_shm_XXXXXXXX";
+    int fd = -1;
+
+    do
+    {
+        sprintf(std::strchr(name, 'X'), "%08X", static_cast<unsigned int>(get_random_u32()));
+
+        fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd == -1 && errno != EEXIST) throw_system_error("shm_open");
+
+    } while (fd == -1);
+
+    shm_unlink(name);
     return fd;
 }

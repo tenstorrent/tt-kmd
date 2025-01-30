@@ -62,6 +62,8 @@ unsigned page_size();
 
 int make_anonymous_temp();
 
+int make_shared_mem();
+
 template <class T, class U>
 T round_up(T x, U alignment)
 {

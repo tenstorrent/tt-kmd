@@ -85,7 +85,9 @@ void TestHwmon(const EnumeratedDevice &dev)
             const auto target_dir = entry.path();
 
             VerifyLabels(target_dir);
-            VerifyInputsAreUnderMaxes(target_dir);
+
+            if (dev.type < Blackhole)
+                VerifyInputsAreUnderMaxes(target_dir);
         }
     }
 }

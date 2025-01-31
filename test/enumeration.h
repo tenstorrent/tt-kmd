@@ -10,12 +10,20 @@
 
 #include "util.h"
 
+enum DeviceType
+{
+    Grayskull,
+    Wormhole,
+    Blackhole,
+};
+
 struct EnumeratedDevice
 {
     std::string path;
     PciBusDeviceFunction location;
     dev_t node;
     bool iommu_translated;
+    DeviceType type;
 };
 
 std::vector<EnumeratedDevice> EnumerateDevices(void);

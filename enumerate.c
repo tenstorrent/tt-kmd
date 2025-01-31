@@ -108,7 +108,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	}
 
 	if (tt_dev->attributes) {
-		struct tt_attribute_data *data = tt_dev->attributes;
+		const struct tt_attribute_data *data = tt_dev->attributes;
 		for (; data->attr.attr.name; data++)
 			device_create_file(&tt_dev->dev, &data->attr);
 	}
@@ -126,7 +126,7 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	}
 
 	if (tt_dev->attributes) {
-		struct tt_attribute_data *data = tt_dev->attributes;
+		const struct tt_attribute_data *data = tt_dev->attributes;
 		for (; data->attr.attr.name; data++)
 			device_remove_file(&tt_dev->dev, &data->attr);
 	}

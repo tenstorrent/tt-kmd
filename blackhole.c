@@ -10,7 +10,363 @@
 
 #define MAX_MRRS 4096
 
+#define TLB_2M_WINDOW_COUNT 202
+#define TLB_2M_SHIFT 21
+#define TLB_2M_REG_SIZE 12
+#define TLB_2M_WINDOW_SIZE (1 << TLB_2M_SHIFT)
+#define TLB_2M_WINDOW_MASK (TLB_2M_WINDOW_SIZE - 1)
+
+#define TLB_REGS_START 0x1FC00000   // BAR0
+#define TLB_REGS_LEN 0x00001000     // Covers all TLB registers
+
+#define KERNEL_TLB_INDEX (TLB_2M_WINDOW_COUNT - 1)	// Last 2M window is ours
+#define KERNEL_TLB_START (KERNEL_TLB_INDEX * TLB_2M_WINDOW_SIZE)
+#define KERNEL_TLB_LEN TLB_2M_WINDOW_SIZE
+
+// ARC owns telemetry
+#define ARC_X 8
+#define ARC_Y 0
+#define RESET_SCRATCH(N) (0x80030400 + ((N) * 4))
+#define ARC_TELEMETRY_PTR RESET_SCRATCH(13)
+#define ARC_TELEMETRY_DATA RESET_SCRATCH(12)
+
+// These are from ARC FW telemetry.h, guaranteed not to change
+#define TELEMETRY_BOARD_ID 1
+#define TELEMETRY_VCORE 6
+#define TELEMETRY_POWER 7
+#define TELEMETRY_CURRENT 8
+#define TELEMETRY_ASIC_TEMP 11
+#define TELEMETRY_AICLK 14
+#define TELEMETRY_AXICLK 15
+#define TELEMETRY_ARCCLK 16
+#define TELEMETRY_BM_APP_FW_VERSION 26
+#define TELEMETRY_FLASH_BUNDLE_VERSION 28
+
+struct TLB_2M_REG {
+	union {
+		struct {
+			u32 low32;
+			u32 mid32;
+			u32 high32;
+		};
+		// packed to make y_start straddle mid32 and high32
+		struct __attribute__((packed)) {
+			u64 address : 43;
+			u64 x_end : 6;
+			u64 y_end : 6;
+			u64 x_start : 6;
+			u64 y_start : 6;
+			u64 noc : 2;
+			u64 multicast : 1;
+			u64 ordering : 2;
+			u64 linked : 1;
+			u64 use_static_vc : 1;
+			u64 stream_header : 1;
+			u64 static_vc : 3;
+			u64 reserved : 18;
+		};
+	};
+};
+static_assert(sizeof(struct TLB_2M_REG) == TLB_2M_REG_SIZE, "TLB_2M_REG size mismatch");
+
+static u64 program_tlb(struct blackhole_device *bh, u32 x, u32 y, u64 addr) {
+	struct TLB_2M_REG conf = {0};
+	u8 __iomem *regs = bh->tlb_regs + (KERNEL_TLB_INDEX * TLB_2M_REG_SIZE);
+
+	conf.address = addr >> TLB_2M_SHIFT;
+	conf.x_end = x;
+	conf.y_end = y;
+	conf.ordering = 1;	// strict
+
+	iowrite32(conf.low32, regs + 0);
+	iowrite32(conf.mid32, regs + 4);
+	iowrite32(conf.high32, regs + 8);
+
+	return addr & TLB_2M_WINDOW_MASK;
+}
+
+static u32 noc_read32(struct blackhole_device *bh, u32 x, u32 y, u64 addr) {
+	u64 offset;
+	u32 val;
+
+	mutex_lock(&bh->kernel_tlb_mutex);
+
+	offset = program_tlb(bh, x, y, addr);
+	val = ioread32(bh->kernel_tlb + offset);
+
+	mutex_unlock(&bh->kernel_tlb_mutex);
+
+	return val;
+}
+
+struct blackhole_hwmon_label {
+	enum hwmon_sensor_types type;
+	u32 attr;
+	const char *label;
+};
+
+struct blackhole_hwmon_attr {
+	u32 tag_id;
+	enum hwmon_sensor_types type;
+	u32 attr;
+};
+
+static const struct blackhole_hwmon_label bh_hwmon_labels[] = {
+	{ hwmon_temp,  hwmon_temp_label,  "asic_temp" },
+	{ hwmon_in,    hwmon_in_label,    "vcore"     },
+	{ hwmon_curr,  hwmon_curr_label,  "current"   },
+	{ hwmon_power, hwmon_power_label, "power"     },
+};
+
+static const struct blackhole_hwmon_attr bh_hwmon_attrs[] = {
+	{ TELEMETRY_ASIC_TEMP, hwmon_temp,  hwmon_temp_input  },
+	{ TELEMETRY_VCORE,     hwmon_in,    hwmon_in_input    },
+	{ TELEMETRY_CURRENT,   hwmon_curr,  hwmon_curr_input  },
+	{ TELEMETRY_POWER,     hwmon_power, hwmon_power_input },
+};
+
+// Prototypes for device_attribute show functions
+static ssize_t bh_show_attribute(struct device *dev, struct device_attribute *attr, char *buf);
+static ssize_t bh_show_card_serial(struct device *dev, struct device_attribute *attr, char *buf);
+static ssize_t bh_show_fw_ver(struct device *dev, struct device_attribute *attr, char *buf);
+
+// The reg_offset and mask fields in tt_attribute_data are unused by Blackhole
+static const struct tt_attribute_data bh_attributes[] = {
+	{ __ATTR(tt_aiclk,  S_IRUGO, bh_show_attribute, NULL) },
+	{ __ATTR(tt_axiclk, S_IRUGO, bh_show_attribute, NULL) },
+	{ __ATTR(tt_arcclk, S_IRUGO, bh_show_attribute, NULL) },
+	{ __ATTR(tt_serial, S_IRUGO, bh_show_card_serial, NULL) },
+	{ __ATTR(tt_m3app_fw_ver, S_IRUGO, bh_show_fw_ver, NULL) },
+	{ __ATTR(tt_fw_bundle_ver, S_IRUGO, bh_show_fw_ver, NULL) },
+	{ __ATTR_NULL }
+};
+
+// Must match bh_attributes array
+static const int bh_attributes_ids[] = {
+	TELEMETRY_AICLK,
+	TELEMETRY_AXICLK,
+	TELEMETRY_ARCCLK,
+	TELEMETRY_BOARD_ID,
+	TELEMETRY_BM_APP_FW_VERSION,
+	TELEMETRY_FLASH_BUNDLE_VERSION,
+	-1,
+};
+
+static ssize_t bh_show_attribute(struct device *dev, struct device_attribute *attr, char *buf) {
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	struct tt_attribute_data *data = container_of(attr, struct tt_attribute_data, attr);
+	unsigned i = data - bh_attributes;
+	u64 addr = bh->sysfs_attr_addrs[i];
+	u32 value = 0;
+
+	if (addr != 0)
+		value = noc_read32(bh, ARC_X, ARC_Y, addr);
+
+	return snprintf(buf, PAGE_SIZE, "%u\n", value);
+}
+
+static ssize_t bh_show_card_serial(struct device *dev, struct device_attribute *attr, char *buf) {
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	struct tt_attribute_data *data = container_of(attr, struct tt_attribute_data, attr);
+	unsigned i = data - bh_attributes;
+	u64 addr = bh->sysfs_attr_addrs[i];
+	u32 board_id_hi = 0;
+	u32 board_id_lo = 0;
+
+	if (addr != 0) {
+		board_id_hi = noc_read32(bh, ARC_X, ARC_Y, addr + 0);
+		board_id_lo = noc_read32(bh, ARC_X, ARC_Y, addr + 4);
+	}
+	return scnprintf(buf, PAGE_SIZE, "%08X%08X\n", board_id_hi, board_id_lo);
+}
+
+static ssize_t bh_show_fw_ver(struct device *dev, struct device_attribute *attr, char *buf) {
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct tt_attribute_data *data = container_of(attr, struct tt_attribute_data, attr);
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	unsigned i = data - bh_attributes;
+	u64 addr = bh->sysfs_attr_addrs[i];
+	u32 fw_ver = 0;
+	u32 major, minor, patch, ver;
+
+	if (addr != 0)
+		fw_ver = noc_read32(bh, ARC_X, ARC_Y, addr);
+
+	major = (fw_ver >> 24) & 0xFF;
+	minor = (fw_ver >> 16) & 0xFF;
+	patch = (fw_ver >>  8) & 0xFF;
+	ver = fw_ver & 0xFF;
+	return scnprintf(buf, PAGE_SIZE, "%u.%u.%u.%u\n", major, minor, patch, ver);
+}
+
+static umode_t bh_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type, u32 attr, int channel) {
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(bh_hwmon_labels); ++i) {
+		if (type == bh_hwmon_labels[i].type && attr == bh_hwmon_labels[i].attr) {
+			return S_IRUGO;
+		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(bh_hwmon_attrs); ++i) {
+		if (type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {
+			return S_IRUGO;
+		}
+	}
+
+	return 0;
+}
+
+static int bh_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long *val) {
+	struct blackhole_device *bh = dev_get_drvdata(dev);
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(bh_hwmon_attrs); ++i) {
+		if (type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {
+			u32 raw;
+
+			if (bh->hwmon_attr_addrs == 0)
+				return -ENOTSUPP;
+
+			raw = noc_read32(bh, ARC_X, ARC_Y, bh->hwmon_attr_addrs[i]);
+
+			if (type == hwmon_temp) {
+				u32 int_part = raw >> 16;
+				u32 frac_part = raw & 0xFFFF;
+				*val = (int_part * 1000) + ((frac_part * 1000) / 0x10000);
+			} else if (type == hwmon_curr) {
+				*val = raw * 1000;     // Convert A to mA
+			} else if (type == hwmon_power) {
+				*val = raw * 1000000;  // Convert W to uW
+			} else if (type == hwmon_in) {
+				*val = raw;            // Reported in mV
+			}
+			return 0;
+		}
+	}
+
+	return -ENOTSUPP;
+}
+
+static int bh_hwmon_read_string(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel,
+				   const char **str) {
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(bh_hwmon_labels); i++) {
+		if (type == bh_hwmon_labels[i].type && attr == bh_hwmon_labels[i].attr) {
+			*str = bh_hwmon_labels[i].label;
+			return 0;
+		}
+	}
+
+	return -EOPNOTSUPP;
+}
+
+static const struct hwmon_channel_info *bh_hwmon_channel_info[] = {
+	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT | HWMON_T_LABEL),
+	HWMON_CHANNEL_INFO(in, HWMON_I_INPUT | HWMON_I_LABEL),
+	HWMON_CHANNEL_INFO(curr, HWMON_C_INPUT | HWMON_C_LABEL),
+	HWMON_CHANNEL_INFO(power, HWMON_P_INPUT | HWMON_P_LABEL),
+	NULL,
+};
+
+static const struct hwmon_ops bh_hwmon_ops = {
+	.is_visible = bh_hwmon_is_visible,
+	.read = bh_hwmon_read,
+	.read_string = bh_hwmon_read_string,
+};
+
+static const struct hwmon_chip_info bh_hwmon_chip_info = {
+	.ops = &bh_hwmon_ops,
+	.info = bh_hwmon_channel_info,
+};
+
+static int telemetry_probe(struct tenstorrent_device *tt_dev) {
+	struct device *hwmon_device;
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	u32 base_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_PTR);
+	u32 data_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_DATA);
+	u32 version = noc_read32(bh, ARC_X, ARC_Y, base_addr);
+	u32 major_ver = (version >> 16) & 0xFF;
+	u32 minor_ver = (version >> 8) & 0xFF;
+	u32 patch_ver = version & 0xFF;
+	u32 tags_addr = base_addr + 8;
+	u32 num_entries;
+	u32 i, j;
+
+	if (major_ver > 1) {
+		dev_err(&tt_dev->pdev->dev, "Unsupported telemetry version %u.%u.%u\n", major_ver, minor_ver, patch_ver);
+		return -ENOTSUPP;
+	}
+
+	num_entries = noc_read32(bh, ARC_X, ARC_Y, base_addr + 4);
+
+	bh->hwmon_attr_addrs = kzalloc(sizeof(u64) * ARRAY_SIZE(bh_hwmon_attrs), GFP_KERNEL);
+	if (!bh->hwmon_attr_addrs)
+		return -ENOMEM;
+
+	bh->sysfs_attr_addrs = kzalloc(sizeof(u64) * ARRAY_SIZE(bh_attributes), GFP_KERNEL);
+	if (!bh->sysfs_attr_addrs) {
+		kfree(bh->hwmon_attr_addrs);
+		bh->hwmon_attr_addrs = NULL;
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < num_entries; ++i) {
+		u32 tag_entry = noc_read32(bh, ARC_X, ARC_Y, tags_addr + (i * 4));
+		u16 tag_id = tag_entry & 0xFFFF;
+		u16 offset = (tag_entry >> 16) & 0xFFFF;
+		u32 addr = data_addr + (offset * 4);
+
+		// First, check if this tag is one hwmon cares about
+		for (j = 0; j < ARRAY_SIZE(bh_hwmon_attrs); ++j) {
+			if (bh_hwmon_attrs[j].tag_id == tag_id) {
+				bh->hwmon_attr_addrs[j] = addr;
+				break;
+			}
+		}
+
+		// Check if it's a device attribute we will expose in sysfs
+		for (j = 0; j < ARRAY_SIZE(bh_attributes_ids); ++j) {
+			if (bh_attributes_ids[j] == tag_id) {
+				bh->sysfs_attr_addrs[j] = addr;
+				break;
+			}
+		}
+	}
+
+	hwmon_device = devm_hwmon_device_register_with_info(&bh->tt.pdev->dev, "blackhole", bh, &bh_hwmon_chip_info, NULL);
+
+	if (IS_ERR(hwmon_device)) {
+		kfree(bh->hwmon_attr_addrs);
+		kfree(bh->sysfs_attr_addrs);
+		bh->hwmon_attr_addrs = NULL;
+		bh->sysfs_attr_addrs = NULL;
+		return PTR_ERR(hwmon_device);
+	}
+
+	tt_dev->attributes = bh_attributes;
+
+	return 0;
+}
+
 static bool blackhole_init(struct tenstorrent_device *tt_dev) {
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+
+	bh->tlb_regs = pci_iomap_range(bh->tt.pdev, 0, TLB_REGS_START, TLB_REGS_LEN);
+	bh->kernel_tlb = pci_iomap_range(bh->tt.pdev, 0, KERNEL_TLB_START, KERNEL_TLB_LEN);
+
+	if (!bh->tlb_regs || !bh->kernel_tlb) {
+		if (bh->tlb_regs)
+			pci_iounmap(bh->tt.pdev, bh->tlb_regs);
+
+		if (bh->kernel_tlb)
+			pci_iounmap(bh->tt.pdev, bh->kernel_tlb);
+		return false;
+	}
+
 	return true;
 }
 
@@ -21,6 +377,7 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev) {
 }
 
 static bool blackhole_post_hardware_init(struct tenstorrent_device *tt_dev) {
+	telemetry_probe(tt_dev);
 	return true;
 }
 
@@ -28,6 +385,15 @@ static void blackhole_cleanup_hardware(struct tenstorrent_device *tt_dev) {
 }
 
 static void blackhole_cleanup(struct tenstorrent_device *tt_dev) {
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+
+	if (bh->tlb_regs)
+		pci_iounmap(tt_dev->pdev, bh->tlb_regs);
+	if (bh->kernel_tlb)
+		pci_iounmap(tt_dev->pdev, bh->kernel_tlb);
+
+	kfree(bh->hwmon_attr_addrs);
+	kfree(bh->sysfs_attr_addrs);
 }
 
 struct tenstorrent_device_class blackhole_class = {

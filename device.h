@@ -36,7 +36,8 @@ struct tenstorrent_device {
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
 
 	struct tt_hwmon_context hwmon_context;
-	struct tt_attribute_data *attributes;
+
+	const struct tt_attribute_data *attributes;
 
 	struct list_head open_fds_list;	// List of struct chardev_private, linked through open_fds field
 };

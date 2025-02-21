@@ -19,6 +19,7 @@ void TestHwmon(const EnumeratedDevice &dev);
 void TestIoctlOverrun(const EnumeratedDevice &dev);
 void TestIoctlZeroing(const EnumeratedDevice &dev);
 void TestMapPeerBar(const EnumeratedDevice &dev1, const EnumeratedDevice &dev2);
+void TestTlbs(const EnumeratedDevice &dev);
 
 int main(int argc, char *argv[])
 {
@@ -44,6 +45,7 @@ int main(int argc, char *argv[])
         TestHwmon(d);
         TestIoctlOverrun(d);
         TestIoctlZeroing(d);
+        TestTlbs(d);
 
         at_least_one_device = true;
     }

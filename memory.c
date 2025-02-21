@@ -134,6 +134,8 @@ static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npage
 #define MMAP_OFFSET_TLB_UC		(U64_C(6) << 36)
 #define MMAP_OFFSET_TLB_WC		(U64_C(7) << 36)
 
+#define MMAP_RESOURCE_SIZE (U64_C(1) << 36)
+
 // tenstorrent_allocate_dma_buf_in.buf_index is u8 so that sets a limit of
 // U8_MAX DMA buffers per fd. 32-bit mmap offsets are divided by PAGE_SIZE,
 // so PAGE_SIZE << 32 is the largest possible offset.
@@ -722,6 +724,7 @@ long ioctl_allocate_tlb(struct chardev_private *priv,
 long ioctl_free_tlb(struct chardev_private *priv, struct tenstorrent_free_tlb __user *arg) {
 	struct tenstorrent_device *tt_dev = priv->device;
 	struct tenstorrent_free_tlb_in in = {0};
+	int ret;
 
 	if (copy_from_user(&in, &arg->in, sizeof(in)))
 		return -EFAULT;
@@ -729,15 +732,24 @@ long ioctl_free_tlb(struct chardev_private *priv, struct tenstorrent_free_tlb __
 	if (in.id < 0 || in.id >= TENSTORRENT_MAX_INBOUND_TLBS)
 		return -EINVAL;
 
-	if (!test_bit(in.id, priv->tlbs))
-		return -EPERM;
+	mutex_lock(&priv->mutex);
 
-	if (atomic_read(&tt_dev->tlb_refs[in.id]) > 0)
-		return -EBUSY;
+	if (!test_bit(in.id, priv->tlbs)) {
+		ret = -EPERM;
+		goto unlock;
+	}
+
+	if (atomic_read(&tt_dev->tlb_refs[in.id]) > 0) {
+		ret = -EBUSY;
+		goto unlock;
+	}
 
 	clear_bit(in.id, priv->tlbs);
+	ret = tenstorrent_device_free_tlb(tt_dev, in.id);
 
-	return tenstorrent_device_free_tlb(tt_dev, in.id);
+unlock:
+	mutex_unlock(&priv->mutex);
+	return ret;
 }
 
 long ioctl_configure_tlb(struct chardev_private *priv,
@@ -807,6 +819,131 @@ static int map_pci_bar(struct pci_dev *pdev, struct vm_area_struct *vma, unsigne
 	return vm_iomap_memory(vma, bar_start, bar_len);
 }
 
+static void tlb_vma_open(struct vm_area_struct *vma)
+{
+	struct chardev_private *priv;
+	struct tenstorrent_device *tt_dev;
+	unsigned int id;
+
+	if (!vma->vm_file)
+		return;
+
+	priv = vma->vm_file->private_data;
+	if (!priv)
+		return;
+
+	tt_dev = priv->device;
+	id = (int)((uintptr_t)vma->vm_private_data);
+
+	if (id >= TENSTORRENT_MAX_INBOUND_TLBS)
+		return;
+
+	atomic_inc(&tt_dev->tlb_refs[id]);
+}
+
+static void tlb_vma_close(struct vm_area_struct *vma)
+{
+	struct chardev_private *priv;
+	struct tenstorrent_device *tt_dev;
+	unsigned int id;
+
+	if (!vma->vm_file)
+		return;
+
+	priv = vma->vm_file->private_data;
+	if (!priv)
+		return;
+
+	tt_dev = priv->device;
+	id = (int)((uintptr_t)vma->vm_private_data);
+
+	if (id >= TENSTORRENT_MAX_INBOUND_TLBS)
+		return;
+
+	if (atomic_dec_if_positive(&tt_dev->tlb_refs[id]) < 0)
+		pr_err("vma_close: negative refcount\n");	// Should never happen
+}
+
+static int tlb_vma_may_split(struct vm_area_struct *vma, unsigned long address)
+{
+	// Forbid splitting TLB windows.
+	return -1;
+}
+
+static const struct vm_operations_struct tlb_vm_ops = {
+	.open = tlb_vma_open,
+	.close = tlb_vma_close,
+	.may_split = tlb_vma_may_split,
+};
+
+static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *vma)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tlb_descriptor tlb_desc = {0};
+	unsigned long size = vma->vm_end - vma->vm_start;
+	unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
+	unsigned long pfn;
+	bool bar4 = offset >= BAR0_SIZE;
+	phys_addr_t bar_start;
+	int i;
+	int id = -1;
+	int ret = 0;
+	u64 total_tlbs = 0;
+
+	if (!tt_dev->dev_class->describe_tlb)
+		return -EINVAL;
+
+	if (tt_dev->dev_class->tlb_kinds == 0)
+		return -EINVAL;
+
+	for (i = 0; i < tt_dev->dev_class->tlb_kinds; ++i)
+		total_tlbs += tt_dev->dev_class->tlb_counts[i];
+
+	if (bar4)
+		offset -= BAR0_SIZE;
+
+	// Find the window matching the requested offset.
+	for (i = 0; i < total_tlbs; ++i) {
+		if (tt_dev->dev_class->describe_tlb(tt_dev, i, &tlb_desc))
+			return -EINVAL;
+
+		if (tlb_desc.bar_offset == offset && (tlb_desc.bar == 4) == bar4) {
+			id = i;
+			break;
+		}
+	}
+
+	if (id < 0)
+		return -EINVAL;
+
+	if (size > tlb_desc.size)
+		return -EINVAL;
+
+	mutex_lock(&priv->mutex);
+
+	if (!test_bit(id, priv->tlbs)) {
+		ret = -EPERM;
+		goto unlock;
+	}
+
+	bar_start = pci_resource_start(tt_dev->pdev, tlb_desc.bar);
+	pfn = (bar_start + tlb_desc.bar_offset) >> PAGE_SHIFT;
+
+	vma->vm_ops = &tlb_vm_ops;
+	vma->vm_private_data = (void*)(uintptr_t)id;
+
+	if (io_remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot)) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
+
+	tlb_vma_open(vma);
+
+unlock:
+	mutex_unlock(&priv->mutex);
+	return ret;
+}
+
 int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 {
 	struct pci_dev *pdev = priv->device->pdev;
@@ -841,6 +978,14 @@ int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE2_WC, pci_resource_len(pdev, 4))) {
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 		return map_pci_bar(pdev, vma, 4);
+
+	} else if (vma_target_range(vma, MMAP_OFFSET_TLB_UC, MMAP_RESOURCE_SIZE)) {
+		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
+		return map_tlb_window(priv, vma);
+
+	} else if (vma_target_range(vma, MMAP_OFFSET_TLB_WC, MMAP_RESOURCE_SIZE)) {
+		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+		return map_tlb_window(priv, vma);
 
 	} else {
 		struct dmabuf *dmabuf = vma_dmabuf_target(priv, vma);

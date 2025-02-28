@@ -283,18 +283,32 @@ static const struct hwmon_chip_info bh_hwmon_chip_info = {
 	.info = bh_hwmon_channel_info,
 };
 
+#define ARC_CSM_BASE 0x10000000
+#define ARC_CSM_SIZE (1 << 19)
+static bool is_address_within_csm(u64 addr)
+{
+	return addr >= ARC_CSM_BASE && addr < (ARC_CSM_BASE + ARC_CSM_SIZE);
+}
+
 static int telemetry_probe(struct tenstorrent_device *tt_dev) {
 	struct device *hwmon_device;
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	u32 base_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_PTR);
 	u32 data_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_DATA);
-	u32 version = noc_read32(bh, ARC_X, ARC_Y, base_addr);
-	u32 major_ver = (version >> 16) & 0xFF;
-	u32 minor_ver = (version >> 8) & 0xFF;
-	u32 patch_ver = version & 0xFF;
+	u32 version, major_ver, minor_ver, patch_ver;
 	u32 tags_addr = base_addr + 8;
 	u32 num_entries;
 	u32 i, j;
+
+	if (!is_address_within_csm(base_addr) || !is_address_within_csm(data_addr)) {
+		dev_err(&tt_dev->pdev->dev, "Telemetry not available\n");
+		return -ENODEV;
+	}
+
+	version = noc_read32(bh, ARC_X, ARC_Y, base_addr);
+	major_ver = (version >> 16) & 0xFF;
+	minor_ver = (version >> 8) & 0xFF;
+	patch_ver = version & 0xFF;
 
 	if (major_ver > 1) {
 		dev_err(&tt_dev->pdev->dev, "Unsupported telemetry version %u.%u.%u\n", major_ver, minor_ver, patch_ver);

@@ -95,6 +95,7 @@ static void update_device_index(struct wormhole_device *wh_dev) {
 
 #define REG_IOMAP_START 0x1FC00000     // Starting at PCI TLB config registers
 #define REG_IOMAP_LEN   0x00400000     // Covering entire system register space
+#define KERNEL_TLB_INDEX 185
 static bool wormhole_init(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
@@ -106,6 +107,8 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev) {
 
 	wh_dev->reg_iomap = pci_iomap_range(wh_dev->tt.pdev, 0, REG_IOMAP_START, REG_IOMAP_LEN);
 	if (wh_dev->reg_iomap == NULL) goto fail_reg_iomap;
+
+	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
 
 	return true;
 fail_reg_iomap:

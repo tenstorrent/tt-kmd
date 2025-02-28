@@ -11,6 +11,7 @@ struct wormhole_device {
 	struct tenstorrent_device tt;
 	u8 __iomem *bar2_mapping;
 	u8 __iomem *bar4_mapping;
+	u8 __iomem *reg_iomap;
 };
 
 #define tt_dev_to_wh_dev(ttdev) \

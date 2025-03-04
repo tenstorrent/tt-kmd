@@ -28,6 +28,12 @@ long ioctl_unpin_pages(struct chardev_private *priv,
 		     struct tenstorrent_unpin_pages __user *arg);
 long ioctl_map_peer_bar(struct chardev_private *priv,
 			struct tenstorrent_map_peer_bar __user *arg);
+long ioctl_allocate_tlb(struct chardev_private *priv,
+			struct tenstorrent_allocate_tlb __user *arg);
+long ioctl_free_tlb(struct chardev_private *priv,
+			struct tenstorrent_free_tlb __user *arg);
+long ioctl_configure_tlb(struct chardev_private *priv,
+			struct tenstorrent_configure_tlb __user *arg);
 
 int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma);
 void tenstorrent_memory_cleanup(struct chardev_private *priv);

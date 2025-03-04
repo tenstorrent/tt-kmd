@@ -21,6 +21,7 @@
 #include "ioctl.h"
 #include "pcie.h"
 #include "memory.h"
+#include "tlb.h"
 
 static dev_t tt_device_id;
 static struct class *tt_dev_class;
@@ -323,6 +324,18 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			ret = ioctl_unpin_pages(priv, (struct tenstorrent_unpin_pages __user *)arg);
 			break;
 
+		case TENSTORRENT_IOCTL_ALLOCATE_TLB:
+			ret = ioctl_allocate_tlb(priv, (struct tenstorrent_allocate_tlb __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_FREE_TLB:
+			ret = ioctl_free_tlb(priv, (struct tenstorrent_free_tlb __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_CONFIGURE_TLB:
+			ret = ioctl_configure_tlb(priv, (struct tenstorrent_configure_tlb __user *)arg);
+			break;
+
 		default:
 			ret = -EINVAL;
 			break;
@@ -403,6 +416,10 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 		if (test_and_clear_bit(bitpos, priv->resource_lock))
 			clear_bit(bitpos, priv->device->resource_lock);
 	}
+
+	// Release all TLBs held by this file descriptor.
+	for_each_set_bit(bitpos, priv->tlbs, TENSTORRENT_MAX_INBOUND_TLBS)
+		tenstorrent_device_free_tlb(tt_dev, bitpos);
 
 	tenstorrent_device_put(tt_dev);
 

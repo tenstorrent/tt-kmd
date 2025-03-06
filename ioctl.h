@@ -25,6 +25,7 @@
 #define TENSTORRENT_IOCTL_ALLOCATE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 11)
 #define TENSTORRENT_IOCTL_FREE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 12)
 #define TENSTORRENT_IOCTL_CONFIGURE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 13)
+#define TENSTORRENT_IOCTL_DMA_POKE		_IO(TENSTORRENT_IOCTL_MAGIC, 14)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -270,6 +271,18 @@ struct tenstorrent_configure_tlb_out {
 struct tenstorrent_configure_tlb {
 	struct tenstorrent_configure_tlb_in in;
 	struct tenstorrent_configure_tlb_out out;
+};
+
+struct tenstorrent_dma_poke_in {
+	__u64 virtual_address;
+};
+
+struct tenstorrent_dma_poke_out {
+};
+
+struct tenstorrent_dma_poke {
+	struct tenstorrent_dma_poke_in in;
+	struct tenstorrent_dma_poke_out out;
 };
 
 #endif

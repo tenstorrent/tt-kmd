@@ -769,6 +769,31 @@ long ioctl_configure_tlb(struct chardev_private *priv,
 	return tenstorrent_device_configure_tlb(tt_dev, in.id, &in.config);
 }
 
+long ioctl_dma_poke(struct chardev_private *priv,
+			 struct tenstorrent_dma_poke __user *arg)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct pinned_page_range *pinning, *tmp_pinning;
+	struct tenstorrent_dma_poke_in in = {0};
+
+	if (copy_from_user(&in, &arg->in, sizeof(in)))
+		return -EFAULT;
+
+	mutex_lock(&priv->mutex);
+
+	list_for_each_entry_safe(pinning, tmp_pinning, &priv->pinnings, list) {
+		if (in.virtual_address == pinning->virtual_address) {
+			pr_info("sync\n");
+			dma_sync_sg_for_device(&tt_dev->pdev->dev, pinning->dma_mapping.sgl, pinning->dma_mapping.nents, DMA_TO_DEVICE);
+		}
+	}
+
+	mutex_unlock(&priv->mutex);
+
+	return -EINVAL;
+}
+
+
 // Is the mapping target range contained entirely with start - start+len?
 // start and len must be page-aligned.
 static bool vma_target_range(struct vm_area_struct *vma, u64 start, resource_size_t len)

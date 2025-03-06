@@ -336,6 +336,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			ret = ioctl_configure_tlb(priv, (struct tenstorrent_configure_tlb __user *)arg);
 			break;
 
+		case TENSTORRENT_IOCTL_DMA_POKE:
+			ret = ioctl_dma_poke(priv, (struct tenstorrent_dma_poke __user *)arg);
+			break;
+
 		default:
 			ret = -EINVAL;
 			break;

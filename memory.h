@@ -34,6 +34,8 @@ long ioctl_free_tlb(struct chardev_private *priv,
 			struct tenstorrent_free_tlb __user *arg);
 long ioctl_configure_tlb(struct chardev_private *priv,
 			struct tenstorrent_configure_tlb __user *arg);
+long ioctl_dma_poke(struct chardev_private *priv,
+			 struct tenstorrent_dma_poke __user *arg);
 
 int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma);
 void tenstorrent_memory_cleanup(struct chardev_private *priv);

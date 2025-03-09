@@ -120,7 +120,7 @@ static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npage
 }
 #endif
 
-#define MAX_DMA_BUF_SIZE (1u << MAX_DMA_BUF_SIZE_LOG2)
+#define MAX_DMA_BUF_SIZE (1ul << MAX_DMA_BUF_SIZE_LOG2)
 
 // These are the mmap offsets for various resources. In the user-kernel
 // interface they are dynamic (TENSTORRENT_IOCTL_QUERY_MAPPINGS and
@@ -964,11 +964,17 @@ int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 		return map_pci_bar(pdev, vma, 0);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE1_UC, pci_resource_len(pdev, 2))) {
-		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
+		// TODO: commented out so that P550 doesn't crash upon userspace access of BAR2.
+		// Check to see if this patch fixes the issue:
+		// https://github.com/sifive/riscv-linux/pull/9/commits/3f75cc40d86980731deaf55088646228851f7415
+
+		// vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
 		return map_pci_bar(pdev, vma, 2);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE1_WC, pci_resource_len(pdev, 2))) {
-		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+		// See TODO above.
+
+		// vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 		return map_pci_bar(pdev, vma, 2);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE2_UC, pci_resource_len(pdev, 4))) {

@@ -6,7 +6,7 @@
 
 #include <linux/compiler.h>
 
-#define MAX_DMA_BUF_SIZE_LOG2 28
+#define MAX_DMA_BUF_SIZE_LOG2 32
 
 struct chardev_private;
 struct tenstorrent_query_mappings;

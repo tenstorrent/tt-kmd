@@ -126,6 +126,7 @@ static const struct blackhole_hwmon_attr bh_hwmon_attrs[] = {
 };
 
 // Prototypes for device_attribute show functions
+static ssize_t bh_show_card_type(struct device *dev, struct device_attribute *attr, char *buf);
 static ssize_t bh_show_attribute(struct device *dev, struct device_attribute *attr, char *buf);
 static ssize_t bh_show_card_serial(struct device *dev, struct device_attribute *attr, char *buf);
 static ssize_t bh_show_fw_ver(struct device *dev, struct device_attribute *attr, char *buf);
@@ -138,6 +139,7 @@ static const struct tt_attribute_data bh_attributes[] = {
 	{ __ATTR(tt_serial, S_IRUGO, bh_show_card_serial, NULL) },
 	{ __ATTR(tt_m3app_fw_ver, S_IRUGO, bh_show_fw_ver, NULL) },
 	{ __ATTR(tt_fw_bundle_ver, S_IRUGO, bh_show_fw_ver, NULL) },
+	{ __ATTR(tt_card_type,  S_IRUGO, bh_show_card_type, NULL) },
 	{ __ATTR_NULL }
 };
 
@@ -151,6 +153,55 @@ static const int bh_attributes_ids[] = {
 	TELEMETRY_FLASH_BUNDLE_VERSION,
 	-1,
 };
+
+static bool bh_board_type_to_name(u32 board_type, const char **name) {
+	switch (board_type) {
+	case 0x36: *name = "p100"; break;
+	case 0x40: *name = "p150a"; break;
+	case 0x41: *name = "p150b"; break;
+	case 0x42: *name = "p150c"; break;
+	case 0x43: *name = "p100a"; break;
+	case 0x44: *name = "p300b"; break;
+	case 0x45: *name = "p300a"; break;
+	case 0x46: *name = "p300c"; break;
+	case 0x47: *name = "galaxy-blackhole"; break;
+	default:
+		*name = "unknown";
+		return false;
+	}
+
+	return true;
+}
+
+static ssize_t bh_show_card_type(struct device *dev, struct device_attribute *attr, char *buf) {
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	const char *card_name;
+	u32 j;
+	u32 board_id_high;
+	u32 upi;
+	u64 addr = 0;
+
+	if (!bh_board_type_to_name(tt_dev->pdev->subsystem_device, &card_name)) {
+		// Reading back invalid board type from pcie config space.
+		// Try to fallback to reading from telemetry
+		for (j = 0; j < ARRAY_SIZE(bh_attributes_ids); ++j) {
+			if (bh_attributes_ids[j] == TELEMETRY_BOARD_ID) {
+				addr = bh->sysfs_attr_addrs[j];
+				break;
+			}
+		}
+
+		if (addr != 0) {
+			board_id_high = noc_read32(bh, ARC_X, ARC_Y, addr);
+			// UPI starts at bit 36
+			upi = (board_id_high >> 4) & 0xFFFFF;
+			bh_board_type_to_name(upi, &card_name);
+		}
+	}
+
+	return snprintf(buf, PAGE_SIZE, "%s\n", card_name);
+}
 
 static ssize_t bh_show_attribute(struct device *dev, struct device_attribute *attr, char *buf) {
 	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);

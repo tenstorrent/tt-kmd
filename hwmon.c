@@ -93,6 +93,7 @@ ssize_t tt_show_card_type(struct device *dev, struct device_attribute *attr, cha
 	case 0x7: card_name = "e75"; break;
 	case 0x14: card_name = "n300"; break;
 	case 0x18: card_name = "n150"; break;
+	case 0x35: card_name = "galaxy-wormhole"; break;
 	default: card_name = "unknown"; break;
 	}
 

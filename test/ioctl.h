@@ -22,6 +22,9 @@
 #define TENSTORRENT_IOCTL_LOCK_CTL		_IO(TENSTORRENT_IOCTL_MAGIC, 8)
 #define TENSTORRENT_IOCTL_MAP_PEER_BAR		_IO(TENSTORRENT_IOCTL_MAGIC, 9)
 #define TENSTORRENT_IOCTL_UNPIN_PAGES		_IO(TENSTORRENT_IOCTL_MAGIC, 10)
+#define TENSTORRENT_IOCTL_ALLOCATE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 11)
+#define TENSTORRENT_IOCTL_FREE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 12)
+#define TENSTORRENT_IOCTL_CONFIGURE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 13)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -33,6 +36,7 @@
 #define TENSTORRENT_MAPPING_RESOURCE2_WC	6
 
 #define TENSTORRENT_MAX_DMA_BUFS	256
+#define TENSTORRENT_MAX_INBOUND_TLBS	256
 
 #define TENSTORRENT_RESOURCE_LOCK_COUNT 64
 
@@ -125,6 +129,7 @@ struct tenstorrent_get_driver_info {
 // tenstorrent_reset_device_in.flags
 #define TENSTORRENT_RESET_DEVICE_RESTORE_STATE 0
 #define TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK 1
+#define TENSTORRENT_RESET_DEVICE_CONFIG_WRITE 2
 
 struct tenstorrent_reset_device_in {
 	__u32 output_size_bytes;
@@ -211,6 +216,60 @@ struct tenstorrent_map_peer_bar_out {
 struct tenstorrent_map_peer_bar {
 	struct tenstorrent_map_peer_bar_in in;
 	struct tenstorrent_map_peer_bar_out out;
+};
+
+struct tenstorrent_allocate_tlb_in {
+	__u64 size;
+	__u64 reserved;
+};
+
+struct tenstorrent_allocate_tlb_out {
+	__u32 id;
+	__u64 mmap_offset_uc;
+	__u64 mmap_offset_wc;
+};
+
+struct tenstorrent_allocate_tlb {
+	struct tenstorrent_allocate_tlb_in in;
+	struct tenstorrent_allocate_tlb_out out;
+};
+
+struct tenstorrent_free_tlb_in {
+	__u32 id;
+};
+
+struct tenstorrent_free_tlb_out {
+};
+
+struct tenstorrent_free_tlb {
+	struct tenstorrent_free_tlb_in in;
+	struct tenstorrent_free_tlb_out out;
+};
+
+struct tenstorrent_noc_tlb_config {
+	__u64 addr;
+	__u32 x_end;
+	__u32 y_end;
+	__u32 x_start;
+	__u32 y_start;
+	__u8 noc;
+	__u8 mcast;
+	__u8 ordering;
+	__u8 linked;
+	__u8 static_vc;
+};
+
+struct tenstorrent_configure_tlb_in {
+	__u32 id;
+	struct tenstorrent_noc_tlb_config config;
+};
+
+struct tenstorrent_configure_tlb_out {
+};
+
+struct tenstorrent_configure_tlb {
+	struct tenstorrent_configure_tlb_in in;
+	struct tenstorrent_configure_tlb_out out;
 };
 
 #endif

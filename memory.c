@@ -18,6 +18,9 @@
 #include "memory.h"
 #include "ioctl.h"
 #include "sg_helpers.h"
+#include "tlb.h"
+
+#define BAR0_SIZE (1UL << 29)
 
 // In Linux 5.0, dma_alloc_coherent always zeroes memory and dma_zalloc_coherent
 // was removed.
@@ -122,12 +125,16 @@ static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npage
 // These are the mmap offsets for various resources. In the user-kernel
 // interface they are dynamic (TENSTORRENT_IOCTL_QUERY_MAPPINGS and
 // TENSTORRENT_IOCTL_ALLOCATE_DMA_BUF), but they are actually hard-coded.
-#define MMAP_OFFSET_RESOURCE0_UC	(U64_C(0) << 35)
-#define MMAP_OFFSET_RESOURCE0_WC	(U64_C(1) << 35)
-#define MMAP_OFFSET_RESOURCE1_UC	(U64_C(2) << 35)
-#define MMAP_OFFSET_RESOURCE1_WC	(U64_C(3) << 35)
-#define MMAP_OFFSET_RESOURCE2_UC	(U64_C(4) << 35)
-#define MMAP_OFFSET_RESOURCE2_WC	(U64_C(5) << 35)
+#define MMAP_OFFSET_RESOURCE0_UC	(U64_C(0) << 36)
+#define MMAP_OFFSET_RESOURCE0_WC	(U64_C(1) << 36)
+#define MMAP_OFFSET_RESOURCE1_UC	(U64_C(2) << 36)
+#define MMAP_OFFSET_RESOURCE1_WC	(U64_C(3) << 36)
+#define MMAP_OFFSET_RESOURCE2_UC	(U64_C(4) << 36)
+#define MMAP_OFFSET_RESOURCE2_WC	(U64_C(5) << 36)
+#define MMAP_OFFSET_TLB_UC		(U64_C(6) << 36)
+#define MMAP_OFFSET_TLB_WC		(U64_C(7) << 36)
+
+#define MMAP_RESOURCE_SIZE (U64_C(1) << 36)
 
 // tenstorrent_allocate_dma_buf_in.buf_index is u8 so that sets a limit of
 // U8_MAX DMA buffers per fd. 32-bit mmap offsets are divided by PAGE_SIZE,
@@ -659,6 +666,109 @@ err_fput:
 	return ret;
 }
 
+long ioctl_allocate_tlb(struct chardev_private *priv,
+			struct tenstorrent_allocate_tlb __user *arg) {
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_allocate_tlb_in in = {0};
+	struct tenstorrent_allocate_tlb_out out = {0};
+	struct tlb_descriptor tlb_desc = { 0 };
+	size_t size;
+	int id;
+	u64 encoded_id;
+
+	if (!tt_dev->dev_class->describe_tlb)
+		return -EINVAL;
+
+	if (copy_from_user(&in, &arg->in, sizeof(in)))
+		return -EFAULT;
+
+	size = in.size;
+	id = tenstorrent_device_allocate_tlb(tt_dev, &size);
+
+	if (id < 0)
+		return id;
+
+	if (tt_dev->dev_class->describe_tlb(tt_dev, id, &tlb_desc)) {
+		tenstorrent_device_free_tlb(tt_dev, id);
+		return -EINVAL;
+	}
+
+	// TLB windows only exist in BAR0 (GS/WH/BH) and BAR4 (BH).
+	if (tlb_desc.bar != 0 && tlb_desc.bar != 4) {
+		tenstorrent_device_free_tlb(tt_dev, id);
+		return -EINVAL;
+	}
+
+	out.id = id;
+
+	// mmap offsets match the offsets of the TLB windows in BAR0, with one
+	// exception: the mmap offsets for the 4G windows in Blackhole BAR4 begin
+	// at 512M, i.e. the size of BAR0.
+	encoded_id = tlb_desc.bar_offset;
+	if (tlb_desc.bar == 4)
+		encoded_id += BAR0_SIZE;
+
+	out.mmap_offset_uc = MMAP_OFFSET_TLB_UC + encoded_id;
+	out.mmap_offset_wc = MMAP_OFFSET_TLB_WC + encoded_id;
+
+	if (copy_to_user(&arg->out, &out, sizeof(out))) {
+		tenstorrent_device_free_tlb(tt_dev, id);
+		return -EFAULT;
+	}
+
+	set_bit(id, priv->tlbs);
+
+	return 0;
+}
+
+long ioctl_free_tlb(struct chardev_private *priv, struct tenstorrent_free_tlb __user *arg) {
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_free_tlb_in in = {0};
+	int ret;
+
+	if (copy_from_user(&in, &arg->in, sizeof(in)))
+		return -EFAULT;
+
+	if (in.id < 0 || in.id >= TENSTORRENT_MAX_INBOUND_TLBS)
+		return -EINVAL;
+
+	mutex_lock(&priv->mutex);
+
+	if (!test_bit(in.id, priv->tlbs)) {
+		ret = -EPERM;
+		goto unlock;
+	}
+
+	if (atomic_read(&tt_dev->tlb_refs[in.id]) > 0) {
+		ret = -EBUSY;
+		goto unlock;
+	}
+
+	clear_bit(in.id, priv->tlbs);
+	ret = tenstorrent_device_free_tlb(tt_dev, in.id);
+
+unlock:
+	mutex_unlock(&priv->mutex);
+	return ret;
+}
+
+long ioctl_configure_tlb(struct chardev_private *priv,
+			 struct tenstorrent_configure_tlb __user *arg) {
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_configure_tlb_in in = {0};
+
+	if (copy_from_user(&in, &arg->in, sizeof(in)))
+		return -EFAULT;
+
+	if (in.id < 0 || in.id >= TENSTORRENT_MAX_INBOUND_TLBS)
+		return -EINVAL;
+
+	if (!test_bit(in.id, priv->tlbs))
+		return -EPERM;
+
+	return tenstorrent_device_configure_tlb(tt_dev, in.id, &in.config);
+}
+
 // Is the mapping target range contained entirely with start - start+len?
 // start and len must be page-aligned.
 static bool vma_target_range(struct vm_area_struct *vma, u64 start, resource_size_t len)
@@ -709,6 +819,131 @@ static int map_pci_bar(struct pci_dev *pdev, struct vm_area_struct *vma, unsigne
 	return vm_iomap_memory(vma, bar_start, bar_len);
 }
 
+static void tlb_vma_open(struct vm_area_struct *vma)
+{
+	struct chardev_private *priv;
+	struct tenstorrent_device *tt_dev;
+	unsigned int id;
+
+	if (!vma->vm_file)
+		return;
+
+	priv = vma->vm_file->private_data;
+	if (!priv)
+		return;
+
+	tt_dev = priv->device;
+	id = (int)((uintptr_t)vma->vm_private_data);
+
+	if (id >= TENSTORRENT_MAX_INBOUND_TLBS)
+		return;
+
+	atomic_inc(&tt_dev->tlb_refs[id]);
+}
+
+static void tlb_vma_close(struct vm_area_struct *vma)
+{
+	struct chardev_private *priv;
+	struct tenstorrent_device *tt_dev;
+	unsigned int id;
+
+	if (!vma->vm_file)
+		return;
+
+	priv = vma->vm_file->private_data;
+	if (!priv)
+		return;
+
+	tt_dev = priv->device;
+	id = (int)((uintptr_t)vma->vm_private_data);
+
+	if (id >= TENSTORRENT_MAX_INBOUND_TLBS)
+		return;
+
+	if (atomic_dec_if_positive(&tt_dev->tlb_refs[id]) < 0)
+		pr_err("vma_close: negative refcount\n");	// Should never happen
+}
+
+static int tlb_vma_may_split(struct vm_area_struct *vma, unsigned long address)
+{
+	// Forbid splitting TLB windows.
+	return -1;
+}
+
+static const struct vm_operations_struct tlb_vm_ops = {
+	.open = tlb_vma_open,
+	.close = tlb_vma_close,
+	.may_split = tlb_vma_may_split,
+};
+
+static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *vma)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tlb_descriptor tlb_desc = {0};
+	unsigned long size = vma->vm_end - vma->vm_start;
+	unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
+	unsigned long pfn;
+	bool bar4 = offset >= BAR0_SIZE;
+	phys_addr_t bar_start;
+	int i;
+	int id = -1;
+	int ret = 0;
+	u64 total_tlbs = 0;
+
+	if (!tt_dev->dev_class->describe_tlb)
+		return -EINVAL;
+
+	if (tt_dev->dev_class->tlb_kinds == 0)
+		return -EINVAL;
+
+	for (i = 0; i < tt_dev->dev_class->tlb_kinds; ++i)
+		total_tlbs += tt_dev->dev_class->tlb_counts[i];
+
+	if (bar4)
+		offset -= BAR0_SIZE;
+
+	// Find the window matching the requested offset.
+	for (i = 0; i < total_tlbs; ++i) {
+		if (tt_dev->dev_class->describe_tlb(tt_dev, i, &tlb_desc))
+			return -EINVAL;
+
+		if (tlb_desc.bar_offset == offset && (tlb_desc.bar == 4) == bar4) {
+			id = i;
+			break;
+		}
+	}
+
+	if (id < 0)
+		return -EINVAL;
+
+	if (size > tlb_desc.size)
+		return -EINVAL;
+
+	mutex_lock(&priv->mutex);
+
+	if (!test_bit(id, priv->tlbs)) {
+		ret = -EPERM;
+		goto unlock;
+	}
+
+	bar_start = pci_resource_start(tt_dev->pdev, tlb_desc.bar);
+	pfn = (bar_start + tlb_desc.bar_offset) >> PAGE_SHIFT;
+
+	vma->vm_ops = &tlb_vm_ops;
+	vma->vm_private_data = (void*)(uintptr_t)id;
+
+	if (io_remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot)) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
+
+	tlb_vma_open(vma);
+
+unlock:
+	mutex_unlock(&priv->mutex);
+	return ret;
+}
+
 int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 {
 	struct pci_dev *pdev = priv->device->pdev;
@@ -743,6 +978,14 @@ int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE2_WC, pci_resource_len(pdev, 4))) {
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 		return map_pci_bar(pdev, vma, 4);
+
+	} else if (vma_target_range(vma, MMAP_OFFSET_TLB_UC, MMAP_RESOURCE_SIZE)) {
+		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
+		return map_tlb_window(priv, vma);
+
+	} else if (vma_target_range(vma, MMAP_OFFSET_TLB_WC, MMAP_RESOURCE_SIZE)) {
+		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+		return map_tlb_window(priv, vma);
 
 	} else {
 		struct dmabuf *dmabuf = vma_dmabuf_target(priv, vma);

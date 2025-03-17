@@ -7,14 +7,21 @@
 #include "blackhole.h"
 #include "pcie.h"
 #include "module.h"
+#include "tlb.h"
 
 #define MAX_MRRS 4096
 
 #define TLB_2M_WINDOW_COUNT 202
 #define TLB_2M_SHIFT 21
-#define TLB_2M_REG_SIZE 12
 #define TLB_2M_WINDOW_SIZE (1 << TLB_2M_SHIFT)
 #define TLB_2M_WINDOW_MASK (TLB_2M_WINDOW_SIZE - 1)
+
+#define TLB_4G_WINDOW_COUNT 8
+#define TLB_4G_SHIFT 32
+#define TLB_4G_WINDOW_SIZE (1UL << TLB_4G_SHIFT)
+#define TLB_4G_WINDOW_MASK (TLB_4G_WINDOW_SIZE - 1)
+
+#define TLB_REG_SIZE 12	// Same for 2M and 4G
 
 #define TLB_REGS_START 0x1FC00000   // BAR0
 #define TLB_REGS_LEN 0x00001000     // Covers all TLB registers
@@ -67,31 +74,103 @@ struct TLB_2M_REG {
 		};
 	};
 };
-static_assert(sizeof(struct TLB_2M_REG) == TLB_2M_REG_SIZE, "TLB_2M_REG size mismatch");
+static_assert(sizeof(struct TLB_2M_REG) == TLB_REG_SIZE, "TLB_2M_REG size mismatch");
 
-static u64 program_tlb(struct blackhole_device *bh, u32 x, u32 y, u64 addr) {
-	struct TLB_2M_REG conf = {0};
-	u8 __iomem *regs = bh->tlb_regs + (KERNEL_TLB_INDEX * TLB_2M_REG_SIZE);
+struct TLB_4G_REG {
+	union {
+		struct {
+			u32 low32;
+			u32 mid32;
+			u32 high32;
+		};
+		struct __attribute__((packed)) {
+			u32 address : 32;
+			u32 x_end : 6;
+			u32 y_end : 6;
+			u32 x_start : 6;
+			u32 y_start : 6;
+			u32 noc : 2;
+			u32 multicast : 1;
+			u32 ordering : 2;
+			u32 linked : 1;
+			u32 use_static_vc : 1;
+			u32 stream_header : 1;
+			u32 static_vc : 3;
+			u32 reserved : 29;
+		};
+	};
+};
+static_assert(sizeof(struct TLB_4G_REG) == TLB_REG_SIZE, "TLB_4G_REG size mismatch");
 
-	conf.address = addr >> TLB_2M_SHIFT;
-	conf.x_end = x;
-	conf.y_end = y;
-	conf.ordering = 1;	// strict
+static int blackhole_configure_tlb_2M(struct blackhole_device *bh, int tlb,
+				      struct tenstorrent_noc_tlb_config *config)
+{
+	u8 __iomem *regs = bh->tlb_regs + (tlb * TLB_REG_SIZE);
+	struct TLB_2M_REG reg = { 0 };
 
-	iowrite32(conf.low32, regs + 0);
-	iowrite32(conf.mid32, regs + 4);
-	iowrite32(conf.high32, regs + 8);
+	// Not possible to program a 2M window that doesn't start on a 2M boundary.
+	if (config->addr & TLB_2M_WINDOW_MASK)
+		return -EINVAL;
 
-	return addr & TLB_2M_WINDOW_MASK;
+	reg.address = config->addr >> TLB_2M_SHIFT;
+	reg.x_end = config->x_end;
+	reg.y_end = config->y_end;
+	reg.x_start = config->x_start;
+	reg.y_start = config->y_start;
+	reg.noc = config->noc;
+	reg.multicast = config->mcast;
+	reg.ordering = config->ordering;
+	reg.linked = config->linked;
+	reg.use_static_vc = config->static_vc;
+
+	iowrite32(reg.low32, regs + 0);
+	iowrite32(reg.mid32, regs + 4);
+	iowrite32(reg.high32, regs + 8);
+
+	return 0;
+}
+
+static int blackhole_configure_tlb_4G(struct blackhole_device *bh, int tlb,
+				      struct tenstorrent_noc_tlb_config *config)
+{
+	u8 __iomem *regs = bh->tlb_regs + (tlb * TLB_REG_SIZE);
+	struct TLB_4G_REG reg = { 0 };
+
+	// Not possible to program a 4G window that doesn't start on a 4G boundary.
+	if (config->addr & TLB_4G_WINDOW_MASK)
+		return -EINVAL;
+
+	reg.address = config->addr >> TLB_4G_SHIFT;
+	reg.x_end = config->x_end;
+	reg.y_end = config->y_end;
+	reg.x_start = config->x_start;
+	reg.y_start = config->y_start;
+	reg.noc = config->noc;
+	reg.multicast = config->mcast;
+	reg.ordering = config->ordering;
+	reg.linked = config->linked;
+	reg.use_static_vc = config->static_vc;
+
+	iowrite32(reg.low32, regs + 0);
+	iowrite32(reg.mid32, regs + 4);
+	iowrite32(reg.high32, regs + 8);
+
+	return 0;
 }
 
 static u32 noc_read32(struct blackhole_device *bh, u32 x, u32 y, u64 addr) {
-	u64 offset;
+	struct tenstorrent_noc_tlb_config config = { 0 };
+	u64 offset = addr & TLB_2M_WINDOW_MASK;
 	u32 val;
+
+	config.addr = addr & ~TLB_2M_WINDOW_MASK;
+	config.x_end = x;
+	config.y_end = y;
+	config.ordering	 = 1;	// strict
 
 	mutex_lock(&bh->kernel_tlb_mutex);
 
-	offset = program_tlb(bh, x, y, addr);
+	blackhole_configure_tlb_2M(bh, KERNEL_TLB_INDEX, &config);
 	val = ioread32(bh->kernel_tlb + offset);
 
 	mutex_unlock(&bh->kernel_tlb_mutex);
@@ -432,6 +511,9 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev) {
 		return false;
 	}
 
+	// Claim the topmost 2M window for kernel use.
+	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
+
 	return true;
 }
 
@@ -461,13 +543,50 @@ static void blackhole_cleanup(struct tenstorrent_device *tt_dev) {
 	kfree(bh->sysfs_attr_addrs);
 }
 
+static int blackhole_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
+				   struct tenstorrent_noc_tlb_config *config)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+
+	if (tlb >= 0 && tlb < TLB_2M_WINDOW_COUNT)
+		return blackhole_configure_tlb_2M(bh, tlb, config);
+
+	if (tlb >= TLB_2M_WINDOW_COUNT &&
+	    tlb < TLB_2M_WINDOW_COUNT + TLB_4G_WINDOW_COUNT)
+		return blackhole_configure_tlb_4G(bh, tlb, config);
+
+	return -EINVAL;
+}
+
+static int blackhole_describe_tlb(struct tenstorrent_device *tt_dev, int tlb,
+				  struct tlb_descriptor *desc)
+{
+	bool is_2M = tlb < TLB_2M_WINDOW_COUNT;
+
+	if (tlb < 0 || tlb >= TLB_2M_WINDOW_COUNT + TLB_4G_WINDOW_COUNT)
+		return -EINVAL;
+
+	desc->bar = is_2M ? 0 : 4;
+	desc->size = is_2M ? TLB_2M_WINDOW_SIZE : TLB_4G_WINDOW_SIZE;
+	desc->bar_offset =
+		is_2M ? tlb * TLB_2M_WINDOW_SIZE :
+			(tlb - TLB_2M_WINDOW_COUNT) * TLB_4G_WINDOW_SIZE;
+
+	return 0;
+}
+
 struct tenstorrent_device_class blackhole_class = {
 	.name = "Blackhole",
 	.instance_size = sizeof(struct blackhole_device),
 	.dma_address_bits = 58,
+	.tlb_kinds = 2,
+	.tlb_counts = { TLB_2M_WINDOW_COUNT, TLB_4G_WINDOW_COUNT },
+	.tlb_sizes = { TLB_2M_WINDOW_SIZE, TLB_4G_WINDOW_SIZE },
 	.init_device = blackhole_init,
 	.init_hardware = blackhole_init_hardware,
 	.post_hardware_init = blackhole_post_hardware_init,
 	.cleanup_hardware = blackhole_cleanup_hardware,
 	.cleanup_device = blackhole_cleanup,
+	.configure_tlb = blackhole_configure_tlb,
+	.describe_tlb = blackhole_describe_tlb,
 };

@@ -5,8 +5,11 @@
 #include <linux/dma-mapping.h>
 #include <linux/version.h>
 
+// RHEL backported these to 8.4
+#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(8, 4)
+
 // Merged in 5.8 and backported to 5.4.233.
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 233)
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 233)
 #define NEED_SGTABLE
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 5, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
 #define NEED_SGTABLE

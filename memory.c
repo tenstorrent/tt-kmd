@@ -25,7 +25,7 @@
 #define dma_alloc_coherent dma_zalloc_coherent
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0) || RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(8, 4)
 static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsigned int gup_flags, struct page **pages)
 {
 	// vma array allocation removed in 52650c8b466bac399aec213c61d74bfe6f7af1a4.
@@ -90,7 +90,7 @@ static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsig
 }
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0) || RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(8, 4)
 // unpin_user_pages_dirty_lock is provided by the kernel.
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
 static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npages, bool make_dirty)

@@ -3,6 +3,10 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/types.h>
+#include <linux/dma/edma.h>
+#include <linux/dma-mapping.h>
+#include <linux/dmaengine.h>
+#include <linux/completion.h>
 
 #include "wormhole.h"
 #include "grayskull.h"
@@ -114,8 +118,32 @@ static void update_device_index(struct wormhole_device *wh_dev) {
 						10*1000, NULL);
 }
 
+#if 0
+static void list_dma_controllers(struct dma_device *device, void *data)
+{
+	struct dma_chan *chan;
+
+	pr_info("DMA Controller: %s\n", dev_name(device->dev));
+	pr_info("  Capabilities: 0x%08lx\n", device->cap_mask.bits[0]);
+	list_for_each_entry(chan, &device->channels, device_node) {
+		pr_info("  Channel: %s\n", dev_name(chan->dev));
+	}
+}
+#endif
+
+static int dw_edma_pcie_irq_vector(struct device *dev, unsigned int nr)
+{
+	return pci_irq_vector(to_pci_dev(dev), nr);
+}
+
+static struct dw_edma_plat_ops edma_ops = {
+	.irq_vector = dw_edma_pcie_irq_vector,
+};
+
 static bool wormhole_init(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	int i;
+	int ret;
 
 	wh_dev->bar2_mapping = pci_iomap(wh_dev->tt.pdev, 2, 0);
 	if (wh_dev->bar2_mapping == NULL) goto fail_bar2;
@@ -123,10 +151,51 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev) {
 	wh_dev->bar4_mapping = pci_iomap(wh_dev->tt.pdev, 4, 0);
 	if (wh_dev->bar4_mapping == NULL) goto fail_bar4;
 
+	wh_dev->edma_chip = kzalloc(sizeof(*wh_dev->edma_chip), GFP_KERNEL);
+	if (wh_dev->edma_chip == NULL) goto fail_edma_chip;
+
+	wh_dev->edma_chip->dev = &wh_dev->tt.pdev->dev;
+	wh_dev->edma_chip->reg_base = wh_dev->bar2_mapping;
+	wh_dev->edma_chip->nr_irqs = 1;
+	wh_dev->edma_chip->ll_wr_cnt = 8;
+	wh_dev->edma_chip->ll_rd_cnt = 8;
+	wh_dev->edma_chip->mf = EDMA_MF_EDMA_UNROLL;
+	wh_dev->edma_chip->flags = DW_EDMA_CHIP_LOCAL; // Seems necessary to make the driver not look in the BAR2 for LL memory.
+	wh_dev->edma_chip->ops = &edma_ops;
+	for (i = 0; i < 8; ++i) {
+		struct dw_edma_region *ll = &wh_dev->edma_chip->ll_region_wr[i];
+		ll->sz = PAGE_SIZE; // ?!
+		ll->vaddr.mem = dmam_alloc_coherent(&wh_dev->tt.pdev->dev, ll->sz, &ll->paddr, GFP_KERNEL);
+		if (!ll->vaddr.mem) {
+			dev_err(&wh_dev->tt.pdev->dev, "Failed to allocate link list memory\n");
+			goto fail_edma_chip;
+		}
+		pr_info("ll->paddr = 0x%llx\n", ll->paddr);
+		ll = &wh_dev->edma_chip->ll_region_rd[i];
+		ll->sz = PAGE_SIZE; // ?!
+		ll->vaddr.mem = dmam_alloc_coherent(&wh_dev->tt.pdev->dev, ll->sz, &ll->paddr, GFP_KERNEL);
+		if (!ll->vaddr.mem) {
+			dev_err(&wh_dev->tt.pdev->dev, "Failed to allocate link list memory\n");
+			goto fail_edma_chip;
+		}
+		pr_info("ll->paddr = 0x%llx\n", ll->paddr);
+	}
+
+	ret = dw_edma_probe(wh_dev->edma_chip);
+	if (ret) {
+		dev_err(&wh_dev->tt.pdev->dev, "Failed to initialize eDMA: %d\n", ret);
+		kfree(wh_dev->edma_chip);
+		wh_dev->edma_chip = NULL;
+	} else {
+		dev_info(&wh_dev->tt.pdev->dev, "eDMA initialized\n");
+	}
+
 	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
 
 	return true;
 
+fail_edma_chip:
+	pci_iounmap(wh_dev->tt.pdev, wh_dev->bar4_mapping);
 fail_bar4:
 	pci_iounmap(wh_dev->tt.pdev, wh_dev->bar2_mapping);
 fail_bar2:
@@ -224,6 +293,11 @@ static void wormhole_cleanup_hardware(struct tenstorrent_device *tt_dev) {
 
 static void wormhole_cleanup(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+
+	if (wh_dev->edma_chip != NULL) {
+		dw_edma_remove(wh_dev->edma_chip);
+		kfree(wh_dev->edma_chip);
+	}
 
 	if (wh_dev->bar2_mapping != NULL)
 		pci_iounmap(wh_dev->tt.pdev, wh_dev->bar2_mapping);

@@ -4,6 +4,10 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/bitfield.h>
 #include <linux/types.h>
+#include <linux/dma/edma.h>
+#include <linux/dma-mapping.h>
+#include <linux/dmaengine.h>
+#include <linux/completion.h>
 
 #include "wormhole.h"
 #include "grayskull.h"
@@ -125,6 +129,120 @@ static void update_device_index(struct wormhole_device *wh_dev) {
 						10*1000, NULL);
 }
 
+
+static int dw_edma_pcie_irq_vector(struct device *dev, unsigned int nr)
+{
+	pr_info("int callback %x\n", nr);
+	return pci_irq_vector(to_pci_dev(dev), nr);
+}
+
+static struct dw_edma_plat_ops edma_ops = {
+	.irq_vector = dw_edma_pcie_irq_vector,
+};
+
+
+#define ARC_CSM	    (0x1FE80000)
+#define ARC_LL      (ARC_CSM + 0x20000)
+#define NUM_DMA_CHANNELS 8
+static bool wormhole_init_dw_edma(struct tenstorrent_device *tt_dev) {
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	struct dw_edma_chip *edma_chip;
+	const size_t size_per_ll_region = 0x1000;
+	const size_t total_write_region_size = NUM_DMA_CHANNELS * size_per_ll_region;
+	const u64 ll_wr_paddr_start = ARC_LL;
+	const u64 ll_rd_paddr_start = ARC_LL + total_write_region_size;
+	dw_edma_t dma_probe = symbol_get(dw_edma_probe);
+	dw_edma_t dma_remove = symbol_get(dw_edma_remove);
+	int ret;
+	int i;
+
+	if (!dma_probe || !dma_remove)
+		goto fail_put_symbols;
+
+	edma_chip = kzalloc(sizeof(struct dw_edma_chip), GFP_KERNEL);
+	if (edma_chip == NULL)
+		goto fail_put_symbols;
+
+	edma_chip->dev = &wh_dev->tt.pdev->dev;
+	edma_chip->reg_base = wh_dev->bar2_mapping;
+	edma_chip->nr_irqs = 16;
+	edma_chip->ll_wr_cnt = NUM_DMA_CHANNELS;
+	edma_chip->ll_rd_cnt = NUM_DMA_CHANNELS;
+	edma_chip->mf = EDMA_MF_EDMA_UNROLL;
+	edma_chip->ops = &edma_ops;
+
+	for (i = 0; i < NUM_DMA_CHANNELS; i++) {
+		struct dw_edma_region *ll_region_wr = &edma_chip->ll_region_wr[i];
+		struct dw_edma_region *ll_region_rd = &edma_chip->ll_region_rd[i];
+		const size_t channel_offset = i * size_per_ll_region;
+
+		ll_region_wr->sz = size_per_ll_region;
+		ll_region_wr->paddr = ll_wr_paddr_start + channel_offset;
+		ll_region_wr->vaddr.io = wh_dev->bar4_mapping + (ll_region_wr->paddr - BAR4_SOC_TARGET_ADDRESS);
+
+		ll_region_rd->sz = size_per_ll_region;
+		ll_region_rd->paddr = ll_rd_paddr_start + channel_offset;
+		ll_region_rd->vaddr.io = wh_dev->bar4_mapping + (ll_region_rd->paddr - BAR4_SOC_TARGET_ADDRESS);
+	}
+
+	ret = dma_probe(edma_chip);
+
+	if (ret) {
+		dev_err(&wh_dev->tt.pdev->dev, "Failed to initialize dw_edma: %d\n", ret);
+		kfree(edma_chip);
+		goto fail_put_symbols;
+	} else {
+		// TODO: ugh.
+		u32 wr_ch01_imwr_data = 0x0070;
+		u32 wr_ch23_imwr_data = 0x0074;
+		u32 wr_ch45_imwr_data = 0x0078;
+		u32 wr_ch67_imwr_data = 0x007c;
+		u32 rd_ch01_imwr_data = 0x00dc;
+		u32 rd_ch23_imwr_data = 0x00e0;
+		u32 rd_ch45_imwr_data = 0x00e4;
+		u32 rd_ch67_imwr_data = 0x00e8;
+
+		iowrite32(0x00010000, edma_chip->reg_base + wr_ch01_imwr_data);
+		iowrite32(0x00030002, edma_chip->reg_base + wr_ch23_imwr_data);
+		iowrite32(0x00050004, edma_chip->reg_base + wr_ch45_imwr_data);
+		iowrite32(0x00070006, edma_chip->reg_base + wr_ch67_imwr_data);
+		iowrite32(0x00090008, edma_chip->reg_base + rd_ch01_imwr_data);
+		iowrite32(0x000b000a, edma_chip->reg_base + rd_ch23_imwr_data);
+		iowrite32(0x000d000c, edma_chip->reg_base + rd_ch45_imwr_data);
+		iowrite32(0x000f000e, edma_chip->reg_base + rd_ch67_imwr_data);
+		dev_info(&wh_dev->tt.pdev->dev, "dw_edma initialized\n");
+	}
+
+	wh_dev->dma_remove = dma_remove;
+	wh_dev->edma_chip = edma_chip;
+
+	return true;
+
+fail_put_symbols:
+	if (dma_probe)
+		symbol_put(dw_edma_probe);
+	if (dma_remove)
+		symbol_put(dw_edma_remove);
+	return false;
+}
+
+static void wormhole_cleanup_dw_edma(struct tenstorrent_device *tt_dev) {
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	struct dw_edma_chip *edma_chip = wh_dev->edma_chip;
+
+	if (wh_dev->edma_chip) {
+		pr_info("dma_remove(edma_chip)\n");
+		wh_dev->dma_remove(edma_chip);
+		kfree(wh_dev->edma_chip);
+	}
+
+	if (wh_dev->dma_remove) {
+		pr_info("symbol_put(dma_remove)\n");
+		symbol_put(dw_edma_probe);
+		symbol_put(dw_edma_remove);
+	}
+}
+
 static bool wormhole_init(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
@@ -133,6 +251,8 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev) {
 
 	wh_dev->bar4_mapping = pci_iomap(wh_dev->tt.pdev, 4, 0);
 	if (wh_dev->bar4_mapping == NULL) goto fail_bar4;
+
+	wormhole_init_dw_edma(tt_dev);
 
 	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
 	mutex_init(&wh_dev->kernel_tlb_mutex);
@@ -236,6 +356,8 @@ static void wormhole_cleanup_hardware(struct tenstorrent_device *tt_dev) {
 
 static void wormhole_cleanup(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+
+	wormhole_cleanup_dw_edma(tt_dev);
 
 	if (wh_dev->bar2_mapping != NULL)
 		pci_iounmap(wh_dev->tt.pdev, wh_dev->bar2_mapping);

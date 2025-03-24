@@ -22,6 +22,7 @@
 #include "pcie.h"
 #include "memory.h"
 #include "tlb.h"
+#include "dma.h"
 
 static dev_t tt_device_id;
 static struct class *tt_dev_class;
@@ -336,6 +337,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_CONFIGURE_TLB:
 			ret = ioctl_configure_tlb(priv, (struct tenstorrent_configure_tlb __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_DMA:
+			ret = ioctl_dma(priv, (struct tenstorrent_dma __user *)arg);
 			break;
 
 		default:

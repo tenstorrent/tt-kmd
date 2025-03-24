@@ -122,6 +122,18 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(dev);
 	struct chardev_private *priv, *tmp;
 
+	////////////////////////////////////////////////////////////////////////////
+	// Moved from tt_dev_release
+	////////////////////////////////////////////////////////////////////////////
+	if (tt_dev->dev_class->reboot)
+		unregister_reboot_notifier(&tt_dev->reboot_notifier);
+
+	tt_dev->dev_class->cleanup_hardware(tt_dev);
+	tt_dev->dev_class->cleanup_device(tt_dev);
+	////////////////////////////////////////////////////////////////////////////
+	// End of moved code
+	////////////////////////////////////////////////////////////////////////////
+
 	list_for_each_entry_safe(priv, tmp, &tt_dev->open_fds_list, open_fd) {
 		tenstorrent_memory_cleanup(priv);
 	}
@@ -137,6 +149,15 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	tenstorrent_unregister_device(tt_dev);
 	tenstorrent_disable_interrupts(tt_dev);
 
+	////////////////////////////////////////////////////////////////////////////
+	// Moved from tt_dev_release (slightly edited s/pdev/dev)
+	////////////////////////////////////////////////////////////////////////////
+	pci_disable_pcie_error_reporting(dev);
+	pci_disable_device(dev);
+	////////////////////////////////////////////////////////////////////////////
+	// End of moved code
+	////////////////////////////////////////////////////////////////////////////
+
 	pci_set_drvdata(dev, NULL);
 
 	// If this is postponed, a subsequent probe is forced to use a different ordinal.
@@ -151,14 +172,18 @@ static void tt_dev_release(struct kref *tt_dev_kref) {
 	struct tenstorrent_device *tt_dev = container_of(tt_dev_kref, struct tenstorrent_device, kref);
 	struct pci_dev *pdev = tt_dev->pdev;
 
+#if 0
 	if (tt_dev->dev_class->reboot)
 		unregister_reboot_notifier(&tt_dev->reboot_notifier);
 
 	tt_dev->dev_class->cleanup_hardware(tt_dev);
 	tt_dev->dev_class->cleanup_device(tt_dev);
+#endif
 
+#if 0
 	pci_disable_pcie_error_reporting(pdev);
 	pci_disable_device(pdev);
+#endif
 
 	pci_dev_put(pdev);
 	kfree(tt_dev);

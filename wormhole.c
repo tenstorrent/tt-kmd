@@ -9,6 +9,27 @@
 #include "pcie.h"
 #include "module.h"
 #include "hwmon.h"
+#include "tlb.h"
+
+#define KERNEL_TLB_INDEX 185
+
+#define TLB_1M_WINDOW_COUNT 156
+#define TLB_1M_SHIFT 20
+#define TLB_1M_WINDOW_SIZE (1 << TLB_1M_SHIFT)
+#define TLB_1M_WINDOW_BASE 0   // BAR0
+
+#define TLB_2M_WINDOW_COUNT 10
+#define TLB_2M_SHIFT 21
+#define TLB_2M_WINDOW_SIZE (1 << TLB_2M_SHIFT)
+#define TLB_2M_WINDOW_BASE (TLB_1M_WINDOW_COUNT * TLB_1M_WINDOW_SIZE)
+
+#define TLB_16M_WINDOW_COUNT 20
+#define TLB_16M_SHIFT 24
+#define TLB_16M_WINDOW_SIZE (1 << TLB_16M_SHIFT)
+#define TLB_16M_WINDOW_BASE (TLB_2M_WINDOW_BASE + TLB_2M_WINDOW_COUNT * TLB_2M_WINDOW_SIZE)
+
+#define TLB_WINDOW_COUNT (TLB_1M_WINDOW_COUNT + TLB_2M_WINDOW_COUNT + TLB_16M_WINDOW_COUNT)
+#define WH_NOC_BITS 36
 
 #define WH_FW_MSG_PCIE_INDEX 0x51
 #define WH_FW_MSG_ASTATE0 0xA0
@@ -36,6 +57,7 @@
 
 #define RESET_UNIT_START (0x1FF30000 - BAR4_SOC_TARGET_ADDRESS)
 #define ARC_CSM_START    (0x1FE80000 - BAR4_SOC_TARGET_ADDRESS)
+#define TLB_REGS_START   (0x1FC00000 - BAR4_SOC_TARGET_ADDRESS)
 
 #define WRITE_IATU_REG(wh_dev, direction, region, reg, value) \
 	write_iatu_reg(wh_dev, IATU_##direction, region, \
@@ -100,6 +122,8 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev) {
 
 	wh_dev->bar4_mapping = pci_iomap(wh_dev->tt.pdev, 4, 0);
 	if (wh_dev->bar4_mapping == NULL) goto fail_bar4;
+
+	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
 
 	return true;
 
@@ -208,14 +232,127 @@ static void wormhole_cleanup(struct tenstorrent_device *tt_dev) {
 		pci_iounmap(wh_dev->tt.pdev, wh_dev->bar4_mapping);
 }
 
+#define NUM_TLB_KINDS 3
+static const u32 TLB_WINDOW_INDEX[NUM_TLB_KINDS] = { 0, TLB_1M_WINDOW_COUNT, TLB_1M_WINDOW_COUNT + TLB_2M_WINDOW_COUNT };
+static const u32 TLB_SHIFTS[NUM_TLB_KINDS] = { TLB_1M_SHIFT, TLB_2M_SHIFT, TLB_16M_SHIFT };
+static const u64 TLB_WINDOW_SIZES[NUM_TLB_KINDS] = { TLB_1M_WINDOW_SIZE, TLB_2M_WINDOW_SIZE, TLB_16M_WINDOW_SIZE };
+static const u64 TLB_WINDOW_BASES[NUM_TLB_KINDS] = { TLB_1M_WINDOW_BASE, TLB_2M_WINDOW_BASE, TLB_16M_WINDOW_BASE };
+
+struct noc_tlb_non_address_bits {
+	   union {
+			   u32 reg;
+			   struct {
+					   u64 x_end: 6;
+					   u64 y_end: 6;
+					   u64 x_start: 6;
+					   u64 y_start: 6;
+					   u64 noc_sel : 1;
+					   u64 mcast: 1;
+					   u64 ordering: 2;
+					   u64 linked: 1;
+			   };
+	   };
+};
+
+static int wormhole_tlb_kind(int tlb)
+{
+	if (tlb >= 0 && tlb < TLB_1M_WINDOW_COUNT)
+		return 0;
+	if (tlb >= TLB_1M_WINDOW_COUNT &&
+	    tlb < TLB_1M_WINDOW_COUNT + TLB_2M_WINDOW_COUNT)
+		return 1;
+	if (tlb >= TLB_1M_WINDOW_COUNT + TLB_2M_WINDOW_COUNT &&
+	    tlb < TLB_1M_WINDOW_COUNT + TLB_2M_WINDOW_COUNT +
+			    TLB_16M_WINDOW_COUNT)
+		return 2;
+
+	return -EINVAL;
+}
+
+static int construct_tlb_config(const struct tenstorrent_noc_tlb_config *config,
+				int tlb, u64 *regs)
+{
+	int kind = wormhole_tlb_kind(tlb);
+	struct noc_tlb_non_address_bits non_address_bits = {
+		.x_end = config->x_end,
+		.y_end = config->y_end,
+		.x_start = config->x_start,
+		.y_start = config->y_start,
+		.noc_sel = config->noc,
+		.mcast = config->mcast,
+		.ordering = config->ordering,
+		.linked = config->linked,
+	};
+
+	if (kind < 0)
+		return -EINVAL;
+
+	// Address must be aligned to the window size.
+	if (config->addr & (TLB_WINDOW_SIZES[kind] - 1))
+		return -EINVAL;
+
+	// Addresses must fit in 36 bits.
+	if (config->addr >= (1UL << WH_NOC_BITS))
+		return -EINVAL;
+
+	*regs = 0;
+	*regs |= (u64)config->addr >> TLB_SHIFTS[kind];
+	*regs |= (u64)non_address_bits.reg << (WH_NOC_BITS - TLB_SHIFTS[kind]);
+
+	return 0;
+}
+
+static int wormhole_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
+				  struct tenstorrent_noc_tlb_config *config)
+{
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	u8 __iomem *tlb_regs = wh_dev->bar4_mapping + TLB_REGS_START;
+	u64 regs = 0;
+	u32 offset;
+
+	if (tlb < 0 || tlb >= TLB_WINDOW_COUNT)
+		return -EINVAL;
+
+	if (construct_tlb_config(config, tlb, &regs))
+		return -EINVAL;
+
+	offset = tlb * 2 * sizeof(u32);
+	iowrite32(regs & 0xFFFFFFFF, tlb_regs + offset);
+	iowrite32((regs >> 32) & 0xFFFFFFFF, tlb_regs + offset + sizeof(u32));
+
+	return 0;
+}
+
+static int wormhole_describe_tlb(struct tenstorrent_device *tt_dev, int tlb,
+				 struct tlb_descriptor *desc)
+{
+	int kind = wormhole_tlb_kind(tlb);
+
+	if (kind < 0 || kind >= NUM_TLB_KINDS)
+		return -EINVAL;
+
+	desc->bar = 0;
+	desc->size = TLB_WINDOW_SIZES[kind];
+	desc->bar_offset =
+		TLB_WINDOW_BASES[kind] +
+		TLB_WINDOW_SIZES[kind] * (tlb - TLB_WINDOW_INDEX[kind]);
+
+	return 0;
+}
+
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
 	.dma_address_bits = 32,
+	.tlb_kinds = NUM_TLB_KINDS,
+	.tlb_counts = { TLB_1M_WINDOW_COUNT, TLB_2M_WINDOW_COUNT, TLB_16M_WINDOW_COUNT },
+	.tlb_sizes = { TLB_1M_WINDOW_SIZE, TLB_2M_WINDOW_SIZE, TLB_16M_WINDOW_SIZE },
 	.init_device = wormhole_init,
 	.init_hardware = wormhole_init_hardware,
 	.post_hardware_init = wormhole_post_hardware_init,
 	.cleanup_hardware = wormhole_cleanup_hardware,
 	.cleanup_device = wormhole_cleanup,
 	.reboot = wormhole_cleanup_hardware,
+	.configure_tlb = wormhole_configure_tlb,
+	.describe_tlb = wormhole_describe_tlb,
 };

@@ -40,12 +40,21 @@ struct tenstorrent_device {
 	const struct tt_attribute_data *attributes;
 
 	struct list_head open_fds_list;	// List of struct chardev_private, linked through open_fds field
+
+	DECLARE_BITMAP(tlbs, TENSTORRENT_MAX_INBOUND_TLBS);
+	atomic_t tlb_refs[TENSTORRENT_MAX_INBOUND_TLBS];	// TLB mapping refecounts
 };
 
+struct tlb_descriptor;
+
+#define MAX_TLB_KINDS 4
 struct tenstorrent_device_class {
 	const char *name;
 	u32 instance_size;
 	u32 dma_address_bits;
+	u32 tlb_kinds;
+	u32 tlb_counts[MAX_TLB_KINDS];
+	u64 tlb_sizes[MAX_TLB_KINDS];
 	bool (*init_device)(struct tenstorrent_device *ttdev);
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);
 	bool (*post_hardware_init)(struct tenstorrent_device *ttdev);
@@ -54,6 +63,8 @@ struct tenstorrent_device_class {
 	void (*first_open_cb)(struct tenstorrent_device *ttdev);
 	void (*last_release_cb)(struct tenstorrent_device *ttdev);
 	void (*reboot)(struct tenstorrent_device *ttdev);
+	int (*configure_tlb)(struct tenstorrent_device *ttdev, int tlb, struct tenstorrent_noc_tlb_config *config);
+	int (*describe_tlb)(struct tenstorrent_device *ttdev, int tlb, struct tlb_descriptor *tlb_desc);
 };
 
 void tenstorrent_device_put(struct tenstorrent_device *);

@@ -6,11 +6,12 @@
 
 #include <linux/types.h>
 #include "device.h"
-
+struct dw_edma_chip;
 struct wormhole_device {
 	struct tenstorrent_device tt;
 	u8 __iomem *bar2_mapping;
 	u8 __iomem *bar4_mapping;
+	struct dw_edma_chip *edma_chip;
 };
 
 #define tt_dev_to_wh_dev(ttdev) \

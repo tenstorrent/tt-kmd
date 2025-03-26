@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <linux/sched/signal.h>
+
 #include "tlb.h"
 #include "device.h"
 

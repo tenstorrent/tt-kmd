@@ -867,13 +867,17 @@ static void tlb_vma_close(struct vm_area_struct *vma)
 static int tlb_vma_may_split(struct vm_area_struct *vma, unsigned long address)
 {
 	// Forbid splitting TLB windows.
-	return -1;
+	return -EINVAL;
 }
 
 static const struct vm_operations_struct tlb_vm_ops = {
 	.open = tlb_vma_open,
 	.close = tlb_vma_close,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
 	.may_split = tlb_vma_may_split,
+#else
+	.split = tlb_vma_may_split,
+#endif
 };
 
 static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *vma)

@@ -572,9 +572,32 @@ void VerifyPartialUnmappingDisallowed(const EnumeratedDevice &dev)
         }
     }
 
-    if (munmap(mem, TWO_MEG) != 0)
-        THROW_TEST_FAILURE("Failed to munmap TLB");
+    // Attempt to remap a page.  The mremap fails on 5.15.0 (fine), succeeds on
+    // 5.4.0.  Test that the TLB is appropriately reference counted in the case
+    // where the remap succeeds.
+    void *target = mmap(nullptr, 0x1000, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (target == MAP_FAILED)
+        THROW_TEST_FAILURE("Failed to create anonymous mapping");
+    void *page = mremap(static_cast<uint8_t*>(mem) + 0x1000, 0x1000, 0x1000,
+                         MREMAP_MAYMOVE | MREMAP_FIXED, target);
+    if (page != MAP_FAILED) {
+        // Unmap the whole window.  Remapped page remains mapped.
+        if (munmap(mem, TWO_MEG) != 0)
+            THROW_TEST_FAILURE("Failed to munmap TLB");
 
+        // Refcount due to remapped page should prevent freeing the window.
+        if (ioctl(fd, TENSTORRENT_IOCTL_FREE_TLB, &free_tlb) == 0)
+            THROW_TEST_FAILURE("Freed mapped TLB");
+
+        // Unmap the remapped page.
+        if (munmap(page, 0x1000) != 0)
+            THROW_TEST_FAILURE("Failed to munmap TLB");
+    } else {
+        if (munmap(mem, TWO_MEG) != 0)
+            THROW_TEST_FAILURE("Failed to munmap TLB");
+    }
+
+    // Should be safe to free the TLB now.
     if (ioctl(fd, TENSTORRENT_IOCTL_FREE_TLB, &free_tlb) != 0)
         THROW_TEST_FAILURE("Failed to free TLB");
 }

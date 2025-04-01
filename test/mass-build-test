@@ -38,7 +38,7 @@ def prepare_kernel(kernel_dir: Path, ver: str) -> bool:
     subprocess_check_output_merged(["make", make_j(), "modules_prepare"], kernel_dir)
 
 def build_module(module_dir: Path, kernel_dir: Path) -> None:
-    subprocess_check_output_merged(["make", make_j(), "clean"], module_dir)
+    subprocess_check_output_merged(["make", make_j(), f"KDIR={kernel_dir.absolute()}", "clean"], module_dir)
 
     # We're building against an incompletely-built kernel tree, so modpost can't find symbol versions.
     subprocess_check_output_merged(["make", make_j(), f"KDIR={kernel_dir.absolute()}", "KBUILD_MODPOST_WARN=1"], module_dir)

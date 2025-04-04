@@ -184,10 +184,12 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		return -EFAULT;
 
 	if (in.flags == TENSTORRENT_RESET_DEVICE_RESTORE_STATE) {
-		if (safe_pci_restore_state(pdev))
+		if (safe_pci_restore_state(pdev)) {
+			priv->device->dev_class->restore_reset_state(priv->device);
 			ok = priv->device->dev_class->init_hardware(priv->device);
-		else
+		} else {
 			ok = false;
+		}
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK) {
 		ok = pcie_hot_reset_and_restore_state(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_CONFIG_WRITE) {

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include <linux/bitfield.h>
 #include <linux/types.h>
 
 #include "blackhole.h"
@@ -29,6 +30,13 @@
 #define KERNEL_TLB_INDEX (TLB_2M_WINDOW_COUNT - 1)	// Last 2M window is ours
 #define KERNEL_TLB_START (KERNEL_TLB_INDEX * TLB_2M_WINDOW_SIZE)
 #define KERNEL_TLB_LEN TLB_2M_WINDOW_SIZE
+
+#define NOC2AXI_CFG_START 0x1FD00000
+#define NOC2AXI_CFG_LEN 0x00100000
+#define NOC_ID_OFFSET 0x4044
+
+// this points to outbound NOC_TLB_62 configured by CMFW
+#define PCIE_DBI_ADDR 0xF800000000000000ULL
 
 // ARC owns telemetry
 #define ARC_X 8
@@ -158,24 +166,76 @@ static int blackhole_configure_tlb_4G(struct blackhole_device *bh, int tlb,
 	return 0;
 }
 
-static u32 noc_read32(struct blackhole_device *bh, u32 x, u32 y, u64 addr) {
+static u8 __iomem *bh_configure_kernel_tlb(struct blackhole_device *bh, u32 x, u32 y, u64 addr) {
 	struct tenstorrent_noc_tlb_config config = { 0 };
 	u64 offset = addr & TLB_2M_WINDOW_MASK;
-	u32 val;
 
 	config.addr = addr & ~TLB_2M_WINDOW_MASK;
 	config.x_end = x;
 	config.y_end = y;
-	config.ordering	 = 1;	// strict
+	config.ordering	= 1; // strict
+
+	blackhole_configure_tlb_2M(bh, KERNEL_TLB_INDEX, &config);
+	return bh->kernel_tlb + offset;
+}
+
+static u32 noc_read32(struct blackhole_device *bh, u32 x, u32 y, u64 addr) {
+	u32 val;
+	u8 __iomem *tlb_window;
 
 	mutex_lock(&bh->kernel_tlb_mutex);
 
-	blackhole_configure_tlb_2M(bh, KERNEL_TLB_INDEX, &config);
-	val = ioread32(bh->kernel_tlb + offset);
+	tlb_window = bh_configure_kernel_tlb(bh, x, y, addr);
+	val = ioread32(tlb_window);
 
 	mutex_unlock(&bh->kernel_tlb_mutex);
 
 	return val;
+}
+
+static void noc_write32(struct blackhole_device *bh, u32 x, u32 y, u64 addr, u32 data) {
+	u8 __iomem *tlb_window;
+
+	mutex_lock(&bh->kernel_tlb_mutex);
+
+	tlb_window = bh_configure_kernel_tlb(bh, x, y, addr);
+	iowrite32(data, tlb_window);
+
+	mutex_unlock(&bh->kernel_tlb_mutex);
+}
+
+// BH has two PCIE instances, the function reads NOC ID to find out which one is active
+static bool blackhole_detect_pcie_noc_x(struct blackhole_device *bh, u32 *noc_x) {
+	*noc_x = ioread32(bh->noc2axi_cfg + NOC_ID_OFFSET) & 0x3F;
+	return (*noc_x == 2 || *noc_x == 11);
+}
+
+static void blackhole_save_reset_state(struct tenstorrent_device *tt_dev) {
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	u32 x;
+	u32 y = 0;
+	u32 device_control;
+
+	if (!blackhole_detect_pcie_noc_x(bh, &x))
+		return;
+
+	device_control = noc_read32(bh, x, y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS);
+	bh->saved_mps = FIELD_GET(PCI_EXP_DEVCTL_PAYLOAD, device_control);
+}
+
+static void blackhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	u32 x;
+	u32 y = 0;
+	u32 device_control;
+
+	if (!blackhole_detect_pcie_noc_x(bh, &x))
+		return;
+
+	device_control = noc_read32(bh, x, y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS);
+	device_control &= ~PCI_EXP_DEVCTL_PAYLOAD;
+	device_control |= FIELD_PREP(PCI_EXP_DEVCTL_PAYLOAD, bh->saved_mps);
+	noc_write32(bh, x, y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, device_control);
 }
 
 struct blackhole_hwmon_label {
@@ -501,18 +561,23 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev) {
 
 	bh->tlb_regs = pci_iomap_range(bh->tt.pdev, 0, TLB_REGS_START, TLB_REGS_LEN);
 	bh->kernel_tlb = pci_iomap_range(bh->tt.pdev, 0, KERNEL_TLB_START, KERNEL_TLB_LEN);
+	bh->noc2axi_cfg = pci_iomap_range(bh->tt.pdev, 0, NOC2AXI_CFG_START, NOC2AXI_CFG_LEN);
 
-	if (!bh->tlb_regs || !bh->kernel_tlb) {
+	if (!bh->tlb_regs || !bh->kernel_tlb || !bh->noc2axi_cfg) {
 		if (bh->tlb_regs)
 			pci_iounmap(bh->tt.pdev, bh->tlb_regs);
 
 		if (bh->kernel_tlb)
 			pci_iounmap(bh->tt.pdev, bh->kernel_tlb);
+
+		if (bh->noc2axi_cfg)
+			pci_iounmap(bh->tt.pdev, bh->noc2axi_cfg);
 		return false;
 	}
 
 	// Claim the topmost 2M window for kernel use.
 	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
+	mutex_init(&bh->kernel_tlb_mutex);
 
 	return true;
 }
@@ -538,6 +603,8 @@ static void blackhole_cleanup(struct tenstorrent_device *tt_dev) {
 		pci_iounmap(tt_dev->pdev, bh->tlb_regs);
 	if (bh->kernel_tlb)
 		pci_iounmap(tt_dev->pdev, bh->kernel_tlb);
+	if (bh->noc2axi_cfg)
+		pci_iounmap(tt_dev->pdev, bh->noc2axi_cfg);
 
 	kfree(bh->hwmon_attr_addrs);
 	kfree(bh->sysfs_attr_addrs);
@@ -589,4 +656,6 @@ struct tenstorrent_device_class blackhole_class = {
 	.cleanup_device = blackhole_cleanup,
 	.configure_tlb = blackhole_configure_tlb,
 	.describe_tlb = blackhole_describe_tlb,
+	.save_reset_state = blackhole_save_reset_state,
+	.restore_reset_state = blackhole_restore_reset_state,
 };

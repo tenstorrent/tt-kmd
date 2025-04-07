@@ -41,8 +41,6 @@
 #define TTKMD_ARC_IF_OFFSET 0x77000
 #define ARC_CSM_ROW_HARVESTING_OFFSET 0x7836C
 
-#define SCRATCH_REG(n) (0x60 + (n)*sizeof(u32))	/* byte offset */
-
 #define POST_CODE_REG SCRATCH_REG(0)
 #define POST_CODE_MASK ((u32)0x3FFF)
 #define POST_CODE_ARC_SLEEP 2

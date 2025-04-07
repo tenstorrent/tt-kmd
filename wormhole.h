@@ -9,8 +9,12 @@
 
 struct wormhole_device {
 	struct tenstorrent_device tt;
+	struct mutex kernel_tlb_mutex;	// Guards access to kernel_tlb
+
 	u8 __iomem *bar2_mapping;
 	u8 __iomem *bar4_mapping;
+
+	u8 saved_mps;
 };
 
 #define tt_dev_to_wh_dev(ttdev) \

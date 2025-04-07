@@ -11,8 +11,6 @@
 #include "hwmon.h"
 #include "tlb.h"
 
-#define KERNEL_TLB_INDEX 185
-
 #define TLB_1M_WINDOW_COUNT 156
 #define TLB_1M_SHIFT 20
 #define TLB_1M_WINDOW_SIZE (1 << TLB_1M_SHIFT)
@@ -27,6 +25,7 @@
 #define TLB_16M_SHIFT 24
 #define TLB_16M_WINDOW_SIZE (1 << TLB_16M_SHIFT)
 #define TLB_16M_WINDOW_BASE (TLB_2M_WINDOW_BASE + TLB_2M_WINDOW_COUNT * TLB_2M_WINDOW_SIZE)
+#define TLB_16M_WINDOW_MASK (TLB_16M_WINDOW_SIZE - 1)
 
 #define TLB_WINDOW_COUNT (TLB_1M_WINDOW_COUNT + TLB_2M_WINDOW_COUNT + TLB_16M_WINDOW_COUNT)
 #define WH_NOC_BITS 36
@@ -58,6 +57,12 @@
 #define RESET_UNIT_START (0x1FF30000 - BAR4_SOC_TARGET_ADDRESS)
 #define ARC_CSM_START    (0x1FE80000 - BAR4_SOC_TARGET_ADDRESS)
 #define TLB_REGS_START   (0x1FC00000 - BAR4_SOC_TARGET_ADDRESS)
+
+// kernel TLB is the last 16MB TLB
+#define KERNEL_TLB_INDEX (TLB_WINDOW_COUNT - 1)
+#define KERNEL_TLB_START (0x1E000000 - BAR4_SOC_TARGET_ADDRESS)
+
+#define PCIE_DBI_ADDR 0x800000000
 
 #define WRITE_IATU_REG(wh_dev, direction, region, reg, value) \
 	write_iatu_reg(wh_dev, IATU_##direction, region, \
@@ -302,11 +307,10 @@ static int construct_tlb_config(const struct tenstorrent_noc_tlb_config *config,
 	return 0;
 }
 
-static int wormhole_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
+static int wh_configure_tlb(struct wormhole_device *wh, int tlb,
 				  struct tenstorrent_noc_tlb_config *config)
 {
-	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
-	u8 __iomem *tlb_regs = wh_dev->bar4_mapping + TLB_REGS_START;
+	u8 __iomem *tlb_regs = wh->bar4_mapping + TLB_REGS_START;
 	u64 regs = 0;
 	u32 offset;
 
@@ -321,6 +325,13 @@ static int wormhole_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
 	iowrite32((regs >> 32) & 0xFFFFFFFF, tlb_regs + offset + sizeof(u32));
 
 	return 0;
+}
+
+static int wormhole_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
+				  struct tenstorrent_noc_tlb_config *config)
+{
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	return wh_configure_tlb(wh_dev, tlb, config);
 }
 
 static int wormhole_describe_tlb(struct tenstorrent_device *tt_dev, int tlb,
@@ -340,6 +351,78 @@ static int wormhole_describe_tlb(struct tenstorrent_device *tt_dev, int tlb,
 	return 0;
 }
 
+static u8 __iomem *wh_setup_kernel_tlb(struct wormhole_device *wh, u32 x, u32 y, u64 addr) {
+	struct tenstorrent_noc_tlb_config config = { 0 };
+	u64 offset = addr & TLB_16M_WINDOW_MASK;
+
+	config.addr = addr & ~TLB_16M_WINDOW_MASK;
+	config.x_end = x;
+	config.y_end = y;
+	config.ordering	= 1; // strict
+
+	wh_configure_tlb(wh, KERNEL_TLB_INDEX, &config);
+	return wh->bar4_mapping + KERNEL_TLB_START + offset;
+}
+
+static u32 noc_read32(struct wormhole_device *wh, u32 x, u32 y, u64 addr) {
+	u32 val;
+	u8 __iomem * tlb_window;
+
+	mutex_lock(&wh->kernel_tlb_mutex);
+
+	tlb_window = wh_setup_kernel_tlb(wh, x, y, addr);
+	val = ioread32(tlb_window);
+
+	mutex_unlock(&wh->kernel_tlb_mutex);
+
+	return val;
+}
+
+static void noc_write32(struct wormhole_device *wh, u32 x, u32 y, u64 addr, u32 data) {
+	u8 __iomem * tlb_window;
+
+	mutex_lock(&wh->kernel_tlb_mutex);
+
+	tlb_window = wh_setup_kernel_tlb(wh, x, y, addr);
+	iowrite32(data, tlb_window);
+
+	mutex_unlock(&wh->kernel_tlb_mutex);
+}
+
+static void open_dbi(struct wormhole_device *wh) {
+	iowrite32(0x00200000, reset_unit_regs(wh) + SCRATCH_REG(6));
+	iowrite32(0x00200000, reset_unit_regs(wh) + SCRATCH_REG(7));
+}
+
+static void close_dbi(struct wormhole_device *wh) {
+	iowrite32(0x0, reset_unit_regs(wh) + SCRATCH_REG(6));
+	iowrite32(0x0, reset_unit_regs(wh) + SCRATCH_REG(7));
+}
+
+static void wormhole_save_reset_state(struct tenstorrent_device *tt_dev) {
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	u32 x = 0;
+	u32 y = 3;
+
+	open_dbi(wh);
+	wh->saved_mps = (noc_read32(wh, x, y, PCIE_DBI_ADDR + DEVICE_CONTROL_DEVICE_STATUS) >> MPS_OFFSET) & MPS_MASK;
+	close_dbi(wh);
+}
+
+static void wormhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	u32 x = 0;
+	u32 y = 3;
+	u32 device_control;
+
+	open_dbi(wh);
+	device_control = noc_read32(wh, x, y, PCIE_DBI_ADDR + DEVICE_CONTROL_DEVICE_STATUS);
+	device_control &= ~MPS_MASK << MPS_OFFSET;
+	device_control |= wh->saved_mps << MPS_OFFSET;
+	noc_write32(wh, x, y, PCIE_DBI_ADDR + DEVICE_CONTROL_DEVICE_STATUS, device_control);
+	close_dbi(wh);
+}
+
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
@@ -355,4 +438,6 @@ struct tenstorrent_device_class wormhole_class = {
 	.reboot = wormhole_cleanup_hardware,
 	.configure_tlb = wormhole_configure_tlb,
 	.describe_tlb = wormhole_describe_tlb,
+	.save_reset_state = wormhole_save_reset_state,
+	.restore_reset_state = wormhole_restore_reset_state,
 };

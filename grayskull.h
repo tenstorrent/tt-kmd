@@ -18,6 +18,8 @@ struct grayskull_device {
 	struct tt_hwmon_context *hwmon_context;
 };
 
+#define SCRATCH_REG(n) (0x60 + (n)*sizeof(u32))	/* byte offset */
+
 #define tt_dev_to_gs_dev(ttdev) \
 	container_of((tt_dev), struct grayskull_device, tt)
 

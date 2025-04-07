@@ -13,9 +13,12 @@ struct blackhole_device {
 	struct mutex kernel_tlb_mutex;	// Guards access to kernel_tlb
 	u8 __iomem *tlb_regs;   // All TLB registers
 	u8 __iomem *kernel_tlb; // Topmost 2M window, reserved for kernel
+	u8 __iomem *noc2axi_cfg;
 
 	u64 *hwmon_attr_addrs;
 	u64 *sysfs_attr_addrs;
+
+	u8 saved_mps;
 };
 
 #define tt_dev_to_bh_dev(ttdev) \

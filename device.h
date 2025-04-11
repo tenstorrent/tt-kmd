@@ -65,6 +65,8 @@ struct tenstorrent_device_class {
 	void (*reboot)(struct tenstorrent_device *ttdev);
 	int (*configure_tlb)(struct tenstorrent_device *ttdev, int tlb, struct tenstorrent_noc_tlb_config *config);
 	int (*describe_tlb)(struct tenstorrent_device *ttdev, int tlb, struct tlb_descriptor *tlb_desc);
+	void (*save_reset_state)(struct tenstorrent_device *ttdev);
+	void (*restore_reset_state)(struct tenstorrent_device *ttdev);
 };
 
 void tenstorrent_device_put(struct tenstorrent_device *);

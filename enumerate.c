@@ -99,6 +99,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 			device_class->post_hardware_init(tt_dev);
 
 	pci_save_state(dev);
+	device_class->save_reset_state(tt_dev);
 
 	tenstorrent_register_device(tt_dev);
 

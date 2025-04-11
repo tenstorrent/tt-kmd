@@ -870,6 +870,15 @@ static void grayskull_last_release_handler(struct tenstorrent_device *tt_dev) {
 						0, 0, 10000, NULL);
 }
 
+
+static void grayskull_save_reset_state(struct tenstorrent_device *tt_dev) {
+	// no operation
+}
+
+static void grayskull_restore_reset_state(struct tenstorrent_device *tt_dev) {
+	// no operation
+}
+
 struct tenstorrent_device_class grayskull_class = {
 	.name = "Grayskull",
 	.instance_size = sizeof(struct grayskull_device),
@@ -880,4 +889,6 @@ struct tenstorrent_device_class grayskull_class = {
 	.cleanup_hardware = grayskull_cleanup_hardware,
 	.cleanup_device = grayskull_cleanup,
 	.last_release_cb = grayskull_last_release_handler,
+	.save_reset_state = grayskull_save_reset_state,
+	.restore_reset_state = grayskull_restore_reset_state,
 };

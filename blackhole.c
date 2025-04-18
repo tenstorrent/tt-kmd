@@ -642,6 +642,11 @@ static int blackhole_describe_tlb(struct tenstorrent_device *tt_dev, int tlb,
 	return 0;
 }
 
+static int blackhole_program_outbound_iatu(struct tenstorrent_device *ttdev,
+					   int region, u64 base, u64 limit, u64 target) {
+	return -EINVAL; // TODO
+}
+
 struct tenstorrent_device_class blackhole_class = {
 	.name = "Blackhole",
 	.instance_size = sizeof(struct blackhole_device),
@@ -658,4 +663,5 @@ struct tenstorrent_device_class blackhole_class = {
 	.describe_tlb = blackhole_describe_tlb,
 	.save_reset_state = blackhole_save_reset_state,
 	.restore_reset_state = blackhole_restore_reset_state,
+	.program_outbound_iatu = blackhole_program_outbound_iatu,
 };

@@ -22,6 +22,86 @@
 
 #define BAR0_SIZE (1UL << 29)
 
+static bool check_iatu_overlap(const struct iatu_outbound_region *regions, u64 start, u64 limit)
+{
+	int i;
+
+	if (limit == 0 || limit < start)
+		return false;
+
+	for (i = 0; i < TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS; ++i) {
+		const struct iatu_outbound_region *region = &regions[i];
+		u64 existing_base = region->base;
+		u64 existing_limit = region->limit;
+
+		if (!region->in_use)
+			continue;
+
+		if (existing_limit < existing_base) {
+			pr_warn_once("iATU region %d has invalid limit %llX\n", i, region->limit);
+			continue;
+		}
+
+		// Overlap check logic.
+		// Ranges [A_start, A_end] and [B_start, B_end] overlap if:
+		// - A_start <= B_end &&
+		// - A_end >= B_start
+		if (start <= existing_limit && limit >= existing_base) {
+			pr_info("iATU region %d overlaps with %llX-%llX\n", i, start, limit);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static int allocate_outbound_iatu(struct chardev_private *priv, u64 base, u64 limit, u64 target)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	int region = -1;
+	int i;
+	int ret;
+
+	mutex_lock(&tt_dev->iatu_mutex);
+
+	// Check for overlaps.
+	if (check_iatu_overlap(tt_dev->outbound_iatus, base, limit)) {
+		ret = -EADDRINUSE;
+		goto out_unlock;
+	}
+
+	// Find a free region.
+	for (i = 0; i < TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS; ++i) {
+		if (!tt_dev->outbound_iatus[i].in_use) {
+			region = i;
+			break;
+		}
+	}
+
+	if (region < 0) {
+		ret = -ENOSPC;
+		goto out_unlock;
+	}
+
+	pr_info("Allocating iATU region %d: %llX-%llX -> %llX\n", region, base, limit, target);
+
+	// Program the hardware.
+	ret = tt_dev->dev_class->program_outbound_iatu(tt_dev, region, base, limit, target);
+	if (ret)
+		goto out_unlock;
+
+	// Mark region as in use.
+	tt_dev->outbound_iatus[region].in_use = true;
+	tt_dev->outbound_iatus[region].base = base;
+	tt_dev->outbound_iatus[region].limit = limit;
+	tt_dev->outbound_iatus[region].target = target;
+	tt_dev->outbound_iatus[region].priv = priv;
+
+out_unlock:
+	mutex_unlock(&tt_dev->iatu_mutex);
+	return ret;
+}
+
 // In Linux 5.0, dma_alloc_coherent always zeroes memory and dma_zalloc_coherent
 // was removed.
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
@@ -404,8 +484,10 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	if (!is_pin_pages_size_safe(in.size))
 		return -EINVAL;
 
+#if 0
 	if (in.flags != 0 && in.flags != TENSTORRENT_PIN_PAGES_CONTIGUOUS)
 		return -EINVAL;
+#endif
 
 	pinning = kmalloc(sizeof(*pinning), GFP_KERNEL);
 	if (!pinning)
@@ -769,6 +851,16 @@ long ioctl_configure_tlb(struct chardev_private *priv,
 	return tenstorrent_device_configure_tlb(tt_dev, in.id, &in.config);
 }
 
+long ioctl_configure_atu(struct chardev_private *priv,
+			 struct tenstorrent_configure_atu __user *arg) {
+	struct tenstorrent_configure_atu_in in = {0};
+
+	if (copy_from_user(&in, &arg->in, sizeof(in)))
+		return -EFAULT;
+
+	return allocate_outbound_iatu(priv, in.base, in.limit, in.target);
+}
+
 // Is the mapping target range contained entirely with start - start+len?
 // start and len must be page-aligned.
 static bool vma_target_range(struct vm_area_struct *vma, u64 start, resource_size_t len)
@@ -1011,6 +1103,25 @@ void tenstorrent_memory_cleanup(struct chardev_private *priv)
 	struct peer_resource_mapping *peer_mapping, *tmp_peer_mapping;
 
 	mutex_lock(&priv->mutex);
+
+	mutex_lock(&tt_dev->iatu_mutex);
+	for (i = 0; i < TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS; ++i) {
+		struct iatu_outbound_region *region = &tt_dev->outbound_iatus[i];
+
+		if (region->priv == priv && region->in_use) {
+			// Disable the region in hardware.
+			pr_info("Deallocating iATU region %d\n", i);
+			tt_dev->dev_class->program_outbound_iatu(tt_dev, i, 0, 0, 0);
+
+			// Mark the region as free.
+			region->in_use = false;
+			region->base = 0;
+			region->limit = 0;
+			region->target = 0;
+			region->priv = NULL;
+		}
+	}
+	mutex_unlock(&tt_dev->iatu_mutex);
 
 	hash_for_each_safe(priv->dmabufs, i, tmp_dmabuf, dmabuf, hash_chain) {
 		dma_free_coherent(&tt_dev->pdev->dev, dmabuf->size, dmabuf->ptr, dmabuf->phys);

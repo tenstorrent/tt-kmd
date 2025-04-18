@@ -34,8 +34,19 @@ long ioctl_free_tlb(struct chardev_private *priv,
 			struct tenstorrent_free_tlb __user *arg);
 long ioctl_configure_tlb(struct chardev_private *priv,
 			struct tenstorrent_configure_tlb __user *arg);
+long ioctl_configure_atu(struct chardev_private *priv,
+			 struct tenstorrent_configure_atu __user *arg);
 
 int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma);
 void tenstorrent_memory_cleanup(struct chardev_private *priv);
+
+#define TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS 16
+struct iatu_outbound_region {
+	struct chardev_private *priv;
+	bool in_use;
+	u64 base;
+	u64 target;
+	u64 limit;
+};
 
 #endif

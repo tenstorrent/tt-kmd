@@ -870,6 +870,15 @@ static void grayskull_last_release_handler(struct tenstorrent_device *tt_dev) {
 						0, 0, 10000, NULL);
 }
 
+static int graysukull_configure_tlb(struct tenstorrent_device *ttdev, int tlb,
+				struct tenstorrent_noc_tlb_config *config) {
+	return -EINVAL;	// Unsupported
+}
+
+static int grayskull_describe_tlb(struct tenstorrent_device *ttdev, int tlb,
+				struct tlb_descriptor *tlb_desc) {
+	return -EINVAL;	// Unsupported
+}
 
 static void grayskull_save_reset_state(struct tenstorrent_device *tt_dev) {
 	// no operation
@@ -877,6 +886,11 @@ static void grayskull_save_reset_state(struct tenstorrent_device *tt_dev) {
 
 static void grayskull_restore_reset_state(struct tenstorrent_device *tt_dev) {
 	// no operation
+}
+
+static int grayskull_program_outbound_iatu(struct tenstorrent_device *ttdev,
+					   int region, u64 base, u64 limit, u64 target) {
+	return -EINVAL; // Unsupported
 }
 
 struct tenstorrent_device_class grayskull_class = {
@@ -889,6 +903,9 @@ struct tenstorrent_device_class grayskull_class = {
 	.cleanup_hardware = grayskull_cleanup_hardware,
 	.cleanup_device = grayskull_cleanup,
 	.last_release_cb = grayskull_last_release_handler,
+	.configure_tlb = graysukull_configure_tlb,
+	.describe_tlb = grayskull_describe_tlb,
 	.save_reset_state = grayskull_save_reset_state,
 	.restore_reset_state = grayskull_restore_reset_state,
+	.program_outbound_iatu = grayskull_program_outbound_iatu,
 };

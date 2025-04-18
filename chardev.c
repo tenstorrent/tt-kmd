@@ -338,6 +338,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			ret = ioctl_configure_tlb(priv, (struct tenstorrent_configure_tlb __user *)arg);
 			break;
 
+		case TENSTORRENT_IOCTL_CONFIGURE_ATU:
+			ret = ioctl_configure_atu(priv, (struct tenstorrent_configure_atu __user *)arg);
+			break;
+
 		default:
 			ret = -EINVAL;
 			break;

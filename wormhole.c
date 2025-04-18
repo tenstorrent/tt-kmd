@@ -430,6 +430,42 @@ static void wormhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
 	close_dbi(wh);
 }
 
+#define IATU_OUTBOUND_REGIONS 16
+#define IATU_REGION_CTRL_1_OUTBOUND 0x00
+#define IATU_REGION_CTRL_2_OUTBOUND 0x04
+#define IATU_LOWER_BASE_ADDR_OUTBOUND 0x08
+#define IATU_UPPER_BASE_ADDR_OUTBOUND 0x0C
+#define IATU_LIMIT_ADDR_OUTBOUND 0x10
+#define IATU_LOWER_TARGET_ADDR_OUTBOUND 0x14
+#define IATU_UPPER_TARGET_ADDR_OUTBOUND 0x18
+static int wormhole_program_outbound_iatu(struct tenstorrent_device *tt_dev,
+					   int region, u64 base, u64 limit, u64 target) {
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	void __iomem *registers = wh->bar2_mapping + IATU_BASE + (0x200 * region);
+	uint32_t ctrl1 = 0x0;	// MEM type
+	uint32_t crtl2 = limit == 0 ? 0 : 0x88280000; // Enable, DMA bypass, TLP header bypass, FUNC bypass.
+	uint32_t lower_base = base & 0xFFFFFFFF;
+	uint32_t upper_base = (base >> 32) & 0xFFFFFFFF;
+	uint32_t lower_target = target & 0xFFFFFFFF;
+	uint32_t upper_target = (target >> 32) & 0xFFFFFFFF;
+
+	if (region < 0 || region >= IATU_OUTBOUND_REGIONS)
+		return -EINVAL;
+
+	if (limit > 0xFFFFFFFF)
+		return -EINVAL;
+
+	iowrite32(ctrl1, registers + IATU_REGION_CTRL_1_OUTBOUND);
+	iowrite32(crtl2, registers + IATU_REGION_CTRL_2_OUTBOUND);
+	iowrite32(lower_base, registers + IATU_LOWER_BASE_ADDR_OUTBOUND);
+	iowrite32(upper_base, registers + IATU_UPPER_BASE_ADDR_OUTBOUND);
+	iowrite32(lower_target, registers + IATU_LOWER_TARGET_ADDR_OUTBOUND);
+	iowrite32(upper_target, registers + IATU_UPPER_TARGET_ADDR_OUTBOUND);
+	iowrite32(limit, registers + IATU_LIMIT_ADDR_OUTBOUND);
+
+	return 0;
+}
+
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
@@ -447,4 +483,5 @@ struct tenstorrent_device_class wormhole_class = {
 	.describe_tlb = wormhole_describe_tlb,
 	.save_reset_state = wormhole_save_reset_state,
 	.restore_reset_state = wormhole_restore_reset_state,
+	.program_outbound_iatu = wormhole_program_outbound_iatu,
 };

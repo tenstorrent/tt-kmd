@@ -430,10 +430,18 @@ static void wormhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
 	close_dbi(wh);
 }
 
+static int wormhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u32 region, u64 base, u64 limit,
+					   u64 target)
+{
+	return -EINVAL;
+}
+
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
 	.dma_address_bits = 32,
+	.noc_dma_limit = (0xFFFE0000 - 1),
+	.noc_pcie_offset = 0x800000000ULL,
 	.tlb_kinds = NUM_TLB_KINDS,
 	.tlb_counts = { TLB_1M_WINDOW_COUNT, TLB_2M_WINDOW_COUNT, TLB_16M_WINDOW_COUNT },
 	.tlb_sizes = { TLB_1M_WINDOW_SIZE, TLB_2M_WINDOW_SIZE, TLB_16M_WINDOW_SIZE },
@@ -447,4 +455,5 @@ struct tenstorrent_device_class wormhole_class = {
 	.describe_tlb = wormhole_describe_tlb,
 	.save_reset_state = wormhole_save_reset_state,
 	.restore_reset_state = wormhole_restore_reset_state,
+	.configure_outbound_atu = wormhole_configure_outbound_atu,
 };

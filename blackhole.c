@@ -642,10 +642,18 @@ static int blackhole_describe_tlb(struct tenstorrent_device *tt_dev, int tlb,
 	return 0;
 }
 
+static int blackhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u32 region, u64 base, u64 limit,
+					    u64 target)
+{
+	return -EINVAL;
+}
+
 struct tenstorrent_device_class blackhole_class = {
 	.name = "Blackhole",
 	.instance_size = sizeof(struct blackhole_device),
 	.dma_address_bits = 58,
+	.noc_dma_limit = (1ULL << 58) - 1,
+	.noc_pcie_offset = (4ULL << 58),
 	.tlb_kinds = 2,
 	.tlb_counts = { TLB_2M_WINDOW_COUNT, TLB_4G_WINDOW_COUNT },
 	.tlb_sizes = { TLB_2M_WINDOW_SIZE, TLB_4G_WINDOW_SIZE },
@@ -658,4 +666,5 @@ struct tenstorrent_device_class blackhole_class = {
 	.describe_tlb = blackhole_describe_tlb,
 	.save_reset_state = blackhole_save_reset_state,
 	.restore_reset_state = blackhole_restore_reset_state,
+	.configure_outbound_atu = blackhole_configure_outbound_atu,
 };

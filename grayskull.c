@@ -879,10 +879,18 @@ static void grayskull_restore_reset_state(struct tenstorrent_device *tt_dev) {
 	// no operation
 }
 
+static int grayskull_configure_outbound_atu(struct tenstorrent_device *tt_dev, u32 region, u64 base, u64 limit,
+					    u64 target)
+{
+	return -EINVAL;
+}
+
 struct tenstorrent_device_class grayskull_class = {
 	.name = "Grayskull",
 	.instance_size = sizeof(struct grayskull_device),
 	.dma_address_bits = 32,
+	.noc_dma_limit = (0xFFFE0000 - 1),
+	.noc_pcie_offset = 0x00000000,
 	.init_device = grayskull_init,
 	.init_hardware = grayskull_init_hardware,
 	.post_hardware_init = grayskull_post_hardware_init,
@@ -891,4 +899,5 @@ struct tenstorrent_device_class grayskull_class = {
 	.last_release_cb = grayskull_last_release_handler,
 	.save_reset_state = grayskull_save_reset_state,
 	.restore_reset_state = grayskull_restore_reset_state,
+	.configure_outbound_atu = grayskull_configure_outbound_atu,
 };

@@ -52,6 +52,8 @@ struct tenstorrent_device_class {
 	const char *name;
 	u32 instance_size;
 	u32 dma_address_bits;
+	u64 noc_dma_limit;
+	u64 noc_pcie_offset;
 	u32 tlb_kinds;
 	u32 tlb_counts[MAX_TLB_KINDS];
 	u64 tlb_sizes[MAX_TLB_KINDS];
@@ -67,6 +69,7 @@ struct tenstorrent_device_class {
 	int (*describe_tlb)(struct tenstorrent_device *ttdev, int tlb, struct tlb_descriptor *tlb_desc);
 	void (*save_reset_state)(struct tenstorrent_device *ttdev);
 	void (*restore_reset_state)(struct tenstorrent_device *ttdev);
+	int (*configure_outbound_atu)(struct tenstorrent_device *ttdev, u32 region, u64 base, u64 limit, u64 target);
 };
 
 void tenstorrent_device_put(struct tenstorrent_device *);

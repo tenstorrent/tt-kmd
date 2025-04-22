@@ -225,8 +225,10 @@ struct tenstorrent_allocate_tlb_in {
 
 struct tenstorrent_allocate_tlb_out {
 	__u32 id;
+	__u32 reserved0;
 	__u64 mmap_offset_uc;
 	__u64 mmap_offset_wc;
+	__u64 reserved1;
 };
 
 struct tenstorrent_allocate_tlb {
@@ -248,15 +250,17 @@ struct tenstorrent_free_tlb {
 
 struct tenstorrent_noc_tlb_config {
 	__u64 addr;
-	__u32 x_end;
-	__u32 y_end;
-	__u32 x_start;
-	__u32 y_start;
+	__u16 x_end;
+	__u16 y_end;
+	__u16 x_start;
+	__u16 y_start;
 	__u8 noc;
 	__u8 mcast;
 	__u8 ordering;
 	__u8 linked;
 	__u8 static_vc;
+	__u8 reserved0[3];
+	__u32 reserved1[2];
 };
 
 struct tenstorrent_configure_tlb_in {
@@ -265,6 +269,7 @@ struct tenstorrent_configure_tlb_in {
 };
 
 struct tenstorrent_configure_tlb_out {
+	__u64 reserved;
 };
 
 struct tenstorrent_configure_tlb {

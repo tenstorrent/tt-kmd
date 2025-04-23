@@ -17,6 +17,7 @@ struct tt_hwmon_attr {
 	u32 shift;
 	u32 mask;
 	u32 multiplier;
+	u32 divisor;
 };
 
 struct tt_hwmon_label {

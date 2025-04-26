@@ -14,6 +14,7 @@ struct blackhole_device {
 	u8 __iomem *tlb_regs;   // All TLB registers
 	u8 __iomem *kernel_tlb; // Topmost 2M window, reserved for kernel
 	u8 __iomem *noc2axi_cfg;
+	u8 __iomem *bar2_mapping;
 
 	u64 *hwmon_attr_addrs;
 	u64 *sysfs_attr_addrs;

@@ -4,6 +4,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/bitfield.h>
 #include <linux/types.h>
+#include <linux/kernel.h>
 
 #include "blackhole.h"
 #include "pcie.h"
@@ -56,6 +57,35 @@
 #define TELEMETRY_ARCCLK 16
 #define TELEMETRY_BM_APP_FW_VERSION 26
 #define TELEMETRY_FLASH_BUNDLE_VERSION 28
+
+#define IATU_BASE 0x1000	// Relative to the start of BAR2
+#define IATU_OUTBOUND 0
+#define IATU_OUTBOUND_REGIONS 16
+#define IATU_REGION_STRIDE 0x100
+#define IATU_REGION_CTRL_1_OUTBOUND 0x00
+#define IATU_REGION_CTRL_2_OUTBOUND 0x04
+#define IATU_LOWER_BASE_ADDR_OUTBOUND 0x08
+#define IATU_UPPER_BASE_ADDR_OUTBOUND 0x0C
+#define IATU_LOWER_LIMIT_ADDR_OUTBOUND 0x10
+#define IATU_LOWER_TARGET_ADDR_OUTBOUND 0x14
+#define IATU_UPPER_TARGET_ADDR_OUTBOUND 0x18
+#define IATU_REGION_CTRL_3_OUTBOUND 0x1C
+#define IATU_UPPER_LIMIT_ADDR_OUTBOUND 0x20
+
+// IATU_REGION_CTRL_2_OUTBOUND fields
+#define REGION_EN (1 << 31)
+
+#define WRITE_IATU_REG(wh_dev, direction, region, reg, value) \
+	write_iatu_reg(wh_dev, IATU_##direction, region, \
+		       IATU_##reg##_##direction, (value))
+
+static void write_iatu_reg(struct blackhole_device *bh_dev, unsigned direction,
+			   unsigned region, unsigned reg, u32 value) {
+	u32 offset = IATU_BASE + (2 * region + direction) * IATU_REGION_STRIDE
+		   + reg;
+
+	iowrite32(value, bh_dev->bar2_mapping + offset);
+}
 
 struct TLB_2M_REG {
 	union {
@@ -562,6 +592,7 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev) {
 	bh->tlb_regs = pci_iomap_range(bh->tt.pdev, 0, TLB_REGS_START, TLB_REGS_LEN);
 	bh->kernel_tlb = pci_iomap_range(bh->tt.pdev, 0, KERNEL_TLB_START, KERNEL_TLB_LEN);
 	bh->noc2axi_cfg = pci_iomap_range(bh->tt.pdev, 0, NOC2AXI_CFG_START, NOC2AXI_CFG_LEN);
+	bh->bar2_mapping = pci_iomap(bh->tt.pdev, 2, 0);
 
 	if (!bh->tlb_regs || !bh->kernel_tlb || !bh->noc2axi_cfg) {
 		if (bh->tlb_regs)
@@ -572,6 +603,10 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev) {
 
 		if (bh->noc2axi_cfg)
 			pci_iounmap(bh->tt.pdev, bh->noc2axi_cfg);
+
+		if (bh->bar2_mapping)
+			pci_iounmap(bh->tt.pdev, bh->bar2_mapping);
+
 		return false;
 	}
 
@@ -605,6 +640,8 @@ static void blackhole_cleanup(struct tenstorrent_device *tt_dev) {
 		pci_iounmap(tt_dev->pdev, bh->kernel_tlb);
 	if (bh->noc2axi_cfg)
 		pci_iounmap(tt_dev->pdev, bh->noc2axi_cfg);
+	if (bh->bar2_mapping)
+		pci_iounmap(tt_dev->pdev, bh->bar2_mapping);
 
 	kfree(bh->hwmon_attr_addrs);
 	kfree(bh->sysfs_attr_addrs);
@@ -645,7 +682,36 @@ static int blackhole_describe_tlb(struct tenstorrent_device *tt_dev, int tlb,
 static int blackhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u32 region, u64 base, u64 limit,
 					    u64 target)
 {
-	return -EINVAL;
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	u64 size = limit - base + 1;
+	u32 region_ctrl_1 = 0;
+	u32 region_ctrl_2 = REGION_EN;
+	u32 region_ctrl_3 = 0;
+	u32 lower_base = lower_32_bits(base);
+	u32 upper_base = upper_32_bits(base);
+	u32 lower_target = lower_32_bits(target);
+	u32 upper_target = upper_32_bits(target);
+	u32 lower_limit = lower_32_bits(limit);
+	u32 upper_limit = upper_32_bits(limit);
+
+	// iATU has a max region size of 4G.
+	if (size > U32_MAX)
+		return -EINVAL;
+
+	if (region >= IATU_OUTBOUND_REGIONS)
+		return -EINVAL;
+
+	WRITE_IATU_REG(bh, OUTBOUND, region, LOWER_BASE_ADDR, lower_base);
+	WRITE_IATU_REG(bh, OUTBOUND, region, UPPER_BASE_ADDR, upper_base);
+	WRITE_IATU_REG(bh, OUTBOUND, region, LOWER_TARGET_ADDR, lower_target);
+	WRITE_IATU_REG(bh, OUTBOUND, region, UPPER_TARGET_ADDR, upper_target);
+	WRITE_IATU_REG(bh, OUTBOUND, region, LOWER_LIMIT_ADDR, lower_limit);
+	WRITE_IATU_REG(bh, OUTBOUND, region, UPPER_LIMIT_ADDR, upper_limit);
+	WRITE_IATU_REG(bh, OUTBOUND, region, REGION_CTRL_1, region_ctrl_1);
+	WRITE_IATU_REG(bh, OUTBOUND, region, REGION_CTRL_2, region_ctrl_2);
+	WRITE_IATU_REG(bh, OUTBOUND, region, REGION_CTRL_3, region_ctrl_3);
+
+	return 0;
 }
 
 struct tenstorrent_device_class blackhole_class = {

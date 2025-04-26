@@ -13,6 +13,7 @@
 
 #include "ioctl.h"
 #include "hwmon.h"
+#include "memory.h"
 
 struct tenstorrent_device_class;
 
@@ -43,6 +44,9 @@ struct tenstorrent_device {
 
 	DECLARE_BITMAP(tlbs, TENSTORRENT_MAX_INBOUND_TLBS);
 	atomic_t tlb_refs[TENSTORRENT_MAX_INBOUND_TLBS];	// TLB mapping refecounts
+
+	struct mutex iatu_mutex;
+	struct tenstorrent_outbound_iatu_region outbound_iatus[TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS];
 };
 
 struct tlb_descriptor;

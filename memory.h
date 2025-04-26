@@ -38,4 +38,12 @@ long ioctl_configure_tlb(struct chardev_private *priv,
 int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma);
 void tenstorrent_memory_cleanup(struct chardev_private *priv);
 
+#define TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS 16
+struct tenstorrent_outbound_iatu_region {
+	struct chardev_private *priv;	// Owner of this region
+	u64 base;
+	u64 limit;
+	u64 target;
+};
+
 #endif

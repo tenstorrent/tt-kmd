@@ -19,7 +19,7 @@ The driver registers device files named `/dev/tenstorrent/%d`, one for each enum
     * `dnf install epel-release && dnf install dkms` (Enterprise Linux based)
 ```
 sudo dkms add .
-sudo dkms install tenstorrent/1.33
+sudo dkms install tenstorrent/1.34
 sudo modprobe tenstorrent
 ```
 (or reboot, driver will auto-load next boot)
@@ -27,5 +27,5 @@ sudo modprobe tenstorrent
 ### To uninstall:
 ```
 sudo modprobe -r tenstorrent
-sudo dkms remove tenstorrent/1.33 --all
+sudo dkms remove tenstorrent/1.34 --all
 ```

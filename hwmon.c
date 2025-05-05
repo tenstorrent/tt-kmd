@@ -39,6 +39,7 @@ static int tt_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 a
 			value >>= attribute->shift;
 			value &= attribute->mask;
 			value *= attribute->multiplier;
+			value /= attribute->divisor;
 			*val = value;
 			return 0;
 		}

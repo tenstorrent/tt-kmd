@@ -555,7 +555,7 @@ static int setup_noc_dma(struct chardev_private *priv, int flags, size_t size, u
 
 	limit = base + size - 1;
 	iatu_region = configure_outbound_iatu(priv, base, limit, target);
-	*noc_address = base;
+	*noc_address = tt_dev->dev_class->noc_pcie_offset + base;
 
 	mutex_unlock(&tt_dev->iatu_mutex);
 	return iatu_region;

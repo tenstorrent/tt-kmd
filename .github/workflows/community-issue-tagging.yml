@@ -8,5 +8,5 @@ on:
 
 jobs:
   call-central-workflow:
-    uses: tenstorrent/tt-github-actions/community/on-community-issue.yml@main
+    uses: tenstorrent/tt-github-actions/.github/workflows/on-community-issue.yml@main
 

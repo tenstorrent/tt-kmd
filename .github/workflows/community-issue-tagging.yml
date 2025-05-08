@@ -1,4 +1,4 @@
-name: "Community Issue / PR Labeling Workflow"
+name: "Community Issue / PR Labeling Workflow""
 
 on:
   issues:

@@ -4,6 +4,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/bitfield.h>
 #include <linux/types.h>
+#include <linux/kernel.h>
 
 #include "wormhole.h"
 #include "grayskull.h"
@@ -39,17 +40,30 @@
 #define IATU_BASE 0x1200	// Relative to the start of BAR2
 #define IATU_OUTBOUND 0
 #define IATU_INBOUND 1
+#define IATU_OUTBOUND_REGIONS 16
 #define IATU_REGION_STRIDE 0x100
 #define IATU_REGION_CTRL_1_INBOUND	0x00
 #define IATU_REGION_CTRL_2_INBOUND	0x04
 #define IATU_LOWER_TARGET_ADDR_INBOUND	0x14
 #define IATU_UPPER_TARGET_ADDR_INBOUND	0x18
+#define IATU_REGION_CTRL_1_OUTBOUND 0x00
+#define IATU_REGION_CTRL_2_OUTBOUND 0x04
+#define IATU_LOWER_BASE_ADDR_OUTBOUND 0x08
+#define IATU_UPPER_BASE_ADDR_OUTBOUND 0x0C
+#define IATU_LIMIT_ADDR_OUTBOUND 0x10
+#define IATU_LOWER_TARGET_ADDR_OUTBOUND 0x14
+#define IATU_UPPER_TARGET_ADDR_OUTBOUND 0x18
 
 // IATU_REGION_CTRL_2_INBOUND fields
 #define REGION_EN (1 << 31)
 #define BAR_MATCH_MODE (1 << 30)
 #define FUZZY_TYPE_MATCH (1 << 27) // MRd, MWr, MRdLk are considered the same.
 #define BAR_NUM(n) ((n) << 8)
+
+// IATU_REGION_CTRL_2_OUTBOUND fields
+#define DMA_BYPASS (1 << 27)
+#define TLP_BYPASS (1 << 21)
+#define FUNC_BYPASS (1 << 19)
 
 // BAR4 is 32MB and will be mapped to the system registers from 0x1E000000
 // to 0x20000000.
@@ -430,10 +444,40 @@ static void wormhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
 	close_dbi(wh);
 }
 
+static int wormhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u32 region, u64 base, u64 limit,
+					   u64 target)
+{
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	u32 region_ctrl_1 = 0x0; // MEM type
+	u32 region_ctrl_2 = (limit == 0) ? 0 : (REGION_EN | DMA_BYPASS | TLP_BYPASS | FUNC_BYPASS);
+	u32 lower_base = lower_32_bits(base);
+	u32 upper_base = upper_32_bits(base);
+	u32 lower_target = lower_32_bits(target);
+	u32 upper_target = upper_32_bits(target);
+
+	if (region >= IATU_OUTBOUND_REGIONS)
+		return -EINVAL;
+
+	if (limit > U32_MAX)
+		return -EINVAL;
+
+	WRITE_IATU_REG(wh, OUTBOUND, region, LOWER_BASE_ADDR, lower_base);
+	WRITE_IATU_REG(wh, OUTBOUND, region, UPPER_BASE_ADDR, upper_base);
+	WRITE_IATU_REG(wh, OUTBOUND, region, LOWER_TARGET_ADDR, lower_target);
+	WRITE_IATU_REG(wh, OUTBOUND, region, UPPER_TARGET_ADDR, upper_target);
+	WRITE_IATU_REG(wh, OUTBOUND, region, LIMIT_ADDR, limit);
+	WRITE_IATU_REG(wh, OUTBOUND, region, REGION_CTRL_1, region_ctrl_1);
+	WRITE_IATU_REG(wh, OUTBOUND, region, REGION_CTRL_2, region_ctrl_2);
+
+	return 0;
+}
+
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
 	.dma_address_bits = 32,
+	.noc_dma_limit = (0xFFFE0000 - 1),
+	.noc_pcie_offset = 0x800000000ULL,
 	.tlb_kinds = NUM_TLB_KINDS,
 	.tlb_counts = { TLB_1M_WINDOW_COUNT, TLB_2M_WINDOW_COUNT, TLB_16M_WINDOW_COUNT },
 	.tlb_sizes = { TLB_1M_WINDOW_SIZE, TLB_2M_WINDOW_SIZE, TLB_16M_WINDOW_SIZE },
@@ -447,4 +491,5 @@ struct tenstorrent_device_class wormhole_class = {
 	.describe_tlb = wormhole_describe_tlb,
 	.save_reset_state = wormhole_save_reset_state,
 	.restore_reset_state = wormhole_restore_reset_state,
+	.configure_outbound_atu = wormhole_configure_outbound_atu,
 };

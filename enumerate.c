@@ -79,6 +79,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	tt_dev->ordinal = ordinal;
 
 	mutex_init(&tt_dev->chardev_mutex);
+	mutex_init(&tt_dev->iatu_mutex);
 
 	tt_dev->dma_capable = (dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(dma_address_bits ?: device_class->dma_address_bits)) == 0);
 

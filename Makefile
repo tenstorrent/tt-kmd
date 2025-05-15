@@ -7,7 +7,7 @@ tenstorrent-y := module.o chardev.o enumerate.o interrupt.o grayskull.o wormhole
 KDIR := /lib/modules/$(shell uname -r)/build
 KMAKE := $(MAKE) -C $(KDIR) M=$(CURDIR)
 
-.PHONY: all modules modules_install clean help qemu-build archive
+.PHONY: all modules modules_install clean help qemu-build archive dkms
 
 all: modules
 
@@ -22,6 +22,11 @@ clean:
 
 help:
 	+$(KMAKE) help
+
+dkms:
+	sudo dkms add .
+	sudo dkms install tenstorrent/1.34
+	sudo modprobe tenstorrent
 
 # Helper for running the driver tests in a VM.
 # Supposed to be paired with https://github.com/TTDRosen/qemu-utils

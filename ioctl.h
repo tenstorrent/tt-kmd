@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-only WITH Linux-syscall-note
 
 #ifndef TTDRIVER_IOCTL_H_INCLUDED
 #define TTDRIVER_IOCTL_H_INCLUDED

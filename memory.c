@@ -318,24 +318,31 @@ struct pinned_page_range {
 	int outbound_iatu_region;
 };
 
+static void teardown_outbound_iatu(struct chardev_private *priv, int iatu_region)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_outbound_iatu_region *region;
+
+	if (iatu_region < 0)
+		return;
+
+	mutex_lock(&tt_dev->iatu_mutex);
+
+	region = &priv->device->outbound_iatus[iatu_region];
+	tt_dev->dev_class->configure_outbound_atu(tt_dev, iatu_region, 0, 0, 0);
+
+	region->priv = NULL;
+	region->base = 0;
+	region->limit = 0;
+	region->target = 0;
+
+	mutex_unlock(&tt_dev->iatu_mutex);
+}
+
 static void unpin_pinned_page_range(struct chardev_private *priv,
 	struct pinned_page_range *pinning)
 {
-	if (pinning->outbound_iatu_region >= 0) {
-		struct tenstorrent_device *tt_dev = priv->device;
-		struct tenstorrent_outbound_iatu_region *region;
-		mutex_lock(&tt_dev->iatu_mutex);
-
-		region = &priv->device->outbound_iatus[pinning->outbound_iatu_region];
-		tt_dev->dev_class->configure_outbound_atu(tt_dev, pinning->outbound_iatu_region, 0, 0, 0);
-
-		region->priv = NULL;
-		region->base = 0;
-		region->limit = 0;
-		region->target = 0;
-
-		mutex_unlock(&tt_dev->iatu_mutex);
-	}
+	teardown_outbound_iatu(priv, pinning->outbound_iatu_region);
 
 	dma_unmap_sgtable(&priv->device->pdev->dev, &pinning->dma_mapping, DMA_BIDIRECTIONAL, 0);
 	free_chained_sgt(&pinning->dma_mapping);
@@ -463,6 +470,7 @@ long ioctl_allocate_dma_buf(struct chardev_private *priv,
 	void *dma_buf_kernel_ptr;
 	struct dmabuf *dmabuf;
 	long ret = 0;
+	int iatu_region = -1;
 
 	struct tenstorrent_allocate_dma_buf_in in;
 	struct tenstorrent_allocate_dma_buf_out out;
@@ -514,12 +522,14 @@ long ioctl_allocate_dma_buf(struct chardev_private *priv,
 			kfree(dmabuf);
 			goto out;
 		}
+		iatu_region = ret;
 	}
 
 	dmabuf->index = in.buf_index;
 	dmabuf->ptr = dma_buf_kernel_ptr;
 	dmabuf->phys = dma_handle;
 	dmabuf->size = in.requested_size;
+	dmabuf->outbound_iatu_region = iatu_region;
 
 	out.physical_address = (u64)dmabuf->phys;
 	out.mapping_offset = dmabuf_mapping_start(in.buf_index);
@@ -1241,7 +1251,7 @@ void tenstorrent_memory_cleanup(struct chardev_private *priv)
 
 	hash_for_each_safe(priv->dmabufs, i, tmp_dmabuf, dmabuf, hash_chain) {
 		dma_free_coherent(&tt_dev->pdev->dev, dmabuf->size, dmabuf->ptr, dmabuf->phys);
-
+		teardown_outbound_iatu(priv, dmabuf->outbound_iatu_region);
 		hash_del(&dmabuf->hash_chain);
 		kfree(dmabuf);
 	}

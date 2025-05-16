@@ -154,6 +154,36 @@ static int configure_outbound_iatu(struct chardev_private *priv, u64 base, u64 l
 	return region;
 }
 
+// Return the iATU region number or a negative error code.
+static int setup_noc_dma(struct chardev_private *priv, int flags, size_t size, u64 target, u64 *noc_address)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	u64 max_addr = tt_dev->dev_class->noc_dma_limit;
+	u64 base;
+	u64 limit;
+	int iatu_region;
+
+	if (size == 0)
+		return -EINVAL;
+
+	mutex_lock(&tt_dev->iatu_mutex);
+	if (flags & TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN)
+		base = find_iatu_region_top_down(tt_dev->outbound_iatus, max_addr, size);
+	else
+		base = find_iatu_region_bottom_up(tt_dev->outbound_iatus, max_addr, size);
+
+	if (base == U64_MAX) {
+		mutex_unlock(&tt_dev->iatu_mutex);
+		return -ENOMEM;
+	}
+
+	limit = base + size - 1;
+	iatu_region = configure_outbound_iatu(priv, base, limit, target);
+	*noc_address = tt_dev->dev_class->noc_pcie_offset + base;
+
+	mutex_unlock(&tt_dev->iatu_mutex);
+	return iatu_region;
+}
 
 // In Linux 5.0, dma_alloc_coherent always zeroes memory and dma_zalloc_coherent
 // was removed.
@@ -528,37 +558,6 @@ static bool is_pin_pages_size_safe(u64 size)
 #else
 	return true;
 #endif
-}
-
-// Return the iATU region number or a negative error code.
-static int setup_noc_dma(struct chardev_private *priv, int flags, size_t size, u64 target, u64 *noc_address)
-{
-	struct tenstorrent_device *tt_dev = priv->device;
-	u64 max_addr = tt_dev->dev_class->noc_dma_limit;
-	u64 base;
-	u64 limit;
-	int iatu_region;
-
-	if (size == 0)
-		return -EINVAL;
-
-	mutex_lock(&tt_dev->iatu_mutex);
-	if (flags & TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN)
-		base = find_iatu_region_top_down(tt_dev->outbound_iatus, max_addr, size);
-	else
-		base = find_iatu_region_bottom_up(tt_dev->outbound_iatus, max_addr, size);
-
-	if (base == U64_MAX) {
-		mutex_unlock(&tt_dev->iatu_mutex);
-		return -ENOMEM;
-	}
-
-	limit = base + size - 1;
-	iatu_region = configure_outbound_iatu(priv, base, limit, target);
-	*noc_address = tt_dev->dev_class->noc_pcie_offset + base;
-
-	mutex_unlock(&tt_dev->iatu_mutex);
-	return iatu_region;
 }
 
 long ioctl_pin_pages(struct chardev_private *priv,

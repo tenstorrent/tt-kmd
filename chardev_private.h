@@ -21,6 +21,7 @@ struct dmabuf {
 	dma_addr_t phys;
 	u64 size;	// always a multiple of PAGE_SIZE
 	u8 index;
+	int outbound_iatu_region;
 };
 
 // This is our device-private data assocated with each open character device fd.

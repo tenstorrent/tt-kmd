@@ -148,6 +148,8 @@ struct tenstorrent_reset_device {
 
 // tenstorrent_pin_pages_in.flags
 #define TENSTORRENT_PIN_PAGES_CONTIGUOUS 1	// app attests that the pages are physically contiguous
+#define TENSTORRENT_PIN_PAGES_NOC_DMA 2		// app wants to use the pages for NOC DMA
+#define TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN 4	// NOC DMA will be allocated top-down (default is bottom-up)
 
 struct tenstorrent_pin_pages_in {
 	__u32 output_size_bytes;
@@ -157,7 +159,12 @@ struct tenstorrent_pin_pages_in {
 };
 
 struct tenstorrent_pin_pages_out {
-	__u64 physical_address;
+	__u64 physical_address;	// or IOVA
+};
+
+struct tenstorrent_pin_pages_out_extended {
+	__u64 physical_address;	// or IOVA
+	__u64 noc_address;
 };
 
 // unpinning subset of a pinned buffer is not supported

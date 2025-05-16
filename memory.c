@@ -22,6 +22,139 @@
 
 #define BAR0_SIZE (1UL << 29)
 
+static int get_sorted_iatu_region_indices(const struct tenstorrent_outbound_iatu_region *regions, int *sorted_indices)
+{
+	int i;
+	int in_use_count = 0;
+
+	// First, collect indices of in-use regions.
+	for (i = 0; i < TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS; i++) {
+		if (regions[i].priv) {
+			sorted_indices[in_use_count++] = i;
+		}
+	}
+
+	// Insertion sort the collected indices by the corresponding region's base.
+	for (i = 1; i < in_use_count; i++) {
+		int index = sorted_indices[i];
+		u64 base = regions[index].base;
+		int j = i - 1;
+
+		while (j >= 0 && regions[sorted_indices[j]].base > base) {
+			sorted_indices[j + 1] = sorted_indices[j];
+			j--;
+		}
+		sorted_indices[j + 1] = index;
+	}
+
+	return in_use_count;
+}
+
+static u64 find_iatu_region_top_down(const struct tenstorrent_outbound_iatu_region *regions, u64 max_addr, u64 size)
+{
+	int sorted_indices[TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS];
+	u64 current_pos = max_addr;
+	int in_use_count;
+	int i;
+
+	in_use_count = get_sorted_iatu_region_indices(regions, sorted_indices);
+
+	if (in_use_count == 0) {
+		// Allocate at top if there's enough space.
+		if (size <= (max_addr + 1)) {
+			return max_addr - size + 1;
+		}
+		return U64_MAX; // Size too large for address space.
+	}
+
+	// Check each region from top to bottom.
+	for (i = in_use_count - 1; i >= 0; i--) {
+		const struct tenstorrent_outbound_iatu_region *region = &regions[sorted_indices[i]];
+
+		if ((current_pos - region->limit) >= size)
+			return current_pos - size + 1;
+
+		current_pos = region->base - 1;
+	}
+
+	// Check gap at the bottom (from 0 to the lowest region).
+	if ((current_pos + 1) >= size)
+		return current_pos - size + 1;
+
+	return U64_MAX; // No suitable gap found.
+}
+
+static u64 find_iatu_region_bottom_up(const struct tenstorrent_outbound_iatu_region *regions, u64 max_addr, u64 size)
+{
+	int sorted_indices[TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS];
+	u64 current_pos = 0;
+	int in_use_count;
+	int i;
+
+	in_use_count = get_sorted_iatu_region_indices(regions, sorted_indices);
+
+	if (in_use_count == 0) {
+		// Allocate at bottom if there's enough space.
+		if (size <= max_addr + 1) {
+			return 0;
+		}
+		return U64_MAX;
+	}
+
+	// Check each region from bottom to top.
+	for (i = 0; i < in_use_count; i++) {
+		const struct tenstorrent_outbound_iatu_region *region = &regions[sorted_indices[i]];
+
+		if ((region->base - current_pos) >= size)
+			return current_pos;
+
+		current_pos = region->limit + 1;
+	}
+
+	// Check gap at the top (from highest region to max_addr).
+	if ((max_addr - current_pos + 1) >= size)
+		return current_pos;
+
+	return U64_MAX; // No suitable gap found.
+}
+
+// returns the region number or a negative error code.
+static int configure_outbound_iatu(struct chardev_private *priv, u64 base, u64 limit, u64 target)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	int region = -1;
+	int i;
+	int ret;
+
+	if (base > limit)
+		return -EINVAL;
+
+	// Find a free region.
+	for (i = 0; i < TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS; ++i) {
+		if (tt_dev->outbound_iatus[i].priv == NULL) {
+			region = i;
+			break;
+		}
+	}
+
+	if (region < 0)
+		return -ENOSPC;
+
+	// Program the hardware.
+	ret = tt_dev->dev_class->configure_outbound_atu(tt_dev, region, base, limit, target);
+	if (ret)
+		return ret;
+
+	// Mark region as in use.
+	tt_dev->outbound_iatus[region].priv = priv;
+	tt_dev->outbound_iatus[region].base = base;
+	tt_dev->outbound_iatus[region].limit = limit;
+	tt_dev->outbound_iatus[region].target = target;
+
+	return region;
+}
+
+
 // In Linux 5.0, dma_alloc_coherent always zeroes memory and dma_zalloc_coherent
 // was removed.
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
@@ -151,11 +284,29 @@ struct pinned_page_range {
 
 	struct sg_table dma_mapping;	// alloc_chained_sgt_for_pages / free_chained_sgt
 	u64 virtual_address;
+
+	int outbound_iatu_region;
 };
 
 static void unpin_pinned_page_range(struct chardev_private *priv,
 	struct pinned_page_range *pinning)
 {
+	if (pinning->outbound_iatu_region >= 0) {
+		struct tenstorrent_device *tt_dev = priv->device;
+		struct tenstorrent_outbound_iatu_region *region;
+		mutex_lock(&tt_dev->iatu_mutex);
+
+		region = &priv->device->outbound_iatus[pinning->outbound_iatu_region];
+		tt_dev->dev_class->configure_outbound_atu(tt_dev, pinning->outbound_iatu_region, 0, 0, 0);
+
+		region->priv = NULL;
+		region->base = 0;
+		region->limit = 0;
+		region->target = 0;
+
+		mutex_unlock(&tt_dev->iatu_mutex);
+	}
+
 	dma_unmap_sgtable(&priv->device->pdev->dev, &pinning->dma_mapping, DMA_BIDIRECTIONAL, 0);
 	free_chained_sgt(&pinning->dma_mapping);
 
@@ -379,9 +530,42 @@ static bool is_pin_pages_size_safe(u64 size)
 #endif
 }
 
+// Return the iATU region number or a negative error code.
+static int setup_noc_dma(struct chardev_private *priv, int flags, size_t size, u64 target, u64 *noc_address)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	u64 max_addr = tt_dev->dev_class->noc_dma_limit;
+	u64 base;
+	u64 limit;
+	int iatu_region;
+
+	if (size == 0)
+		return -EINVAL;
+
+	mutex_lock(&tt_dev->iatu_mutex);
+	if (flags & TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN)
+		base = find_iatu_region_top_down(tt_dev->outbound_iatus, max_addr, size);
+	else
+		base = find_iatu_region_bottom_up(tt_dev->outbound_iatus, max_addr, size);
+
+	if (base == U64_MAX) {
+		mutex_unlock(&tt_dev->iatu_mutex);
+		return -ENOMEM;
+	}
+
+	limit = base + size - 1;
+	iatu_region = configure_outbound_iatu(priv, base, limit, target);
+	*noc_address = tt_dev->dev_class->noc_pcie_offset + base;
+
+	mutex_unlock(&tt_dev->iatu_mutex);
+	return iatu_region;
+}
+
 long ioctl_pin_pages(struct chardev_private *priv,
 		     struct tenstorrent_pin_pages __user *arg)
 {
+	const u32 valid_flags = TENSTORRENT_PIN_PAGES_CONTIGUOUS | TENSTORRENT_PIN_PAGES_NOC_DMA |
+				TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN;
 	unsigned long nr_pages;
 	struct page **pages;
 	int pages_pinned;
@@ -389,14 +573,19 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	struct sg_table dma_mapping = {0};
 	long ret;
 	u32 bytes_to_copy;
+	u64 noc_address = 0;
+	int iatu_region = -1;
 
 	struct tenstorrent_pin_pages_in in;
-	struct tenstorrent_pin_pages_out out;
+	struct tenstorrent_pin_pages_out_extended out;
 	memset(&in, 0, sizeof(in));
 	memset(&out, 0, sizeof(out));
 
 	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
 		return -EFAULT;
+
+	if (in.flags & ~valid_flags)
+		return -EINVAL;
 
 	if (!PAGE_ALIGNED(in.virtual_address) || !PAGE_ALIGNED(in.size) || in.size == 0)
 		return -EINVAL;
@@ -404,12 +593,24 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	if (!is_pin_pages_size_safe(in.size))
 		return -EINVAL;
 
-	if (in.flags != 0 && in.flags != TENSTORRENT_PIN_PAGES_CONTIGUOUS)
-		return -EINVAL;
+	mutex_lock(&priv->mutex);
+
+	// Block duplicate (VA/size) pinnings. Prevents ambiguity in UNPIN_PAGES
+	// regarding iATU teardown if the same range were pinned multiple times with
+	// different NOC_DMA flags.
+	list_for_each_entry(pinning, &priv->pinnings, list) {
+		if (pinning->virtual_address == in.virtual_address &&
+		    pinning->page_count == PAGE_ALIGN(in.size) >> PAGE_SHIFT) {
+			mutex_unlock(&priv->mutex);
+			return -EEXIST;
+		}
+	}
 
 	pinning = kmalloc(sizeof(*pinning), GFP_KERNEL);
-	if (!pinning)
+	if (!pinning) {
+		mutex_unlock(&priv->mutex);
 		return -ENOMEM;
+	}
 
 	nr_pages = PAGE_ALIGN(in.size) >> PAGE_SHIFT;
 	pages = vzalloc(nr_pages * sizeof(struct page *));
@@ -444,8 +645,6 @@ long ioctl_pin_pages(struct chardev_private *priv,
 			goto err_unpin_pages;
 		}
 
-		mutex_lock(&priv->mutex);
-
 		ret = dma_map_sgtable(&priv->device->pdev->dev, &dma_mapping, DMA_BIDIRECTIONAL, 0);
 
 		if (ret != 0) {
@@ -475,6 +674,14 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		}
 
 		out.physical_address = sg_dma_address(dma_mapping.sgl);
+
+		if (in.flags & TENSTORRENT_PIN_PAGES_NOC_DMA) {
+			ret = setup_noc_dma(priv, in.flags, in.size, out.physical_address, &noc_address);
+
+			if (ret < 0)
+				goto err_dma_unmap;
+			iatu_region = ret;
+		}
 	} else {
 		int i;
 
@@ -488,17 +695,25 @@ long ioctl_pin_pages(struct chardev_private *priv,
 
 		out.physical_address = page_to_phys(pages[0]);
 
-		mutex_lock(&priv->mutex);
+		if (in.flags & TENSTORRENT_PIN_PAGES_NOC_DMA) {
+			ret = setup_noc_dma(priv, in.flags, in.size, out.physical_address, &noc_address);
+
+			if (ret < 0)
+				goto err_unpin_pages;
+			iatu_region = ret;
+		}
 	}
 
 	pinning->page_count = nr_pages;
 	pinning->pages = pages;
 	pinning->dma_mapping = dma_mapping;
 	pinning->virtual_address = in.virtual_address;
+	pinning->outbound_iatu_region = iatu_region;
 
 	list_add(&pinning->list, &priv->pinnings);
 	mutex_unlock(&priv->mutex);
 
+	out.noc_address = noc_address;
 	if (clear_user(&arg->out, in.output_size_bytes) != 0)
 		return -EFAULT;
 
@@ -513,13 +728,13 @@ err_dma_unmap:
 	dma_unmap_sgtable(&priv->device->pdev->dev, &dma_mapping, DMA_BIDIRECTIONAL, 0);
 err_unlock_priv:
 	free_chained_sgt(&dma_mapping);
-	mutex_unlock(&priv->mutex);
 err_unpin_pages:
 	unpin_user_pages_dirty_lock(pages, pages_pinned, false);
 err_vfree_pages:
 	vfree(pages);
 err_free_pinning:
 	kfree(pinning);
+	mutex_unlock(&priv->mutex);
 	return ret;
 }
 

@@ -506,6 +506,16 @@ long ioctl_allocate_dma_buf(struct chardev_private *priv,
 		goto out;
 	}
 
+	if (in.flags & TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA) {
+		bool top_down = true;
+		ret = setup_noc_dma(priv, top_down, in.requested_size, dma_handle, &out.noc_address);
+		if (ret < 0) {
+			dma_free_coherent(&priv->device->pdev->dev, in.requested_size, dma_buf_kernel_ptr, dma_handle);
+			kfree(dmabuf);
+			goto out;
+		}
+	}
+
 	dmabuf->index = in.buf_index;
 	dmabuf->ptr = dma_buf_kernel_ptr;
 	dmabuf->phys = dma_handle;

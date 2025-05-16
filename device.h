@@ -55,7 +55,6 @@ struct tlb_descriptor;
 struct tenstorrent_device_class {
 	const char *name;
 	u32 instance_size;
-	u32 dma_address_bits;
 	u64 noc_dma_limit;
 	u64 noc_pcie_offset;
 	u32 tlb_kinds;

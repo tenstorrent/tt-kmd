@@ -155,7 +155,7 @@ static int configure_outbound_iatu(struct chardev_private *priv, u64 base, u64 l
 }
 
 // Return the iATU region number or a negative error code.
-static int setup_noc_dma(struct chardev_private *priv, int flags, size_t size, u64 target, u64 *noc_address)
+static int setup_noc_dma(struct chardev_private *priv, bool top_down, size_t size, u64 target, u64 *noc_address)
 {
 	struct tenstorrent_device *tt_dev = priv->device;
 	u64 max_addr = tt_dev->dev_class->noc_dma_limit;
@@ -167,7 +167,7 @@ static int setup_noc_dma(struct chardev_private *priv, int flags, size_t size, u
 		return -EINVAL;
 
 	mutex_lock(&tt_dev->iatu_mutex);
-	if (flags & TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN)
+	if (top_down)
 		base = find_iatu_region_top_down(tt_dev->outbound_iatus, max_addr, size);
 	else
 		base = find_iatu_region_bottom_up(tt_dev->outbound_iatus, max_addr, size);
@@ -574,6 +574,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	u32 bytes_to_copy;
 	u64 noc_address = 0;
 	int iatu_region = -1;
+	bool top_down = false;
 
 	struct tenstorrent_pin_pages_in in;
 	struct tenstorrent_pin_pages_out_extended out;
@@ -591,6 +592,8 @@ long ioctl_pin_pages(struct chardev_private *priv,
 
 	if (!is_pin_pages_size_safe(in.size))
 		return -EINVAL;
+
+	top_down = in.flags & TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN;
 
 	mutex_lock(&priv->mutex);
 
@@ -675,7 +678,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		out.physical_address = sg_dma_address(dma_mapping.sgl);
 
 		if (in.flags & TENSTORRENT_PIN_PAGES_NOC_DMA) {
-			ret = setup_noc_dma(priv, in.flags, in.size, out.physical_address, &noc_address);
+			ret = setup_noc_dma(priv, top_down, in.size, out.physical_address, &noc_address);
 
 			if (ret < 0)
 				goto err_dma_unmap;
@@ -695,7 +698,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		out.physical_address = page_to_phys(pages[0]);
 
 		if (in.flags & TENSTORRENT_PIN_PAGES_NOC_DMA) {
-			ret = setup_noc_dma(priv, in.flags, in.size, out.physical_address, &noc_address);
+			ret = setup_noc_dma(priv, top_down, in.size, out.physical_address, &noc_address);
 
 			if (ret < 0)
 				goto err_unpin_pages;

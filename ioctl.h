@@ -7,7 +7,7 @@
 #include <linux/types.h>
 #include <linux/ioctl.h>
 
-#define TENSTORRENT_DRIVER_VERSION 1
+#define TENSTORRENT_DRIVER_VERSION 2
 
 #define TENSTORRENT_IOCTL_MAGIC 0xFA
 

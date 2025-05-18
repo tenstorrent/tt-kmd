@@ -5,6 +5,7 @@
 #include <linux/bitfield.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/sysfs.h>
 
 #include "wormhole.h"
 #include "grayskull.h"
@@ -80,6 +81,8 @@
 #define PCIE_DBI_ADDR 0x800000000ULL
 #define PCIE_NOC_X 0
 #define PCIE_NOC_Y 3
+#define PCIE_NOC1_X 9
+#define PCIE_NOC1_Y 8
 #define DBI_ENABLE 0x00200000
 #define PCIE_ARMISC_INFO_REG SCRATCH_REG(6)
 #define PCIE_AWMISC_INFO_REG SCRATCH_REG(7)
@@ -87,6 +90,10 @@
 #define WRITE_IATU_REG(wh_dev, direction, region, reg, value) \
 	write_iatu_reg(wh_dev, IATU_##direction, region, \
 		       IATU_##reg##_##direction, (value))
+
+// NOC IO prototypes
+static u32 noc_read32(struct wormhole_device *wh, u32 x, u32 y, u64 addr);
+static u32 noc1_read32(struct wormhole_device *wh, u32 x, u32 y, u64 addr);
 
 static void write_iatu_reg(struct wormhole_device *wh_dev, unsigned direction,
 			   unsigned region, unsigned reg, u32 value) {
@@ -109,6 +116,74 @@ static struct tt_attribute_data wh_attributes[] = {
 	{ __ATTR(tt_ttflash_ver, S_IRUGO, tt_show_fw_ver, NULL), 0xB8, 0x0 },
 	{ __ATTR(tt_fw_bundle_ver, S_IRUGO, tt_show_fw_ver, NULL), 0xC4, 0x0 },
 	{ __ATTR_NULL, 0, 0 }
+};
+
+
+#define PCIE_NOC_REG_BASE 0xFFFB20000ULL
+
+static ssize_t wh_show_pcie_single_counter(struct device *dev, char *buf, u32 counter_offset, int noc)
+{
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	u64 addr = PCIE_NOC_REG_BASE + (0x200 + 4 * counter_offset);
+	u32 value;
+	if (noc == 0) {
+		value = noc_read32(wh_dev, PCIE_NOC_X, PCIE_NOC_Y, addr);
+	} else {
+		value = noc1_read32(wh_dev, PCIE_NOC1_X, PCIE_NOC1_Y, addr);
+	}
+	return scnprintf(buf, PAGE_SIZE, "%u\n", value);
+}
+
+#define WH_PCIE_COUNTER_ATTR_RO_PAIR(_base_name_str, _counter_type_id_const) \
+static ssize_t _base_name_str##0_show(struct device *dev, \
+									  struct device_attribute *attr, \
+									  char *buf) \
+{ \
+	return wh_show_pcie_single_counter(dev, buf, _counter_type_id_const, 0); \
+} \
+static ssize_t _base_name_str##1_show(struct device *dev, \
+									  struct device_attribute *attr, \
+									  char *buf) \
+{ \
+	return wh_show_pcie_single_counter(dev, buf, _counter_type_id_const, 1); \
+} \
+static DEVICE_ATTR_RO(_base_name_str##0); \
+static DEVICE_ATTR_RO(_base_name_str##1)
+
+#define SLV_POSTED_WR_DATA_WORD_RECEIVED 0x39
+#define SLV_NONPOSTED_WR_DATA_WORD_RECEIVED 0x38
+#define SLV_RD_DATA_WORD_SENT 0x33
+#define MST_POSTED_WR_DATA_WORD_SENT 0x9
+#define MST_NONPOSTED_WR_DATA_WORD_SENT 0x8
+#define MST_RD_DATA_WORD_RECEIVED 0x3
+
+WH_PCIE_COUNTER_ATTR_RO_PAIR(slv_posted_wr_data_word_received, SLV_POSTED_WR_DATA_WORD_RECEIVED);
+WH_PCIE_COUNTER_ATTR_RO_PAIR(slv_nonposted_wr_data_word_received, SLV_NONPOSTED_WR_DATA_WORD_RECEIVED);
+WH_PCIE_COUNTER_ATTR_RO_PAIR(slv_rd_data_word_sent, SLV_RD_DATA_WORD_SENT);
+WH_PCIE_COUNTER_ATTR_RO_PAIR(mst_posted_wr_data_word_sent, MST_POSTED_WR_DATA_WORD_SENT);
+WH_PCIE_COUNTER_ATTR_RO_PAIR(mst_nonposted_wr_data_word_sent, MST_NONPOSTED_WR_DATA_WORD_SENT);
+WH_PCIE_COUNTER_ATTR_RO_PAIR(mst_rd_data_word_received, MST_RD_DATA_WORD_RECEIVED);
+
+static struct attribute *wh_pcie_perf_counters_attrs[] = {
+	&dev_attr_slv_posted_wr_data_word_received0.attr,
+	&dev_attr_slv_nonposted_wr_data_word_received0.attr,
+	&dev_attr_slv_rd_data_word_sent0.attr,
+	&dev_attr_mst_posted_wr_data_word_sent0.attr,
+	&dev_attr_mst_nonposted_wr_data_word_sent0.attr,
+	&dev_attr_mst_rd_data_word_received0.attr,
+	&dev_attr_slv_posted_wr_data_word_received1.attr,
+	&dev_attr_slv_nonposted_wr_data_word_received1.attr,
+	&dev_attr_slv_rd_data_word_sent1.attr,
+	&dev_attr_mst_posted_wr_data_word_sent1.attr,
+	&dev_attr_mst_nonposted_wr_data_word_sent1.attr,
+	&dev_attr_mst_rd_data_word_received1.attr,
+	NULL,
+};
+
+static const struct attribute_group wh_pcie_perf_counters_group = {
+	.name = "pcie_perf_counters",
+	.attrs = wh_pcie_perf_counters_attrs,
 };
 
 static u32 wh_arc_addr_to_sysreg(u32 arc_addr) {
@@ -372,7 +447,7 @@ static int wormhole_describe_tlb(struct tenstorrent_device *tt_dev, int tlb,
 	return 0;
 }
 
-static u8 __iomem *wh_configure_kernel_tlb(struct wormhole_device *wh, u32 x, u32 y, u64 addr) {
+static u8 __iomem *wh_configure_kernel_tlb(struct wormhole_device *wh, u32 x, u32 y, u64 addr, int noc) {
 	struct tenstorrent_noc_tlb_config config = { 0 };
 	u64 offset = addr & TLB_16M_WINDOW_MASK;
 
@@ -380,6 +455,7 @@ static u8 __iomem *wh_configure_kernel_tlb(struct wormhole_device *wh, u32 x, u3
 	config.x_end = x;
 	config.y_end = y;
 	config.ordering	= 1; // strict
+	config.noc = noc;
 
 	wh_configure_tlb(wh, KERNEL_TLB_INDEX, &config);
 	return wh->bar4_mapping + KERNEL_TLB_START + offset;
@@ -391,10 +467,20 @@ static u32 noc_read32(struct wormhole_device *wh, u32 x, u32 y, u64 addr) {
 
 	mutex_lock(&wh->kernel_tlb_mutex);
 
-	tlb_window = wh_configure_kernel_tlb(wh, x, y, addr);
+	tlb_window = wh_configure_kernel_tlb(wh, x, y, addr, 0);
 	val = ioread32(tlb_window);
 
 	mutex_unlock(&wh->kernel_tlb_mutex);
+
+	return val;
+}
+
+static u32 noc1_read32(struct wormhole_device *wh, u32 x, u32 y, u64 addr) {
+	u32 val;
+	u8 __iomem *tlb_window;
+
+	tlb_window = wh_configure_kernel_tlb(wh, x, y, addr, 1);
+	val = ioread32(tlb_window);
 
 	return val;
 }
@@ -404,7 +490,7 @@ static void noc_write32(struct wormhole_device *wh, u32 x, u32 y, u64 addr, u32 
 
 	mutex_lock(&wh->kernel_tlb_mutex);
 
-	tlb_window = wh_configure_kernel_tlb(wh, x, y, addr);
+	tlb_window = wh_configure_kernel_tlb(wh, x, y, addr, 0);
 	iowrite32(data, tlb_window);
 
 	mutex_unlock(&wh->kernel_tlb_mutex);
@@ -472,6 +558,12 @@ static int wormhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u3
 	return 0;
 }
 
+static void wormhole_create_sysfs_groups(struct tenstorrent_device *tt_dev) {
+	int ret = devm_device_add_group(&tt_dev->dev, &wh_pcie_perf_counters_group);
+	if (ret)
+		dev_err(&tt_dev->dev, "PCIe perf counters unavailable: %d\n", ret);
+}
+
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
@@ -492,4 +584,5 @@ struct tenstorrent_device_class wormhole_class = {
 	.save_reset_state = wormhole_save_reset_state,
 	.restore_reset_state = wormhole_restore_reset_state,
 	.configure_outbound_atu = wormhole_configure_outbound_atu,
+	.create_sysfs_groups = wormhole_create_sysfs_groups,
 };

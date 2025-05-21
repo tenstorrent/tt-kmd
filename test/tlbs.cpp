@@ -410,7 +410,7 @@ void VerifyTensixNodeIdsBlackhole(const EnumeratedDevice &dev)
 {
     static constexpr uint32_t BH_GRID_X = 17;
     static constexpr uint32_t BH_GRID_Y = 12;
-    static constexpr uint64_t NOC_NODE_ID = 0xffb20044ULL;
+    static constexpr uint64_t NOC_NODE_ID_LOGICAL = 0xffb20148ULL;
 
     DevFd dev_fd(dev.path);
     int fd = dev_fd.get();
@@ -428,7 +428,7 @@ void VerifyTensixNodeIdsBlackhole(const EnumeratedDevice &dev)
                 continue;
 
             {
-                TlbWindow2M tlb(fd, x, y, NOC_NODE_ID);
+                TlbWindow2M tlb(fd, x, y, NOC_NODE_ID_LOGICAL);
                 uint32_t node_id = tlb.read32(0);
                 uint32_t node_id_x = (node_id >> 0x0) & 0x3f;
                 uint32_t node_id_y = (node_id >> 0x6) & 0x3f;
@@ -438,7 +438,7 @@ void VerifyTensixNodeIdsBlackhole(const EnumeratedDevice &dev)
             }
 
             {
-                TlbWindow4G tlb(fd, x, y, NOC_NODE_ID);
+                TlbWindow4G tlb(fd, x, y, NOC_NODE_ID_LOGICAL);
                 uint32_t node_id = tlb.read32(0);
                 uint32_t node_id_x = (node_id >> 0x0) & 0x3f;
                 uint32_t node_id_y = (node_id >> 0x6) & 0x3f;

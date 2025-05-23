@@ -717,6 +717,7 @@ static int blackhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u
 struct tenstorrent_device_class blackhole_class = {
 	.name = "Blackhole",
 	.instance_size = sizeof(struct blackhole_device),
+	.dma_address_bits = 58,
 	.noc_dma_limit = (1ULL << 58) - 1,
 	.noc_pcie_offset = (4ULL << 58),
 	.tlb_kinds = 2,

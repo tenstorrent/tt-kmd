@@ -888,6 +888,7 @@ static int grayskull_configure_outbound_atu(struct tenstorrent_device *tt_dev, u
 struct tenstorrent_device_class grayskull_class = {
 	.name = "Grayskull",
 	.instance_size = sizeof(struct grayskull_device),
+	.dma_address_bits = 32,
 	.noc_dma_limit = (0xFFFE0000 - 1),
 	.noc_pcie_offset = 0x00000000,
 	.init_device = grayskull_init,

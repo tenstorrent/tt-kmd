@@ -81,19 +81,24 @@ struct tenstorrent_query_mappings {
 	struct tenstorrent_query_mappings_out out;
 };
 
+// tenstorrent_allocate_dma_buf_in.flags
+#define TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA 2
+
 struct tenstorrent_allocate_dma_buf_in {
 	__u32 requested_size;
 	__u8  buf_index;	// [0,TENSTORRENT_MAX_DMA_BUFS)
-	__u8  reserved0[3];
+	__u8  flags;
+	__u8  reserved0[2];
 	__u64 reserved1[2];
 };
 
 struct tenstorrent_allocate_dma_buf_out {
-	__u64 physical_address;
+	__u64 physical_address;	// or IOVA
 	__u64 mapping_offset;
 	__u32 size;
 	__u32 reserved0;
-	__u64 reserved1[2];
+	__u64 noc_address;	// valid if TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA is set
+	__u64 reserved1;
 };
 
 struct tenstorrent_allocate_dma_buf {

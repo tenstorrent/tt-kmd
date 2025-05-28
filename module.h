@@ -5,6 +5,8 @@
 #define TTDRIVER_MODULE_H_INCLUDED
 
 #include <linux/types.h>
+#include <linux/pci.h>
+
 // Module options that need to be passed to other files
 extern bool arc_fw_init;
 extern bool arc_fw_override;
@@ -24,4 +26,10 @@ extern uint tensix_harvest_override;
 extern uint dma_address_bits;
 extern uint reset_limit;
 extern unsigned char auto_reset_timeout;
+
+extern struct tenstorrent_device_class grayskull_class;
+extern struct tenstorrent_device_class wormhole_class;
+extern struct tenstorrent_device_class blackhole_class;
+extern const struct pci_device_id tenstorrent_ids[];
+
 #endif

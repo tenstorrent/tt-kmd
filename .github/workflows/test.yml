@@ -29,9 +29,12 @@ jobs:
     - uses: actions/checkout@v4
     - run: |
         sudo apt update
-        sudo apt install -y make
+        sudo apt install -y make sparse
+    - run: |
         make -j $(nproc)
     - uses: actions/upload-artifact@v4
       with:
         name: driver-${{ matrix.os }}
         path: tenstorrent.ko
+    - run: |
+        make C=2 -j $(nproc)

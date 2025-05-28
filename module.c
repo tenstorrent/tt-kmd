@@ -9,6 +9,8 @@
 #include "chardev.h"
 #include "enumerate.h"
 
+#include "module.h"
+
 #define TTDRIVER_VER "1.34"
 
 MODULE_LICENSE("GPL");

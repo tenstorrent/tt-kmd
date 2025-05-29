@@ -139,6 +139,31 @@ void fill_with_random_data(std::vector<uint32_t> &data)
     std::generate(data.begin(), data.end(), [&]{ return RNG(); });
 }
 
+bool is_blackhole_noc_translation_enabled(const EnumeratedDevice &dev)
+{
+    static constexpr uint64_t BAR0_UC_OFFSET = 0; // HACK: avoids a QUERY_MAPPINGS
+    static constexpr size_t BAR0_SIZE = 1 << 29;
+    static constexpr uint64_t NIU_CFG_BAR0_OFFSET = 0x1FD04100;
+
+    DevFd dev_fd(dev.path);
+    int fd = dev_fd.get();
+
+    if (dev.type != Blackhole)
+        THROW_TEST_FAILURE("BUG: is_blackhole_noc_translation_enabled() called for a non-Blackhole device");
+
+    void *mem = mmap(nullptr, BAR0_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, BAR0_UC_OFFSET);
+    if (mem == MAP_FAILED)
+        THROW_TEST_FAILURE("Failed to mmap BAR0 for NOC translation check");
+
+    uint8_t *bar0_base = static_cast<uint8_t *>(mem);
+    auto niu_cfg = *reinterpret_cast<volatile uint32_t *>(bar0_base + NIU_CFG_BAR0_OFFSET);
+    bool translated = (niu_cfg >> 14) & 1;
+
+    munmap(mem, BAR0_SIZE);
+
+    return translated;
+}
+
 template <size_t WINDOW_SIZE>
 void VerifyNodeId(int fd, const xy_t &tile, uint64_t noc_reg_base)
 {
@@ -405,12 +430,11 @@ void VerifyTlbSizesBlackhole(const EnumeratedDevice &dev)
     }
 }
 
-// TODO: harvesting?  Is this safe??
 void VerifyTensixNodeIdsBlackhole(const EnumeratedDevice &dev)
 {
     static constexpr uint32_t BH_GRID_X = 17;
     static constexpr uint32_t BH_GRID_Y = 12;
-    static constexpr uint64_t NOC_NODE_ID = 0xffb20044ULL;
+    static constexpr uint64_t NOC_NODE_ID_LOGICAL = 0xffb20148ULL;
 
     DevFd dev_fd(dev.path);
     int fd = dev_fd.get();
@@ -428,7 +452,7 @@ void VerifyTensixNodeIdsBlackhole(const EnumeratedDevice &dev)
                 continue;
 
             {
-                TlbWindow2M tlb(fd, x, y, NOC_NODE_ID);
+                TlbWindow2M tlb(fd, x, y, NOC_NODE_ID_LOGICAL);
                 uint32_t node_id = tlb.read32(0);
                 uint32_t node_id_x = (node_id >> 0x0) & 0x3f;
                 uint32_t node_id_y = (node_id >> 0x6) & 0x3f;
@@ -438,7 +462,7 @@ void VerifyTensixNodeIdsBlackhole(const EnumeratedDevice &dev)
             }
 
             {
-                TlbWindow4G tlb(fd, x, y, NOC_NODE_ID);
+                TlbWindow4G tlb(fd, x, y, NOC_NODE_ID_LOGICAL);
                 uint32_t node_id = tlb.read32(0);
                 uint32_t node_id_x = (node_id >> 0x0) & 0x3f;
                 uint32_t node_id_y = (node_id >> 0x6) & 0x3f;
@@ -452,35 +476,42 @@ void VerifyTensixNodeIdsBlackhole(const EnumeratedDevice &dev)
 
 void VerifyTlbAccessBlackhole(const EnumeratedDevice &dev)
 {
-    constexpr xy_t PCI = { 2, 0 };
-    constexpr xy_t ARC = { 8, 0 };
-    constexpr xy_t DDR = { 0, 7 };
-
-    constexpr uint64_t PCI_NOC_NODE_ID = 0xFFFFFFFFFF000044ULL;
-    constexpr uint64_t ARC_NOC_NODE_ID = 0x0000000080050044ULL;
-    constexpr uint64_t DDR_NOC_NODE_ID = 0x00000000FFB20044ULL;
+    constexpr uint64_t PCI_NOC_NODE_ID_LOGICAL = 0xFFFFFFFFFF000148ULL;
 
     DevFd dev_fd(dev.path);
     int fd = dev_fd.get();
+    bool is_translated = is_blackhole_noc_translation_enabled(dev);
 
-    VerifyNodeId<TWO_MEG>(fd, PCI, PCI_NOC_NODE_ID);
+    if (is_translated) {
+        constexpr xy_t PCI = { 19, 24 };
+
+        VerifyNodeId<TWO_MEG>(fd, PCI, PCI_NOC_NODE_ID_LOGICAL);
+        VerifyNodeId<FOUR_GIG>(fd, PCI, PCI_NOC_NODE_ID_LOGICAL);
+    } else {
+        constexpr xy_t PCI = { 2, 0 };
+
+        VerifyNodeId<TWO_MEG>(fd, PCI, PCI_NOC_NODE_ID_LOGICAL);
+        VerifyNodeId<FOUR_GIG>(fd, PCI, PCI_NOC_NODE_ID_LOGICAL);
+    }
+
+    // ARC shows up at (x=8, y=0) regardless of whether translation is enabled.
+    constexpr xy_t ARC = { 8, 0 };
+    constexpr uint64_t ARC_NOC_NODE_ID = 0x0000000080050044ULL;
     VerifyNodeId<TWO_MEG>(fd, ARC, ARC_NOC_NODE_ID);
-    VerifyNodeId<TWO_MEG>(fd, DDR, DDR_NOC_NODE_ID);
-
-    VerifyNodeId<FOUR_GIG>(fd, PCI, PCI_NOC_NODE_ID);
     VerifyNodeId<FOUR_GIG>(fd, ARC, ARC_NOC_NODE_ID);
-    VerifyNodeId<FOUR_GIG>(fd, DDR, DDR_NOC_NODE_ID);
 }
 
 void VerifyManyWindowsBlackhole(const EnumeratedDevice &dev)
 {
     std::vector<std::unique_ptr<TlbWindow2M>> windows;
     std::vector<uint32_t> random_data(0x1000);
+    bool translated = is_blackhole_noc_translation_enabled(dev);
 
-    // Use DDR at (x=0, y=0) as a test target.  Pick a random address within the
-    // first 1GB, aligned to a 4-byte boundary.
-    uint32_t x = 0;
-    uint32_t y = 0;
+    // Get coordinates for a valid DRAM core for this test.
+    uint32_t x = translated ? 17 : 0; // Use (x=17, y=12) for translated, (x=0, y=0) for non-translated.
+    uint32_t y = translated ? 12 : 0;
+
+    // Pick a random address within the first 1GB, aligned to a 4-byte boundary.
     uint64_t addr = random_aligned_address(1ULL << 30, 0x4);
 
     DevFd dev_fd(dev.path);

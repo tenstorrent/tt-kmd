@@ -18,12 +18,12 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          apk add alpine-sdk sparse akms
+          doas apk add alpine-sdk sparse akms
         shell: alpine.sh {0}
 
       - name: Build kernel module
         run: |
-          akms install .
+          doas akms install .
         shell: alpine.sh {0}
 
       - name: Upload kernel module artifact

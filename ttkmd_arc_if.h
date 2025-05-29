@@ -19,24 +19,24 @@
 #define TTKMD_ARC_IF_VERSION      0x6
 
 typedef struct {
-  uint32_t  magic_number[2];
-  uint32_t  version;
+  __le32    magic_number[2];
+  __le32    version;
   uint8_t   stage2_init;
   uint8_t   padding0[3];
   uint8_t   aiclk_ppm_en;
   uint8_t   padding1[3];
-  uint32_t  aiclk_ppm_ovr;
+  __le32    aiclk_ppm_ovr;
   uint8_t   ddr_train_en;
   uint8_t   ddr_test_mode;
   uint8_t   padding2[2];
-  uint32_t  ddr_freq_ovr;
+  __le32    ddr_freq_ovr;
   uint8_t   watchdog_fw_load;
   uint8_t   watchdog_fw_en;
   uint8_t   smbus_fw_load;
   uint8_t   smbus_fw_en;
-  uint32_t  watchdog_fw_reset_vec;
-  uint32_t  feature_disable_ovr;
-  uint32_t  smbus_fw_reset_vec;
+  __le32    watchdog_fw_reset_vec;
+  __le32    feature_disable_ovr;
+  __le32    smbus_fw_reset_vec;
 } ttkmd_arc_if_t; // 12 * 4 = 48B
 
 typedef union {

@@ -9,6 +9,8 @@
 #include "chardev.h"
 #include "enumerate.h"
 
+#include "module.h"
+
 #define TTDRIVER_VER "1.34"
 
 MODULE_LICENSE("GPL");
@@ -90,11 +92,6 @@ MODULE_PARM_DESC(reset_limit, "Maximum number of times to reset device during bo
 unsigned char auto_reset_timeout = 10;
 module_param(auto_reset_timeout, byte, 0444);
 MODULE_PARM_DESC(auto_reset_timeout, "Timeout duration in seconds for M3 auto reset to occur.");
-
-struct tenstorrent_device_class;
-extern struct tenstorrent_device_class grayskull_class;
-extern struct tenstorrent_device_class wormhole_class;
-extern struct tenstorrent_device_class blackhole_class;
 
 const struct pci_device_id tenstorrent_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_TENSTORRENT, PCI_DEVICE_ID_GRAYSKULL),

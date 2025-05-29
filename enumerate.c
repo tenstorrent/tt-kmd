@@ -25,8 +25,8 @@
 #include <linux/aer.h>
 #endif
 
-DEFINE_IDR(tenstorrent_dev_idr);
-DEFINE_MUTEX(tenstorrent_dev_idr_mutex);
+static DEFINE_IDR(tenstorrent_dev_idr);
+static DEFINE_MUTEX(tenstorrent_dev_idr_mutex);
 
 static int tenstorrent_reboot_notifier(struct notifier_block *nb,
 				       unsigned long action, void *data) {

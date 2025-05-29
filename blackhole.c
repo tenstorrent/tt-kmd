@@ -447,7 +447,7 @@ static int bh_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 a
 		if (type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {
 			u32 raw;
 
-			if (bh->hwmon_attr_addrs == 0)
+			if (bh->hwmon_attr_addrs[i] == 0)
 				return -ENOTSUPP;
 
 			raw = noc_read32(bh, ARC_X, ARC_Y, bh->hwmon_attr_addrs[i]);

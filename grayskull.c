@@ -275,7 +275,7 @@ static int grayskull_load_arc_fw(struct grayskull_device *gs_dev) {
 
 	iowrite32(ARC_UDMIAXI_REGION_CSM, reset_unit_regs + ARC_UDMIAXI_REGION_REG);
 	memcpy_toio(fw_target_mem, firmware->data, GS_ARC_L2_FW_SIZE_BYTES);
-	reset_vector = le32_to_cpu(*(u32 *)firmware->data);
+	reset_vector = le32_to_cpup((__le32 *)firmware->data);
 	iowrite32(reset_vector, reset_vec_target_mem);
 
 grayskull_load_arc_fw_cleanup:
@@ -307,7 +307,7 @@ static int grayskull_load_iccm_fw(struct grayskull_device *gs_dev,
 		reset_unit_regs + ARC_UDMIAXI_REGION_REG);
 	memcpy_toio(fw_target_mem, firmware->data, GS_ICCM_FW_SIZE_BYTES);
 	// Reset vector needs to be passed to FW through ttkmd_arc_if
-	*reset_vector = le32_to_cpu(*(u32 *)firmware->data);
+	*reset_vector = le32_to_cpup((__le32 *)firmware->data);
 	iowrite32(ARC_UDMIAXI_REGION_CSM, reset_unit_regs + ARC_UDMIAXI_REGION_REG);
 
 grayskull_load_iccm_fw_cleanup:

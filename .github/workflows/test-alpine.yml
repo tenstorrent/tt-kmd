@@ -1,0 +1,38 @@
+name: 'Alpine Linux CI'
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-make-alpine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Alpine Linux
+        uses: jirutka/setup-alpine@v1
+        with:
+          branch: v3.19  # Use the latest stable Alpine branch if needed
+
+      - name: Install build dependencies
+        run: |
+          apk add alpine-sdk sparse akms
+        shell: alpine.sh {0}
+
+      - name: Build kernel module
+        run: |
+          akms install .
+        shell: alpine.sh {0}
+
+      - name: Upload kernel module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: driver-alpine
+          path: tenstorrent.ko
+
+      - name: Sparse static analysis
+        run: |
+          make C=2 -j $(nproc)
+        shell: alpine.sh {0}

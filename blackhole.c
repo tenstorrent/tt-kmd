@@ -57,6 +57,7 @@
 #define TELEMETRY_ARCCLK 16
 #define TELEMETRY_BM_APP_FW_VERSION 26
 #define TELEMETRY_FLASH_BUNDLE_VERSION 28
+#define TELEMETRY_FAN_RPM 41
 
 #define IATU_BASE 0x1000	// Relative to the start of BAR2
 #define IATU_OUTBOUND 0
@@ -285,6 +286,7 @@ static const struct blackhole_hwmon_label bh_hwmon_labels[] = {
 	{ hwmon_in,    hwmon_in_label,    "vcore"     },
 	{ hwmon_curr,  hwmon_curr_label,  "current"   },
 	{ hwmon_power, hwmon_power_label, "power"     },
+	{ hwmon_fan,   hwmon_fan_label,   "fan_rpm"   },
 };
 
 static const struct blackhole_hwmon_attr bh_hwmon_attrs[] = {
@@ -292,6 +294,7 @@ static const struct blackhole_hwmon_attr bh_hwmon_attrs[] = {
 	{ TELEMETRY_VCORE,     hwmon_in,    hwmon_in_input    },
 	{ TELEMETRY_CURRENT,   hwmon_curr,  hwmon_curr_input  },
 	{ TELEMETRY_POWER,     hwmon_power, hwmon_power_input },
+	{ TELEMETRY_FAN_RPM,   hwmon_fan,   hwmon_fan_input   },
 };
 
 // Prototypes for device_attribute show functions
@@ -422,6 +425,7 @@ static ssize_t bh_show_fw_ver(struct device *dev, struct device_attribute *attr,
 }
 
 static umode_t bh_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type, u32 attr, int channel) {
+	struct blackhole_device *bh = (struct blackhole_device *)drvdata;
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(bh_hwmon_labels); ++i) {
@@ -431,7 +435,8 @@ static umode_t bh_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types 
 	}
 
 	for (i = 0; i < ARRAY_SIZE(bh_hwmon_attrs); ++i) {
-		if (type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {
+		bool valid = (bh->hwmon_attr_addrs[i] != 0); // Whether the attribute was probed successfully.
+		if (valid && type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {
 			return S_IRUGO;
 		}
 	}
@@ -462,6 +467,8 @@ static int bh_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 a
 				*val = raw * 1000000;  // Convert W to uW
 			} else if (type == hwmon_in) {
 				*val = raw;            // Reported in mV
+			} else if (type == hwmon_fan) {
+				*val = raw;            // Reported in RPM
 			}
 			return 0;
 		}
@@ -489,6 +496,7 @@ static const struct hwmon_channel_info *bh_hwmon_channel_info[] = {
 	HWMON_CHANNEL_INFO(in, HWMON_I_INPUT | HWMON_I_LABEL),
 	HWMON_CHANNEL_INFO(curr, HWMON_C_INPUT | HWMON_C_LABEL),
 	HWMON_CHANNEL_INFO(power, HWMON_P_INPUT | HWMON_P_LABEL),
+	HWMON_CHANNEL_INFO(fan, HWMON_F_INPUT | HWMON_F_LABEL),
 	NULL,
 };
 

@@ -124,6 +124,9 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 			device_create_file(&tt_dev->dev, &data->attr);
 	}
 
+	if (device_class->create_sysfs_groups)
+		device_class->create_sysfs_groups(tt_dev);
+
 	return 0;
 }
 

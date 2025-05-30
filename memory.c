@@ -154,6 +154,36 @@ static int configure_outbound_iatu(struct chardev_private *priv, u64 base, u64 l
 	return region;
 }
 
+// Return the iATU region number or a negative error code.
+static int setup_noc_dma(struct chardev_private *priv, bool top_down, size_t size, u64 target, u64 *noc_address)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	u64 max_addr = tt_dev->dev_class->noc_dma_limit;
+	u64 base;
+	u64 limit;
+	int iatu_region;
+
+	if (size == 0)
+		return -EINVAL;
+
+	mutex_lock(&tt_dev->iatu_mutex);
+	if (top_down)
+		base = find_iatu_region_top_down(tt_dev->outbound_iatus, max_addr, size);
+	else
+		base = find_iatu_region_bottom_up(tt_dev->outbound_iatus, max_addr, size);
+
+	if (base == U64_MAX) {
+		mutex_unlock(&tt_dev->iatu_mutex);
+		return -ENOMEM;
+	}
+
+	limit = base + size - 1;
+	iatu_region = configure_outbound_iatu(priv, base, limit, target);
+	*noc_address = tt_dev->dev_class->noc_pcie_offset + base;
+
+	mutex_unlock(&tt_dev->iatu_mutex);
+	return iatu_region;
+}
 
 // In Linux 5.0, dma_alloc_coherent always zeroes memory and dma_zalloc_coherent
 // was removed.
@@ -288,24 +318,31 @@ struct pinned_page_range {
 	int outbound_iatu_region;
 };
 
+static void teardown_outbound_iatu(struct chardev_private *priv, int iatu_region)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_outbound_iatu_region *region;
+
+	if (iatu_region < 0)
+		return;
+
+	mutex_lock(&tt_dev->iatu_mutex);
+
+	region = &priv->device->outbound_iatus[iatu_region];
+	tt_dev->dev_class->configure_outbound_atu(tt_dev, iatu_region, 0, 0, 0);
+
+	region->priv = NULL;
+	region->base = 0;
+	region->limit = 0;
+	region->target = 0;
+
+	mutex_unlock(&tt_dev->iatu_mutex);
+}
+
 static void unpin_pinned_page_range(struct chardev_private *priv,
 	struct pinned_page_range *pinning)
 {
-	if (pinning->outbound_iatu_region >= 0) {
-		struct tenstorrent_device *tt_dev = priv->device;
-		struct tenstorrent_outbound_iatu_region *region;
-		mutex_lock(&tt_dev->iatu_mutex);
-
-		region = &priv->device->outbound_iatus[pinning->outbound_iatu_region];
-		tt_dev->dev_class->configure_outbound_atu(tt_dev, pinning->outbound_iatu_region, 0, 0, 0);
-
-		region->priv = NULL;
-		region->base = 0;
-		region->limit = 0;
-		region->target = 0;
-
-		mutex_unlock(&tt_dev->iatu_mutex);
-	}
+	teardown_outbound_iatu(priv, pinning->outbound_iatu_region);
 
 	dma_unmap_sgtable(&priv->device->pdev->dev, &pinning->dma_mapping, DMA_BIDIRECTIONAL, 0);
 	free_chained_sgt(&pinning->dma_mapping);
@@ -433,6 +470,7 @@ long ioctl_allocate_dma_buf(struct chardev_private *priv,
 	void *dma_buf_kernel_ptr;
 	struct dmabuf *dmabuf;
 	long ret = 0;
+	int iatu_region = -1;
 
 	struct tenstorrent_allocate_dma_buf_in in;
 	struct tenstorrent_allocate_dma_buf_out out;
@@ -476,10 +514,22 @@ long ioctl_allocate_dma_buf(struct chardev_private *priv,
 		goto out;
 	}
 
+	if (in.flags & TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA) {
+		bool top_down = true;
+		ret = setup_noc_dma(priv, top_down, in.requested_size, dma_handle, &out.noc_address);
+		if (ret < 0) {
+			dma_free_coherent(&priv->device->pdev->dev, in.requested_size, dma_buf_kernel_ptr, dma_handle);
+			kfree(dmabuf);
+			goto out;
+		}
+		iatu_region = ret;
+	}
+
 	dmabuf->index = in.buf_index;
 	dmabuf->ptr = dma_buf_kernel_ptr;
 	dmabuf->phys = dma_handle;
 	dmabuf->size = in.requested_size;
+	dmabuf->outbound_iatu_region = iatu_region;
 
 	out.physical_address = (u64)dmabuf->phys;
 	out.mapping_offset = dmabuf_mapping_start(in.buf_index);
@@ -530,37 +580,6 @@ static bool is_pin_pages_size_safe(u64 size)
 #endif
 }
 
-// Return the iATU region number or a negative error code.
-static int setup_noc_dma(struct chardev_private *priv, int flags, size_t size, u64 target, u64 *noc_address)
-{
-	struct tenstorrent_device *tt_dev = priv->device;
-	u64 max_addr = tt_dev->dev_class->noc_dma_limit;
-	u64 base;
-	u64 limit;
-	int iatu_region;
-
-	if (size == 0)
-		return -EINVAL;
-
-	mutex_lock(&tt_dev->iatu_mutex);
-	if (flags & TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN)
-		base = find_iatu_region_top_down(tt_dev->outbound_iatus, max_addr, size);
-	else
-		base = find_iatu_region_bottom_up(tt_dev->outbound_iatus, max_addr, size);
-
-	if (base == U64_MAX) {
-		mutex_unlock(&tt_dev->iatu_mutex);
-		return -ENOMEM;
-	}
-
-	limit = base + size - 1;
-	iatu_region = configure_outbound_iatu(priv, base, limit, target);
-	*noc_address = tt_dev->dev_class->noc_pcie_offset + base;
-
-	mutex_unlock(&tt_dev->iatu_mutex);
-	return iatu_region;
-}
-
 long ioctl_pin_pages(struct chardev_private *priv,
 		     struct tenstorrent_pin_pages __user *arg)
 {
@@ -575,6 +594,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	u32 bytes_to_copy;
 	u64 noc_address = 0;
 	int iatu_region = -1;
+	bool top_down = false;
 
 	struct tenstorrent_pin_pages_in in;
 	struct tenstorrent_pin_pages_out_extended out;
@@ -592,6 +612,8 @@ long ioctl_pin_pages(struct chardev_private *priv,
 
 	if (!is_pin_pages_size_safe(in.size))
 		return -EINVAL;
+
+	top_down = in.flags & TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN;
 
 	mutex_lock(&priv->mutex);
 
@@ -676,7 +698,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		out.physical_address = sg_dma_address(dma_mapping.sgl);
 
 		if (in.flags & TENSTORRENT_PIN_PAGES_NOC_DMA) {
-			ret = setup_noc_dma(priv, in.flags, in.size, out.physical_address, &noc_address);
+			ret = setup_noc_dma(priv, top_down, in.size, out.physical_address, &noc_address);
 
 			if (ret < 0)
 				goto err_dma_unmap;
@@ -696,7 +718,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		out.physical_address = page_to_phys(pages[0]);
 
 		if (in.flags & TENSTORRENT_PIN_PAGES_NOC_DMA) {
-			ret = setup_noc_dma(priv, in.flags, in.size, out.physical_address, &noc_address);
+			ret = setup_noc_dma(priv, top_down, in.size, out.physical_address, &noc_address);
 
 			if (ret < 0)
 				goto err_unpin_pages;
@@ -1229,7 +1251,7 @@ void tenstorrent_memory_cleanup(struct chardev_private *priv)
 
 	hash_for_each_safe(priv->dmabufs, i, tmp_dmabuf, dmabuf, hash_chain) {
 		dma_free_coherent(&tt_dev->pdev->dev, dmabuf->size, dmabuf->ptr, dmabuf->phys);
-
+		teardown_outbound_iatu(priv, dmabuf->outbound_iatu_region);
 		hash_del(&dmabuf->hash_chain);
 		kfree(dmabuf);
 	}

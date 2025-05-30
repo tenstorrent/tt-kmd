@@ -24,8 +24,20 @@ sudo modprobe tenstorrent
 ```
 (or reboot, driver will auto-load next boot)
 
+* (Alpine Linux) You must have akms installed.
+    * `apk install akms`
+```
+doas akms install .
+doas modprobe tenstorrent
+```
+
 ### To uninstall:
 ```
 sudo modprobe -r tenstorrent
 sudo dkms remove tenstorrent/1.34 --all
+```
+* Alpine Linux (`akms`)
+```
+doas modprobe -r tenstorrent
+doas akms uninstall tenstorrent
 ```

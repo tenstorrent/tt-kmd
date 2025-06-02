@@ -30,7 +30,7 @@ dkms:
 
 akms:
 	doas akms install .
-	sudo modprobe tenstorrent
+	doas modprobe tenstorrent
 
 # Helper for running the driver tests in a VM.
 # Supposed to be paired with https://github.com/TTDRosen/qemu-utils

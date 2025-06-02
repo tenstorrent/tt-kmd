@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-only WITH Linux-syscall-note
 
 #ifndef TTDRIVER_IOCTL_H_INCLUDED
 #define TTDRIVER_IOCTL_H_INCLUDED
@@ -81,19 +81,24 @@ struct tenstorrent_query_mappings {
 	struct tenstorrent_query_mappings_out out;
 };
 
+// tenstorrent_allocate_dma_buf_in.flags
+#define TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA 2
+
 struct tenstorrent_allocate_dma_buf_in {
 	__u32 requested_size;
 	__u8  buf_index;	// [0,TENSTORRENT_MAX_DMA_BUFS)
-	__u8  reserved0[3];
+	__u8  flags;
+	__u8  reserved0[2];
 	__u64 reserved1[2];
 };
 
 struct tenstorrent_allocate_dma_buf_out {
-	__u64 physical_address;
+	__u64 physical_address;	// or IOVA
 	__u64 mapping_offset;
 	__u32 size;
 	__u32 reserved0;
-	__u64 reserved1[2];
+	__u64 noc_address;	// valid if TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA is set
+	__u64 reserved1;
 };
 
 struct tenstorrent_allocate_dma_buf {
@@ -118,7 +123,11 @@ struct tenstorrent_get_driver_info_in {
 
 struct tenstorrent_get_driver_info_out {
 	__u32 output_size_bytes;
-	__u32 driver_version;
+	__u32 driver_version;		// IOCTL API version
+	__u8 driver_version_major;
+	__u8 driver_version_minor;
+	__u8 driver_version_patch;
+	__u8 reserved0;
 };
 
 struct tenstorrent_get_driver_info {
@@ -148,6 +157,8 @@ struct tenstorrent_reset_device {
 
 // tenstorrent_pin_pages_in.flags
 #define TENSTORRENT_PIN_PAGES_CONTIGUOUS 1	// app attests that the pages are physically contiguous
+#define TENSTORRENT_PIN_PAGES_NOC_DMA 2		// app wants to use the pages for NOC DMA
+#define TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN 4	// NOC DMA will be allocated top-down (default is bottom-up)
 
 struct tenstorrent_pin_pages_in {
 	__u32 output_size_bytes;
@@ -157,7 +168,12 @@ struct tenstorrent_pin_pages_in {
 };
 
 struct tenstorrent_pin_pages_out {
-	__u64 physical_address;
+	__u64 physical_address;	// or IOVA
+};
+
+struct tenstorrent_pin_pages_out_extended {
+	__u64 physical_address;	// or IOVA
+	__u64 noc_address;
 };
 
 // unpinning subset of a pinned buffer is not supported

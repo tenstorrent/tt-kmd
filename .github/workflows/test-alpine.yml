@@ -1,0 +1,61 @@
+name: 'test alpine'
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-akms:
+    strategy:
+      matrix:
+        alpine-version: [v3.19, latest-stable]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Alpine ${{ matrix.alpine-version }}
+        uses: jirutka/setup-alpine@v1
+        with:
+          branch: ${{ matrix.alpine-version }}
+          packages: 'akms make linux-headers build-base'
+
+      - name: Build and install module with AKMS
+        run: |
+          # Assuming AKMBUILD is present in the root or /usr/src/<modname>
+          akms install .
+        shell: alpine.sh --root {0}
+
+      - name: Check AKMS status
+        run: |
+          akms status
+        shell: alpine.sh --root {0}
+
+  build-make:
+    strategy:
+      matrix:
+        alpine-version: [v3.19, latest-stable]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Alpine ${{ matrix.alpine-version }}
+        uses: jirutka/setup-alpine@v1
+        with:
+          branch: ${{ matrix.alpine-version }}
+          packages: 'make sparse build-base linux-headers'
+
+      - name: Build kernel module
+        run: |
+          make -j $(nproc)
+        shell: alpine.sh --root {0}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: driver-${{ matrix.alpine-version }}
+          path: tenstorrent.ko
+
+      - name: Run sparse static analysis
+        run: |
+          make C=2 -j $(nproc)
+        shell: alpine.sh --root {0}

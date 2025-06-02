@@ -81,7 +81,16 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	mutex_init(&tt_dev->chardev_mutex);
 	mutex_init(&tt_dev->iatu_mutex);
 
-	tt_dev->dma_capable = (dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(dma_address_bits ?: device_class->dma_address_bits)) == 0);
+	// Use dma_address_bits from module parameter or device class for coherent
+	// DMA mask, but use a 64-bit mask for streaming mappings. The problem this
+	// solves is that legacy Wormhole software assumes it will get 32-bit DMA
+	// addresses from the ALLOCATE_DMA_BUF API, but a 32 bit DMA mask is too
+	// limiting for user pinnings when IOMMU is enabled.
+	// linux/dma-mapping.h says, "the DMA API guarantees that the coherent DMA
+	// mask can be set to the same or smaller than the streaming DMA mask" so
+	// only set_dma_mask() return value is checked.
+	tt_dev->dma_capable = (dma_set_mask(&dev->dev, DMA_BIT_MASK(dma_address_bits ?: 64)) == 0);
+	dma_set_coherent_mask(&dev->dev, DMA_BIT_MASK(dma_address_bits ?: device_class->dma_address_bits));
 
 	// Max these to ensure the IOVA allocator will not split large pinned regions.
 	dma_set_max_seg_size(&dev->dev, UINT_MAX);
@@ -114,6 +123,9 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 		for (; data->attr.attr.name; data++)
 			device_create_file(&tt_dev->dev, &data->attr);
 	}
+
+	if (device_class->create_sysfs_groups)
+		device_class->create_sysfs_groups(tt_dev);
 
 	return 0;
 }

@@ -35,6 +35,8 @@
 #define NOC2AXI_CFG_START 0x1FD00000
 #define NOC2AXI_CFG_LEN 0x00100000
 #define NOC_ID_OFFSET 0x4044
+#define NOC_STATUS_OFFSET 0x4200
+#define NOC1_NOC2AXI_OFFSET 0x10000
 
 // this points to outbound NOC_TLB_62 configured by CMFW
 #define PCIE_DBI_ADDR 0xF800000000000000ULL
@@ -57,6 +59,7 @@
 #define TELEMETRY_ARCCLK 16
 #define TELEMETRY_BM_APP_FW_VERSION 26
 #define TELEMETRY_FLASH_BUNDLE_VERSION 28
+#define TELEMETRY_FAN_RPM 41
 
 #define IATU_BASE 0x1000	// Relative to the start of BAR2
 #define IATU_OUTBOUND 0
@@ -268,6 +271,65 @@ static void blackhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
 	noc_write32(bh, x, y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, device_control);
 }
 
+static ssize_t bh_show_pcie_single_counter(struct device *dev, char *buf, u32 counter_offset, int noc)
+{
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	u64 offset = NOC_STATUS_OFFSET + (4 * counter_offset) + (noc * NOC1_NOC2AXI_OFFSET);
+	u32 value = ioread32(bh->noc2axi_cfg + offset);
+	return scnprintf(buf, PAGE_SIZE, "%u\n", value);
+}
+
+// The pair are for NOC0 and NOC1; counters for each NOC exposed separately.
+#define BH_PCIE_COUNTER_ATTR_RO_PAIR(_base_name_str, _counter_type_id_const) \
+static ssize_t _base_name_str##0_show(struct device *dev, struct device_attribute *attr, char *buf) \
+{ \
+	return bh_show_pcie_single_counter(dev, buf, _counter_type_id_const, 0); \
+} \
+static ssize_t _base_name_str##1_show(struct device *dev, struct device_attribute *attr, char *buf) \
+{ \
+	return bh_show_pcie_single_counter(dev, buf, _counter_type_id_const, 1); \
+} \
+static DEVICE_ATTR_RO(_base_name_str##0); \
+static DEVICE_ATTR_RO(_base_name_str##1)
+
+#define SLV_POSTED_WR_DATA_WORD_RECEIVED 0x39
+#define SLV_NONPOSTED_WR_DATA_WORD_RECEIVED 0x38
+#define SLV_RD_DATA_WORD_SENT 0x33
+#define MST_POSTED_WR_DATA_WORD_SENT 0x9
+#define MST_NONPOSTED_WR_DATA_WORD_SENT 0x8
+#define MST_RD_DATA_WORD_RECEIVED 0x3
+
+BH_PCIE_COUNTER_ATTR_RO_PAIR(slv_posted_wr_data_word_received, SLV_POSTED_WR_DATA_WORD_RECEIVED);
+BH_PCIE_COUNTER_ATTR_RO_PAIR(slv_nonposted_wr_data_word_received, SLV_NONPOSTED_WR_DATA_WORD_RECEIVED);
+BH_PCIE_COUNTER_ATTR_RO_PAIR(slv_rd_data_word_sent, SLV_RD_DATA_WORD_SENT);
+BH_PCIE_COUNTER_ATTR_RO_PAIR(mst_posted_wr_data_word_sent, MST_POSTED_WR_DATA_WORD_SENT);
+BH_PCIE_COUNTER_ATTR_RO_PAIR(mst_nonposted_wr_data_word_sent, MST_NONPOSTED_WR_DATA_WORD_SENT);
+BH_PCIE_COUNTER_ATTR_RO_PAIR(mst_rd_data_word_received, MST_RD_DATA_WORD_RECEIVED);
+
+#define ATTR_LIST(name) (&dev_attr_##name.attr)
+
+static struct attribute *bh_pcie_perf_counters_attrs[] = {
+	ATTR_LIST(slv_posted_wr_data_word_received0),
+	ATTR_LIST(slv_nonposted_wr_data_word_received0),
+	ATTR_LIST(slv_rd_data_word_sent0),
+	ATTR_LIST(mst_posted_wr_data_word_sent0),
+	ATTR_LIST(mst_nonposted_wr_data_word_sent0),
+	ATTR_LIST(mst_rd_data_word_received0),
+	ATTR_LIST(slv_posted_wr_data_word_received1),
+	ATTR_LIST(slv_nonposted_wr_data_word_received1),
+	ATTR_LIST(slv_rd_data_word_sent1),
+	ATTR_LIST(mst_posted_wr_data_word_sent1),
+	ATTR_LIST(mst_nonposted_wr_data_word_sent1),
+	ATTR_LIST(mst_rd_data_word_received1),
+	NULL,
+};
+
+static const struct attribute_group bh_pcie_perf_counters_group = {
+	.name = "pcie_perf_counters",
+	.attrs = bh_pcie_perf_counters_attrs,
+};
+
 struct blackhole_hwmon_label {
 	enum hwmon_sensor_types type;
 	u32 attr;
@@ -285,6 +347,7 @@ static const struct blackhole_hwmon_label bh_hwmon_labels[] = {
 	{ hwmon_in,    hwmon_in_label,    "vcore"     },
 	{ hwmon_curr,  hwmon_curr_label,  "current"   },
 	{ hwmon_power, hwmon_power_label, "power"     },
+	{ hwmon_fan,   hwmon_fan_label,   "fan_rpm"   },
 };
 
 static const struct blackhole_hwmon_attr bh_hwmon_attrs[] = {
@@ -292,6 +355,7 @@ static const struct blackhole_hwmon_attr bh_hwmon_attrs[] = {
 	{ TELEMETRY_VCORE,     hwmon_in,    hwmon_in_input    },
 	{ TELEMETRY_CURRENT,   hwmon_curr,  hwmon_curr_input  },
 	{ TELEMETRY_POWER,     hwmon_power, hwmon_power_input },
+	{ TELEMETRY_FAN_RPM,   hwmon_fan,   hwmon_fan_input   },
 };
 
 // Prototypes for device_attribute show functions
@@ -422,6 +486,7 @@ static ssize_t bh_show_fw_ver(struct device *dev, struct device_attribute *attr,
 }
 
 static umode_t bh_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type, u32 attr, int channel) {
+	struct blackhole_device *bh = (struct blackhole_device *)drvdata;
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(bh_hwmon_labels); ++i) {
@@ -431,7 +496,8 @@ static umode_t bh_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types 
 	}
 
 	for (i = 0; i < ARRAY_SIZE(bh_hwmon_attrs); ++i) {
-		if (type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {
+		bool valid = (bh->hwmon_attr_addrs[i] != 0); // Whether the attribute was probed successfully.
+		if (valid && type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {
 			return S_IRUGO;
 		}
 	}
@@ -462,6 +528,8 @@ static int bh_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 a
 				*val = raw * 1000000;  // Convert W to uW
 			} else if (type == hwmon_in) {
 				*val = raw;            // Reported in mV
+			} else if (type == hwmon_fan) {
+				*val = raw;            // Reported in RPM
 			}
 			return 0;
 		}
@@ -489,6 +557,7 @@ static const struct hwmon_channel_info *bh_hwmon_channel_info[] = {
 	HWMON_CHANNEL_INFO(in, HWMON_I_INPUT | HWMON_I_LABEL),
 	HWMON_CHANNEL_INFO(curr, HWMON_C_INPUT | HWMON_C_LABEL),
 	HWMON_CHANNEL_INFO(power, HWMON_P_INPUT | HWMON_P_LABEL),
+	HWMON_CHANNEL_INFO(fan, HWMON_F_INPUT | HWMON_F_LABEL),
 	NULL,
 };
 
@@ -714,6 +783,12 @@ static int blackhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u
 	return 0;
 }
 
+static void blackhole_create_sysfs_groups(struct tenstorrent_device *tt_dev) {
+	int ret = devm_device_add_group(&tt_dev->dev, &bh_pcie_perf_counters_group);
+	if (ret)
+		dev_err(&tt_dev->dev, "PCIe perf counters unavailable: %d\n", ret);
+}
+
 struct tenstorrent_device_class blackhole_class = {
 	.name = "Blackhole",
 	.instance_size = sizeof(struct blackhole_device),
@@ -733,4 +808,5 @@ struct tenstorrent_device_class blackhole_class = {
 	.save_reset_state = blackhole_save_reset_state,
 	.restore_reset_state = blackhole_restore_reset_state,
 	.configure_outbound_atu = blackhole_configure_outbound_atu,
+	.create_sysfs_groups = blackhole_create_sysfs_groups,
 };

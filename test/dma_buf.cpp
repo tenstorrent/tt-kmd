@@ -34,7 +34,7 @@ std::size_t MaxDmaBufSize(int dev_fd)
 }
 
 std::variant<tenstorrent_allocate_dma_buf_out, int>
-AllocateDmaBuf(int dev_fd, std::uint32_t size, std::uint8_t index)
+AllocateDmaBuf(int dev_fd, std::uint32_t size, std::uint32_t index)
 {
     tenstorrent_allocate_dma_buf allocate_dma_buf;
     zero(&allocate_dma_buf);

@@ -73,6 +73,7 @@
 #define RESET_UNIT_START (0x1FF30000 - BAR4_SOC_TARGET_ADDRESS)
 #define ARC_CSM_START    (0x1FE80000 - BAR4_SOC_TARGET_ADDRESS)
 #define TLB_REGS_START   (0x1FC00000 - BAR4_SOC_TARGET_ADDRESS)
+#define NOC2AXI_START    (0x1FD02000 - BAR4_SOC_TARGET_ADDRESS)
 
 // kernel TLB is the last 16MB TLB
 #define KERNEL_TLB_INDEX (TLB_WINDOW_COUNT - 1)
@@ -117,22 +118,16 @@ static struct tt_attribute_data wh_attributes[] = {
 };
 
 
-#define PCIE_NOC_REG_BASE 0xFFFB20000ULL
-#define PCIE_NOC_REG_STATUS (PCIE_NOC_REG_BASE + 0x200)
+#define NIU_COUNTERS_START (NOC2AXI_START + 0x200)
+#define NIU_NOC1_OFFSET 0x8000
 
 static ssize_t wh_show_pcie_single_counter(struct device *dev, char *buf, u32 counter_offset, int noc)
 {
 	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
-	u64 addr = PCIE_NOC_REG_STATUS + (4 * counter_offset);
-	u32 value;
-
-	// Accessing the counters via NOC2AXI doesn't work, so read via NOC0/1.
-	if (noc == 0) {
-		value = noc_read32(wh_dev, PCIE_NOC_X, PCIE_NOC_Y, addr, 0);
-	} else {
-		value = noc_read32(wh_dev, PCIE_NOC1_X, PCIE_NOC1_Y, addr, 1);
-	}
+	u8 __iomem *noc2axi = wh_dev->bar4_mapping + NIU_COUNTERS_START;
+	u64 addr = (4 * counter_offset) + (noc * NIU_NOC1_OFFSET);
+	u32 value = ioread32(noc2axi + addr);
 	return scnprintf(buf, PAGE_SIZE, "%u\n", value);
 }
 

@@ -63,19 +63,8 @@ increment from the last hardware reset.
 measure rates or activity over an interval, userspace tools should poll the
 counters and calculate deltas, accounting for potential wraps.
 * There is no software mechanism exposed via sysfs to reset the counters.
-
-### Device-Specific Notes:
-
-* **Blackhole**: Counters are read directly from a memory-mapped BAR segment.
-This is a lightweight operation.
-* **Wormhole**: Due to a hardware limitation preventing direct BAR access to
-these specific NIU (NOC Interface Unit) registers, counters are read indirectly
-by programming a NOC TLB window.
-    * **Important**: Each read operation from a Wormhole `pcie_perf_counters`
-    sysfs file generates NOC traffic and involves TLB reconfiguration. Frequent
-    polling of these counters on Wormhole devices can introduce overhead and
-    potentially affect overall system performance. This indirect access is a
-    workaround for the hardware issue.
+* Counters are read directly from a memory-mapped BAR segment. This is a
+lightweight operation
 
 ### Available Counters:
 

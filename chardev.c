@@ -21,6 +21,7 @@
 #include "ioctl.h"
 #include "pcie.h"
 #include "memory.h"
+#include "module.h"
 #include "tlb.h"
 
 static dev_t tt_device_id;
@@ -156,6 +157,9 @@ static long ioctl_get_driver_info(struct chardev_private *priv,
 
 	out.output_size_bytes = sizeof(out);
 	out.driver_version = TENSTORRENT_DRIVER_VERSION;
+	out.driver_version_major = TENSTORRENT_DRIVER_VERSION_MAJOR;
+	out.driver_version_minor = TENSTORRENT_DRIVER_VERSION_MINOR;
+	out.driver_version_patch = TENSTORRENT_DRIVER_VERSION_PATCH;
 
 	if (clear_user(&arg->out, in.output_size_bytes) != 0)
 		return -EFAULT;

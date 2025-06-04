@@ -7,6 +7,11 @@
 #include <linux/types.h>
 #include <linux/pci.h>
 
+#define TENSTORRENT_DRIVER_VERSION_MAJOR 1
+#define TENSTORRENT_DRIVER_VERSION_MINOR 34
+#define TENSTORRENT_DRIVER_VERSION_PATCH 0
+#define TENSTORRENT_DRIVER_VERSION_SUFFIX ""    // e.g. "-rc1"
+
 // Module options that need to be passed to other files
 extern bool arc_fw_init;
 extern bool arc_fw_override;

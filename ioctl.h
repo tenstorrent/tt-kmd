@@ -123,7 +123,11 @@ struct tenstorrent_get_driver_info_in {
 
 struct tenstorrent_get_driver_info_out {
 	__u32 output_size_bytes;
-	__u32 driver_version;
+	__u32 driver_version;		// IOCTL API version
+	__u8 driver_version_major;
+	__u8 driver_version_minor;
+	__u8 driver_version_patch;
+	__u8 reserved0;
 };
 
 struct tenstorrent_get_driver_info {

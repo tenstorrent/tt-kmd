@@ -11,11 +11,15 @@
 
 #include "module.h"
 
-#define TTDRIVER_VER "1.34"
+#define TENSTORRENT_DRIVER_VERSION_STRING \
+	__stringify(TENSTORRENT_DRIVER_VERSION_MAJOR) "." \
+	__stringify(TENSTORRENT_DRIVER_VERSION_MINOR) "." \
+	__stringify(TENSTORRENT_DRIVER_VERSION_PATCH) \
+	TENSTORRENT_DRIVER_VERSION_SUFFIX
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Tenstorrent AI kernel driver");
-MODULE_VERSION(TTDRIVER_VER);
+MODULE_VERSION(TENSTORRENT_DRIVER_VERSION_STRING);
 
 static uint max_devices = 32;
 module_param(max_devices, uint, 0444);
@@ -109,7 +113,7 @@ static int __init ttdriver_init(void)
 {
 	int err = 0;
 
-	printk(KERN_INFO "Loading Tenstorrent AI driver module v%s.\n", TTDRIVER_VER);
+	printk(KERN_INFO "Loading Tenstorrent AI driver module v%s.\n", TENSTORRENT_DRIVER_VERSION_STRING);
 
 	err = init_char_driver(max_devices);
 	if (err == 0)

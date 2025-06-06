@@ -25,7 +25,7 @@ help:
 
 dkms:
 	sudo dkms add .
-	sudo dkms install tenstorrent/1.34
+	sudo dkms install tenstorrent/2.0.0
 	sudo modprobe tenstorrent
 
 akms:

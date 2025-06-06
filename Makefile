@@ -28,6 +28,10 @@ dkms:
 	sudo dkms install tenstorrent/2.0.0
 	sudo modprobe tenstorrent
 
+akms:
+	doas akms install .
+	doas modprobe tenstorrent
+
 # Helper for running the driver tests in a VM.
 # Supposed to be paired with https://github.com/TTDRosen/qemu-utils
 # make TT_QEMU_ARCH=x86_64

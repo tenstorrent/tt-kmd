@@ -60,6 +60,7 @@
 #define TELEMETRY_BM_APP_FW_VERSION 26
 #define TELEMETRY_FLASH_BUNDLE_VERSION 28
 #define TELEMETRY_FAN_RPM 41
+#define TELEMETRY_ASIC_ID 61
 
 #define IATU_BASE 0x1000	// Relative to the start of BAR2
 #define IATU_OUTBOUND 0
@@ -372,6 +373,7 @@ static const struct tt_attribute_data bh_attributes[] = {
 	{ __ATTR(tt_serial, S_IRUGO, bh_show_card_serial, NULL) },
 	{ __ATTR(tt_m3app_fw_ver, S_IRUGO, bh_show_fw_ver, NULL) },
 	{ __ATTR(tt_fw_bundle_ver, S_IRUGO, bh_show_fw_ver, NULL) },
+	{ __ATTR(tt_asic_id, S_IRUGO, bh_show_card_serial, NULL) },
 	{ __ATTR(tt_card_type,  S_IRUGO, bh_show_card_type, NULL) },
 	{ __ATTR_NULL }
 };
@@ -384,6 +386,7 @@ static const int bh_attributes_ids[] = {
 	TELEMETRY_BOARD_ID,
 	TELEMETRY_BM_APP_FW_VERSION,
 	TELEMETRY_FLASH_BUNDLE_VERSION,
+	TELEMETRY_ASIC_ID,
 	-1,
 };
 

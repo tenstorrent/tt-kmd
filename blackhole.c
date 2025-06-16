@@ -994,6 +994,12 @@ static void blackhole_create_sysfs_groups(struct tenstorrent_device *tt_dev) {
 		dev_err(&tt_dev->dev, "PCIe perf counters unavailable: %d\n", ret);
 }
 
+static void blackhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, u32 data, int noc)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	noc_write32(bh, x, y, addr, data, noc);
+}
+
 struct tenstorrent_device_class blackhole_class = {
 	.name = "Blackhole",
 	.instance_size = sizeof(struct blackhole_device),
@@ -1014,4 +1020,5 @@ struct tenstorrent_device_class blackhole_class = {
 	.restore_reset_state = blackhole_restore_reset_state,
 	.configure_outbound_atu = blackhole_configure_outbound_atu,
 	.create_sysfs_groups = blackhole_create_sysfs_groups,
+	.noc_write32 = blackhole_noc_write32,
 };

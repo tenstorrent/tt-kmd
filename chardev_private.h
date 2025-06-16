@@ -38,6 +38,8 @@ struct chardev_private {
 	struct list_head open_fd;	// node in struct tenstorrent_device.open_fds_list
 
 	DECLARE_BITMAP(tlbs, TENSTORRENT_MAX_INBOUND_TLBS);	// TLBs owned by this fd
+
+	struct tenstorrent_noc_write_on_release write_on_release;
 };
 
 struct chardev_private *get_tenstorrent_priv(struct file *f);

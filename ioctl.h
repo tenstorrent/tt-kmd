@@ -25,6 +25,7 @@
 #define TENSTORRENT_IOCTL_ALLOCATE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 11)
 #define TENSTORRENT_IOCTL_FREE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 12)
 #define TENSTORRENT_IOCTL_CONFIGURE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 13)
+#define TENSTORRENT_IOCTL_SET_NOC_CLEANUP		_IO(TENSTORRENT_IOCTL_MAGIC, 14)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -291,6 +292,37 @@ struct tenstorrent_configure_tlb_out {
 struct tenstorrent_configure_tlb {
 	struct tenstorrent_configure_tlb_in in;
 	struct tenstorrent_configure_tlb_out out;
+};
+
+/**
+ * TENSTORRENT_IOCTL_SET_NOC_CLEANUP - Register a cleanup action
+ *
+ * Registers an automatic NOC write operation that the driver will perform on
+ * the device when the file descriptor is closed. This provides a reliable
+ * cleanup mechanism for device-side software in case the host-side userspace
+ * application terminates abnormally (e.g. segfault, OOM killer).
+ *
+ * A previously registered action can be cleared by setting @enabled to 0.
+ *
+ * @argsz: Must be sizeof(struct tenstorrent_set_noc_cleanup).
+ * @flags: Reserved for future use, must be 0.
+ * @enabled: Set to 1 to register the action, or 0 to clear it.
+ * @x: X coordinate of the NOC tile to write to.
+ * @y: Y coordinate of the NOC tile to write to.
+ * @noc: NOC ID to write to; must be 0 or 1.
+ * @addr: NOC address to write to; must be 4-byte aligned.
+ * @data: Data to write to the NOC tile; upper 32 bits are ignored.
+ */
+struct tenstorrent_set_noc_cleanup {
+	__u32 argsz;
+	__u32 flags;
+	__u8 enabled;
+	__u8 x;
+	__u8 y;
+	__u8 noc;
+	__u32 reserved0;
+	__u64 addr;
+	__u64 data;
 };
 
 #endif

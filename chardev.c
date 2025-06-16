@@ -281,6 +281,52 @@ static long ioctl_lock_ctl(struct chardev_private *priv,
 	return 0;
 }
 
+static long ioctl_set_noc_cleanup(struct chardev_private *priv,
+			   struct tenstorrent_set_noc_cleanup __user *arg)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_set_noc_cleanup data = {0};
+
+	// First, ensure the underlying device class supports this operation.
+	if (!tt_dev->dev_class->noc_write32)
+		return -EOPNOTSUPP;
+
+	if (copy_from_user(&data, arg, sizeof(data)) != 0)
+		return -EFAULT;
+
+	// The `argsz` field allows the kernel to validate that the userspace caller
+	// has the same understanding of the structure size. For this specific
+	// version of the API, we require an exact match.
+	if (data.argsz != sizeof(data))
+		return -EINVAL;
+
+	// Validate reserved fields to ensure future compatibility.
+	if (data.flags != 0)
+		return -EINVAL;
+
+	// The `enabled` field acts as a boolean; reject other values.
+	if (data.enabled > 1)
+		return -EINVAL;
+
+	// Address must be 4-byte aligned.
+	if (data.addr & 0x3)
+		return -EINVAL;
+
+	// NOC must be either 0 or 1.
+	if (data.noc > 1)
+		return -EINVAL;
+
+	// TODO: Implement a more robust coordinate validation scheme.
+	if (data.x > 64 || data.y > 64)
+		return -EINVAL;
+
+	mutex_lock(&priv->mutex);
+	priv->noc_cleanup = data;
+	mutex_unlock(&priv->mutex);
+
+	return 0;
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	long ret = -EINVAL;
@@ -340,6 +386,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_CONFIGURE_TLB:
 			ret = ioctl_configure_tlb(priv, (struct tenstorrent_configure_tlb __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_SET_NOC_CLEANUP:
+			ret = ioctl_set_noc_cleanup(priv, (struct tenstorrent_set_noc_cleanup __user *)arg);
 			break;
 
 		default:
@@ -411,6 +461,16 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	struct chardev_private *priv = file->private_data;
 	struct tenstorrent_device *tt_dev = priv->device;
 	unsigned int bitpos;
+
+	if (priv->noc_cleanup.enabled) {
+		tt_dev->dev_class->noc_write32(
+			tt_dev,
+			priv->noc_cleanup.x,
+			priv->noc_cleanup.y,
+			priv->noc_cleanup.addr,
+			priv->noc_cleanup.data & 0xFFFFFFFF,
+			priv->noc_cleanup.noc);
+	}
 
 	decrement_cdev_open_count(tt_dev);
 

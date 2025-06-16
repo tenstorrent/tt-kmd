@@ -13,6 +13,9 @@
 #include "ioctl.h"
 #include "test_failure.h"
 
+class EnumeratedDevice;
+bool is_blackhole_noc_translation_enabled(const EnumeratedDevice &dev);
+
 class TlbHandle
 {
     int fd;

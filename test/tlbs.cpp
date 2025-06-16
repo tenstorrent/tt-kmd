@@ -17,29 +17,6 @@
 #include "test_failure.h"
 #include "tlbs.h"
 
-namespace
-{
-
-struct xy_t
-{
-    uint32_t x;
-    uint32_t y;
-};
-
-static std::random_device RD;
-static std::mt19937_64 RNG(RD());
-
-uint64_t random_aligned_address(uint64_t maximum, uint64_t alignment = 0x4)
-{
-    std::uniform_int_distribution<uint64_t> dist(0, maximum / alignment - 1);
-    return dist(RNG) * alignment;
-}
-
-void fill_with_random_data(std::vector<uint32_t> &data)
-{
-    std::generate(data.begin(), data.end(), [&]{ return RNG(); });
-}
-
 bool is_blackhole_noc_translation_enabled(const EnumeratedDevice &dev)
 {
     static constexpr uint64_t BAR0_UC_OFFSET = 0; // HACK: avoids a QUERY_MAPPINGS
@@ -63,6 +40,29 @@ bool is_blackhole_noc_translation_enabled(const EnumeratedDevice &dev)
     munmap(mem, BAR0_SIZE);
 
     return translated;
+}
+
+namespace
+{
+
+struct xy_t
+{
+    uint32_t x;
+    uint32_t y;
+};
+
+static std::random_device RD;
+static std::mt19937_64 RNG(RD());
+
+uint64_t random_aligned_address(uint64_t maximum, uint64_t alignment = 0x4)
+{
+    std::uniform_int_distribution<uint64_t> dist(0, maximum / alignment - 1);
+    return dist(RNG) * alignment;
+}
+
+void fill_with_random_data(std::vector<uint32_t> &data)
+{
+    std::generate(data.begin(), data.end(), [&]{ return RNG(); });
 }
 
 template <size_t WINDOW_SIZE>

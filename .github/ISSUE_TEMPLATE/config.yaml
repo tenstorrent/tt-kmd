@@ -1,0 +1,26 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a general question or seek support
+    url: https://discord.gg/tvhGzHQwaj # Replace with your forum/mailing list/IRC link
+    about: For general questions or troubleshooting that isn't a bug report or feature request.
+  - name: Read the Contribution Guidelines
+    url: https://github.com/your-org/your-repo/blob/main/CONTRIBUTING.md # Adjust repo path
+    about: Please read our guidelines before submitting an issue or pull request.
+
+issue_templates:
+  - name: Bug Report
+    about: Report a bug, unexpected behavior, or crash in the Linux Kernel driver.
+    url: .github/ISSUE_TEMPLATE/bug_report.md
+    labels: ["bug"]
+  - name: Feature Request
+    about: Propose a new feature or enhancement for the driver.
+    url: .github/ISSUE_TEMPLATE/feature_request.md
+    labels: ["enhancement", "feature"]
+  - name: Documentation Issue
+    about: Report problems or suggest improvements for the driver's documentation.
+    url: .github/ISSUE_TEMPLATE/documentation_issue.md
+    labels: ["documentation"]
+  - name: Support Request / Question
+    about: Ask a specific question about using or integrating the driver (if not covered by community forum).
+    url: .github/ISSUE_TEMPLATE/support_request.md
+    labels: ["question", "support"]

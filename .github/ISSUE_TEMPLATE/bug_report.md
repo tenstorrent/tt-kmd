@@ -2,7 +2,7 @@
 name: Bug Report
 about: Report a bug, unexpected behavior, or crash in the Linux Kernel driver.
 title: "[Bug]: "
-labels: ["bug", "driver"]
+labels: ["bug"]
 assignees: ''
 ---
 

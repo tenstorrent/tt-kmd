@@ -43,7 +43,7 @@ Please provide the following details about your Linux kernel environment:
 
 ### Hardware Information
 
-* **Specific Device Affected:** (e.g., BlackHole, WormHole, etc.)
+* **Specific Device Affected:** (e.g., p150a, n300, etc.)
 * **Host System Model:** (e.g., Dell XPS 15, Custom PC)
 * **CPU:**
 

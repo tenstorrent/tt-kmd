@@ -30,7 +30,7 @@ Please provide the following details about your Linux kernel environment:
 
 ### Hardware Information
 
-* **Specific Device Affected:** (e.g., BlackHole, WormHole, etc.)
+* **Specific Device Affected:** (e.g., n300, p150a, etc.)
 * **Host System Information:**
 
 ### Relevant Logs or Error Messages (if any)

@@ -61,6 +61,7 @@
 #define ARC_MSG_QUEUE_RES_WPTR(base) ((base) + 0x14)
 #define ARC_MSG_TYPE_ASIC_STATE0 0xA0
 #define ARC_MSG_TYPE_ASIC_STATE3 0xA3
+#define ARC_MSG_TYPE_SET_WDT_TIMEOUT 0xC1
 
 // These are from ARC FW telemetry.h, guaranteed not to change
 #define TELEMETRY_BOARD_ID 1
@@ -816,6 +817,12 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 	msg.header = ARC_MSG_TYPE_ASIC_STATE0;
 	if (!send_arc_message(bh, &msg))
 		dev_err(&tt_dev->pdev->dev, "Failed to send ARC message for A0 state\n");
+
+	memset(&msg, 0, sizeof(msg));
+	msg.header = ARC_MSG_TYPE_SET_WDT_TIMEOUT;
+	msg.payload[0] = 1000; // Set watchdog timeout to 1000 ms.
+	if (!send_arc_message(bh, &msg))
+		dev_warn(&tt_dev->pdev->dev, "Failed to set ARC watchdog timeout (this is normal for old FW)\n");
 
 	return true;
 }

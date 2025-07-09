@@ -253,6 +253,32 @@ static void noc_write32(struct blackhole_device *bh, u32 x, u32 y, u64 addr, u32
 	mutex_unlock(&bh->kernel_tlb_mutex);
 }
 
+#define ARC_CSM_BASE 0x10000000
+#define ARC_CSM_SIZE (1 << 19)
+static bool is_range_within_csm(u64 addr, size_t len)
+{
+	return (addr >= ARC_CSM_BASE) && (addr <= (ARC_CSM_BASE + ARC_CSM_SIZE) - len);
+}
+
+static int csm_read32(struct blackhole_device *bh, u64 addr, u32 *value)
+{
+	if (!is_range_within_csm(addr, sizeof(u32)))
+		return -EINVAL;
+
+	*value = noc_read32(bh, ARC_X, ARC_Y, addr);
+	return 0;
+}
+
+static int csm_write32(struct blackhole_device *bh, u64 addr, u32 value)
+{
+	if (!is_range_within_csm(addr, sizeof(u32)))
+		return -EINVAL;
+
+	noc_write32(bh, ARC_X, ARC_Y, addr, value);
+	return 0;
+}
+
+
 // BH has two PCIE instances, the function reads NOC ID to find out which one is active
 static bool blackhole_detect_pcie_noc_x(struct blackhole_device *bh, u32 *noc_x) {
 	*noc_x = ioread32(bh->noc2axi_cfg + NOC_ID_OFFSET) & 0x3F;
@@ -590,13 +616,6 @@ static const struct hwmon_chip_info bh_hwmon_chip_info = {
 	.info = bh_hwmon_channel_info,
 };
 
-#define ARC_CSM_BASE 0x10000000
-#define ARC_CSM_SIZE (1 << 19)
-static bool is_address_within_csm(u64 addr)
-{
-	return addr >= ARC_CSM_BASE && addr < (ARC_CSM_BASE + ARC_CSM_SIZE);
-}
-
 static int telemetry_probe(struct tenstorrent_device *tt_dev) {
 	struct device *hwmon_device;
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
@@ -607,7 +626,7 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev) {
 	u32 num_entries;
 	u32 i, j;
 
-	if (!is_address_within_csm(base_addr) || !is_address_within_csm(data_addr)) {
+	if (!is_range_within_csm(base_addr, 1) || !is_range_within_csm(data_addr, 1)) {
 		dev_err(&tt_dev->pdev->dev, "Telemetry not available\n");
 		return -ENODEV;
 	}
@@ -681,16 +700,25 @@ struct arc_msg {
 static bool push_arc_msg(struct blackhole_device *bh, const struct arc_msg *msg, u32 queue_base, u32 num_entries)
 {
 	u32 request_base = queue_base + ARC_MSG_QUEUE_HEADER_SIZE;
-	u32 wptr = noc_read32(bh, ARC_X, ARC_Y, ARC_MSG_QUEUE_REQ_WPTR(queue_base));
-	unsigned long timeout = jiffies + msecs_to_jiffies(ARC_MSG_TIMEOUT_MS);
+	unsigned long timeout;
+	u32 wptr;
 	u32 slot;
 	u32 req_offset;
 	int i;
 
+	if (csm_read32(bh, ARC_MSG_QUEUE_REQ_WPTR(queue_base), &wptr) != 0)
+		return false;
+
 	// Wait until there is space in the request queue or we timeout.
+	timeout = jiffies + msecs_to_jiffies(ARC_MSG_TIMEOUT_MS);
 	for (;;) {
-		u32 rptr = noc_read32(bh, ARC_X, ARC_Y, ARC_MSG_QUEUE_REQ_RPTR(queue_base));
-		u32 num_occupied = (wptr - rptr) % (2 * num_entries);
+		u32 rptr;
+		u32 num_occupied;
+
+		if (csm_read32(bh, ARC_MSG_QUEUE_REQ_RPTR(queue_base), &rptr) != 0)
+			return false;
+
+		num_occupied = (wptr - rptr) % (2 * num_entries);
 		if (num_occupied < num_entries)
 			break;
 
@@ -708,12 +736,15 @@ static bool push_arc_msg(struct blackhole_device *bh, const struct arc_msg *msg,
 	for (i = 0; i < 8; ++i) {
 		u32 addr = request_base + req_offset + (i * sizeof(u32));
 		u32 value = (i == 0) ? msg->header : msg->payload[i - 1];
-		noc_write32(bh, ARC_X, ARC_Y, addr, value);
+
+		if (csm_write32(bh, addr, value) != 0)
+			return false;
 	}
 
 	// Increment the request write pointer.
 	wptr = (wptr + 1) % (2 * num_entries);
-	noc_write32(bh, ARC_X, ARC_Y, ARC_MSG_QUEUE_REQ_WPTR(queue_base), wptr);
+	if (csm_write32(bh, ARC_MSG_QUEUE_REQ_WPTR(queue_base), wptr) != 0)
+		return false;
 
 	return true;
 }
@@ -721,16 +752,25 @@ static bool push_arc_msg(struct blackhole_device *bh, const struct arc_msg *msg,
 static bool pop_arc_msg(struct blackhole_device *bh, struct arc_msg *msg, u32 queue_base, u32 num_entries)
 {
 	u32 response_base = queue_base + ARC_MSG_QUEUE_HEADER_SIZE + (num_entries * sizeof(struct arc_msg));
-	u32 rptr = noc_read32(bh, ARC_X, ARC_Y, ARC_MSG_QUEUE_RES_RPTR(queue_base));
-	unsigned long timeout = jiffies + msecs_to_jiffies(ARC_MSG_TIMEOUT_MS);
+	unsigned long timeout;
+	u32 rptr;
 	u32 slot;
 	u32 response_offset ;
 	int i;
 
+	if (csm_read32(bh, ARC_MSG_QUEUE_RES_RPTR(queue_base), &rptr) != 0)
+		return false;
+
 	// Wait until there is a message in the response queue or we timeout.
+	timeout = jiffies + msecs_to_jiffies(ARC_MSG_TIMEOUT_MS);
 	for (;;) {
-		u32 wptr = noc_read32(bh, ARC_X, ARC_Y, ARC_MSG_QUEUE_RES_WPTR(queue_base));
-		u32 num_occupied = (wptr - rptr) % (2 * num_entries);
+		u32 wptr;
+		u32 num_occupied;
+
+		if (csm_read32(bh, ARC_MSG_QUEUE_RES_WPTR(queue_base), &wptr) != 0)
+			return false;
+
+		num_occupied = (wptr - rptr) % (2 * num_entries);
 		if (num_occupied > 0)
 			break;
 
@@ -745,23 +785,40 @@ static bool pop_arc_msg(struct blackhole_device *bh, struct arc_msg *msg, u32 qu
 	// Read the message header and payload from the response queue.
 	slot = rptr % num_entries;
 	response_offset = slot * sizeof(struct arc_msg);
-	msg->header = noc_read32(bh, ARC_X, ARC_Y, response_base + response_offset);
-	for (i = 0; i < 7; ++i)
-		msg->payload[i] = noc_read32(bh, ARC_X, ARC_Y, response_base + response_offset + ((i + 1) * sizeof(u32)));
+	if (csm_read32(bh, response_base + response_offset, &msg->header) != 0)
+		return false;
+
+	for (i = 0; i < 7; ++i) {
+		u32 addr = response_base + response_offset + ((i + 1) * sizeof(u32));
+
+		if (csm_read32(bh, addr, &msg->payload[i]) != 0)
+			return false;
+	}
 
 	// Increment the response read pointer.
 	rptr = (rptr + 1) % (2 * num_entries);
-	noc_write32(bh, ARC_X, ARC_Y, ARC_MSG_QUEUE_RES_RPTR(queue_base), rptr);
+	if (csm_write32(bh, ARC_MSG_QUEUE_RES_RPTR(queue_base), rptr) != 0)
+		return false;
 
 	return true;
 }
 
 static bool send_arc_message(struct blackhole_device *bh, struct arc_msg *msg)
 {
-	u32 queue_ctrl_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_MSG_QCB_PTR);
-	u32 queue_base = noc_read32(bh, ARC_X, ARC_Y, queue_ctrl_addr + 0);
-	u32 queue_info = noc_read32(bh, ARC_X, ARC_Y, queue_ctrl_addr + 4);
-	u32 num_entries = queue_info & 0xFF;
+	u32 queue_ctrl_addr;
+	u32 queue_base;
+	u32 queue_info;
+	u32 num_entries;
+
+	queue_ctrl_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_MSG_QCB_PTR);
+
+	if (csm_read32(bh, queue_ctrl_addr + 0, &queue_base) != 0)
+		return false;
+
+	if (csm_read32(bh, queue_ctrl_addr + 4, &queue_info) != 0)
+		return false;
+
+	num_entries = queue_info & 0xFF;
 
 	if (!push_arc_msg(bh, msg, queue_base, num_entries))
 		return false;

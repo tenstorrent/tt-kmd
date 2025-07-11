@@ -877,7 +877,7 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 
 	memset(&msg, 0, sizeof(msg));
 	msg.header = ARC_MSG_TYPE_SET_WDT_TIMEOUT;
-	msg.payload[0] = 1000; // Set watchdog timeout to 1000 ms.
+	msg.payload[0] = 1000 * auto_reset_timeout; // Convert seconds to milliseconds
 	if (!send_arc_message(bh, &msg))
 		dev_warn(&tt_dev->pdev->dev, "Failed to set ARC watchdog timeout (this is normal for old FW)\n");
 

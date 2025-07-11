@@ -7,6 +7,17 @@ on:
 
 jobs:
 
+  build-nix:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: DeterminateSystems/nix-installer-action@v18
+    - run: nix flake check
+    - run: ./contrib/packaging/nix/ci.sh
+
   build-dkms:
     strategy:
       matrix:

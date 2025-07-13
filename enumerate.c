@@ -30,8 +30,8 @@ static DEFINE_MUTEX(tenstorrent_dev_idr_mutex);
 
 #if !IS_ENABLED(CONFIG_HWMON)
 struct device *devm_hwmon_device_register_with_info(struct device *,
-        const char *, void *, const struct hwmon_chip_info *, const struct
-        attribute_group **) { return NULL; }
+	const char *, void *, const struct hwmon_chip_info *, const struct
+	attribute_group **) { return NULL; }
 #endif
 
 static int tenstorrent_reboot_notifier(struct notifier_block *nb,

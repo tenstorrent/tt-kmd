@@ -5,6 +5,8 @@
 #include <linux/bitfield.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/jiffies.h>
+#include <linux/delay.h>
 
 #include "blackhole.h"
 #include "pcie.h"
@@ -48,6 +50,19 @@
 #define ARC_TELEMETRY_PTR RESET_SCRATCH(13)
 #define ARC_TELEMETRY_DATA RESET_SCRATCH(12)
 
+// ARC FW has a messaging interface, see msgqueue.c in tt-zephyr-platforms.git
+#define ARC_MSG_QCB_PTR RESET_SCRATCH(11) // Message Queue Control Block
+#define ARC_MSI_FIFO 0x800B0000           // Write 0 to trigger the ARC message queue processor
+#define ARC_MSG_QUEUE_HEADER_SIZE 32      // Header contains request and response read/write pointers
+#define ARC_MSG_TIMEOUT_MS 100            // Wait this long for ARC message queue operations
+#define ARC_MSG_QUEUE_REQ_WPTR(base) ((base) + 0x00)
+#define ARC_MSG_QUEUE_RES_RPTR(base) ((base) + 0x04)
+#define ARC_MSG_QUEUE_REQ_RPTR(base) ((base) + 0x10)
+#define ARC_MSG_QUEUE_RES_WPTR(base) ((base) + 0x14)
+#define ARC_MSG_TYPE_ASIC_STATE0 0xA0
+#define ARC_MSG_TYPE_ASIC_STATE3 0xA3
+#define ARC_MSG_TYPE_SET_WDT_TIMEOUT 0xC1
+
 // These are from ARC FW telemetry.h, guaranteed not to change
 #define TELEMETRY_BOARD_ID 1
 #define TELEMETRY_VCORE 6
@@ -60,6 +75,7 @@
 #define TELEMETRY_BM_APP_FW_VERSION 26
 #define TELEMETRY_FLASH_BUNDLE_VERSION 28
 #define TELEMETRY_FAN_RPM 41
+#define TELEMETRY_ASIC_ID 61
 
 #define IATU_BASE 0x1000	// Relative to the start of BAR2
 #define IATU_OUTBOUND 0
@@ -237,6 +253,32 @@ static void noc_write32(struct blackhole_device *bh, u32 x, u32 y, u64 addr, u32
 	mutex_unlock(&bh->kernel_tlb_mutex);
 }
 
+#define ARC_CSM_BASE 0x10000000
+#define ARC_CSM_SIZE (1 << 19)
+static bool is_range_within_csm(u64 addr, size_t len)
+{
+	return (addr >= ARC_CSM_BASE) && (addr <= (ARC_CSM_BASE + ARC_CSM_SIZE) - len);
+}
+
+static int csm_read32(struct blackhole_device *bh, u64 addr, u32 *value)
+{
+	if (!is_range_within_csm(addr, sizeof(u32)))
+		return -EINVAL;
+
+	*value = noc_read32(bh, ARC_X, ARC_Y, addr);
+	return 0;
+}
+
+static int csm_write32(struct blackhole_device *bh, u64 addr, u32 value)
+{
+	if (!is_range_within_csm(addr, sizeof(u32)))
+		return -EINVAL;
+
+	noc_write32(bh, ARC_X, ARC_Y, addr, value);
+	return 0;
+}
+
+
 // BH has two PCIE instances, the function reads NOC ID to find out which one is active
 static bool blackhole_detect_pcie_noc_x(struct blackhole_device *bh, u32 *noc_x) {
 	*noc_x = ioread32(bh->noc2axi_cfg + NOC_ID_OFFSET) & 0x3F;
@@ -372,6 +414,7 @@ static const struct tt_attribute_data bh_attributes[] = {
 	{ __ATTR(tt_serial, S_IRUGO, bh_show_card_serial, NULL) },
 	{ __ATTR(tt_m3app_fw_ver, S_IRUGO, bh_show_fw_ver, NULL) },
 	{ __ATTR(tt_fw_bundle_ver, S_IRUGO, bh_show_fw_ver, NULL) },
+	{ __ATTR(tt_asic_id, S_IRUGO, bh_show_card_serial, NULL) },
 	{ __ATTR(tt_card_type,  S_IRUGO, bh_show_card_type, NULL) },
 	{ __ATTR_NULL }
 };
@@ -384,6 +427,7 @@ static const int bh_attributes_ids[] = {
 	TELEMETRY_BOARD_ID,
 	TELEMETRY_BM_APP_FW_VERSION,
 	TELEMETRY_FLASH_BUNDLE_VERSION,
+	TELEMETRY_ASIC_ID,
 	-1,
 };
 
@@ -572,13 +616,6 @@ static const struct hwmon_chip_info bh_hwmon_chip_info = {
 	.info = bh_hwmon_channel_info,
 };
 
-#define ARC_CSM_BASE 0x10000000
-#define ARC_CSM_SIZE (1 << 19)
-static bool is_address_within_csm(u64 addr)
-{
-	return addr >= ARC_CSM_BASE && addr < (ARC_CSM_BASE + ARC_CSM_SIZE);
-}
-
 static int telemetry_probe(struct tenstorrent_device *tt_dev) {
 	struct device *hwmon_device;
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
@@ -589,7 +626,7 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev) {
 	u32 num_entries;
 	u32 i, j;
 
-	if (!is_address_within_csm(base_addr) || !is_address_within_csm(data_addr)) {
+	if (!is_range_within_csm(base_addr, 1) || !is_range_within_csm(data_addr, 1)) {
 		dev_err(&tt_dev->pdev->dev, "Telemetry not available\n");
 		return -ENODEV;
 	}
@@ -655,6 +692,146 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev) {
 	return 0;
 }
 
+struct arc_msg {
+	u32 header;
+	u32 payload[7];
+};
+
+static bool push_arc_msg(struct blackhole_device *bh, const struct arc_msg *msg, u32 queue_base, u32 num_entries)
+{
+	u32 request_base = queue_base + ARC_MSG_QUEUE_HEADER_SIZE;
+	unsigned long timeout;
+	u32 wptr;
+	u32 slot;
+	u32 req_offset;
+	int i;
+
+	if (csm_read32(bh, ARC_MSG_QUEUE_REQ_WPTR(queue_base), &wptr) != 0)
+		return false;
+
+	// Wait until there is space in the request queue or we timeout.
+	timeout = jiffies + msecs_to_jiffies(ARC_MSG_TIMEOUT_MS);
+	for (;;) {
+		u32 rptr;
+		u32 num_occupied;
+
+		if (csm_read32(bh, ARC_MSG_QUEUE_REQ_RPTR(queue_base), &rptr) != 0)
+			return false;
+
+		num_occupied = (wptr - rptr) % (2 * num_entries);
+		if (num_occupied < num_entries)
+			break;
+
+		if (time_after(jiffies, timeout)) {
+			dev_err(&bh->tt.pdev->dev, "Timeout waiting for space in ARC message queue\n");
+			return false;
+		}
+
+		usleep_range(100, 200);
+	}
+
+	// Write the message header and payload to the request queue.
+	slot = wptr % num_entries;
+	req_offset = slot * sizeof(struct arc_msg);
+	for (i = 0; i < 8; ++i) {
+		u32 addr = request_base + req_offset + (i * sizeof(u32));
+		u32 value = (i == 0) ? msg->header : msg->payload[i - 1];
+
+		if (csm_write32(bh, addr, value) != 0)
+			return false;
+	}
+
+	// Increment the request write pointer.
+	wptr = (wptr + 1) % (2 * num_entries);
+	if (csm_write32(bh, ARC_MSG_QUEUE_REQ_WPTR(queue_base), wptr) != 0)
+		return false;
+
+	return true;
+}
+
+static bool pop_arc_msg(struct blackhole_device *bh, struct arc_msg *msg, u32 queue_base, u32 num_entries)
+{
+	u32 response_base = queue_base + ARC_MSG_QUEUE_HEADER_SIZE + (num_entries * sizeof(struct arc_msg));
+	unsigned long timeout;
+	u32 rptr;
+	u32 slot;
+	u32 response_offset ;
+	int i;
+
+	if (csm_read32(bh, ARC_MSG_QUEUE_RES_RPTR(queue_base), &rptr) != 0)
+		return false;
+
+	// Wait until there is a message in the response queue or we timeout.
+	timeout = jiffies + msecs_to_jiffies(ARC_MSG_TIMEOUT_MS);
+	for (;;) {
+		u32 wptr;
+		u32 num_occupied;
+
+		if (csm_read32(bh, ARC_MSG_QUEUE_RES_WPTR(queue_base), &wptr) != 0)
+			return false;
+
+		num_occupied = (wptr - rptr) % (2 * num_entries);
+		if (num_occupied > 0)
+			break;
+
+		if (time_after(jiffies, timeout)) {
+			dev_err(&bh->tt.pdev->dev, "Timeout waiting for ARC response\n");
+			return false;
+		}
+
+		usleep_range(100, 200);
+	}
+
+	// Read the message header and payload from the response queue.
+	slot = rptr % num_entries;
+	response_offset = slot * sizeof(struct arc_msg);
+	if (csm_read32(bh, response_base + response_offset, &msg->header) != 0)
+		return false;
+
+	for (i = 0; i < 7; ++i) {
+		u32 addr = response_base + response_offset + ((i + 1) * sizeof(u32));
+
+		if (csm_read32(bh, addr, &msg->payload[i]) != 0)
+			return false;
+	}
+
+	// Increment the response read pointer.
+	rptr = (rptr + 1) % (2 * num_entries);
+	if (csm_write32(bh, ARC_MSG_QUEUE_RES_RPTR(queue_base), rptr) != 0)
+		return false;
+
+	return true;
+}
+
+static bool send_arc_message(struct blackhole_device *bh, struct arc_msg *msg)
+{
+	u32 queue_ctrl_addr;
+	u32 queue_base;
+	u32 queue_info;
+	u32 num_entries;
+
+	queue_ctrl_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_MSG_QCB_PTR);
+
+	if (csm_read32(bh, queue_ctrl_addr + 0, &queue_base) != 0)
+		return false;
+
+	if (csm_read32(bh, queue_ctrl_addr + 4, &queue_info) != 0)
+		return false;
+
+	num_entries = queue_info & 0xFF;
+
+	if (!push_arc_msg(bh, msg, queue_base, num_entries))
+		return false;
+
+	// Trigger ARC interrupt
+	noc_write32(bh, ARC_X, ARC_Y, ARC_MSI_FIFO, 0);
+
+	if (!pop_arc_msg(bh, msg, queue_base, num_entries))
+		return false;
+
+	return msg->header == 0;
+}
+
 static bool blackhole_init(struct tenstorrent_device *tt_dev) {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 
@@ -686,21 +863,45 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev) {
 	return true;
 }
 
-static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev) {
+static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	struct pci_dev *pdev = tt_dev->pdev;
+	struct arc_msg msg = { 0 };
+
 	pcie_set_readrq(pdev, MAX_MRRS);
+
+	msg.header = ARC_MSG_TYPE_ASIC_STATE0;
+	if (!send_arc_message(bh, &msg))
+		dev_err(&tt_dev->pdev->dev, "Failed to send ARC message for A0 state\n");
+
+	memset(&msg, 0, sizeof(msg));
+	msg.header = ARC_MSG_TYPE_SET_WDT_TIMEOUT;
+	msg.payload[0] = 1000 * auto_reset_timeout; // Convert seconds to milliseconds
+	if (!send_arc_message(bh, &msg))
+		dev_warn(&tt_dev->pdev->dev, "Failed to set ARC watchdog timeout (this is normal for old FW)\n");
+
 	return true;
 }
 
-static bool blackhole_post_hardware_init(struct tenstorrent_device *tt_dev) {
+static bool blackhole_post_hardware_init(struct tenstorrent_device *tt_dev)
+{
 	telemetry_probe(tt_dev);
 	return true;
 }
 
-static void blackhole_cleanup_hardware(struct tenstorrent_device *tt_dev) {
+static void blackhole_cleanup_hardware(struct tenstorrent_device *tt_dev)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	struct arc_msg msg = { 0 };
+
+	msg.header = ARC_MSG_TYPE_ASIC_STATE3;
+	if (!send_arc_message(bh, &msg))
+		dev_err(&tt_dev->dev, "Failed to send ARC message for A3 state\n");
 }
 
-static void blackhole_cleanup(struct tenstorrent_device *tt_dev) {
+static void blackhole_cleanup(struct tenstorrent_device *tt_dev)
+{
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 
 	if (bh->tlb_regs)

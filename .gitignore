@@ -6,3 +6,7 @@
 Module.symvers
 modules.order
 tenstorrent.mod.c
+
+# nix result symlink
+result
+result-*

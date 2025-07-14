@@ -1,1 +1,3 @@
-KERNEL=="tenstorrent*", MODE="0666"
+SUBSYSTEM=="tenstorrent", MODE="0666"
+SUBSYSTEM=="tenstorrent", ATTRS{device}=="0x401e", ATTR{tt_asic_id}=="?*", SYMLINK+="tenstorrent/by-id/wormhole-%s{tt_asic_id}"
+SUBSYSTEM=="tenstorrent", ATTRS{device}=="0xb140", ATTR{tt_asic_id}=="?*", SYMLINK+="tenstorrent/by-id/blackhole-%s{tt_asic_id}"

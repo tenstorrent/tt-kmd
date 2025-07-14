@@ -653,6 +653,9 @@ static void wormhole_hwmon_init(struct wormhole_device *wh_dev)
 	if (IS_ERR(hwmon_device))
 		goto wormhole_hwmon_init_err;
 
+	// Notify udev that telemetry attributes are now available.
+	kobject_uevent(&tt_dev->dev.kobj, KOBJ_CHANGE);
+
 	return;
 
 wormhole_hwmon_init_err:

@@ -16,11 +16,17 @@ The driver registers device files named `/dev/tenstorrent/%d`, one for each enum
 * You must have dkms installed.
     * `apt install dkms` (Debian, Ubuntu)
     * `dnf install dkms` (Fedora)
+    * `apk install akms` (Alpine)
     * `dnf install epel-release && dnf install dkms` (Enterprise Linux based)
 ```
 sudo dkms add .
 sudo dkms install tenstorrent/2.1.0
 sudo modprobe tenstorrent
+```
+* For Alpine linux
+```
+doas akms install .
+doas modeprobe tenstorrent
 ```
 (or reboot, driver will auto-load next boot)
 
@@ -48,4 +54,9 @@ services.udev.packages = [ config.boot.kernelPackages.tt-kmd ];
 ```
 sudo modprobe -r tenstorrent
 sudo dkms remove tenstorrent/2.1.0 --all
+```
+* For Alpine linux
+```
+doas modeprobe -r tenstorrent
+doas akms remove tenstorrent
 ```

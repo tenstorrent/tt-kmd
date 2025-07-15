@@ -16,7 +16,7 @@ struct tlb_descriptor {
 };
 
 int tenstorrent_device_allocate_tlb(struct tenstorrent_device *tt_dev,
-				    size_t *size);
+				    size_t size);
 int tenstorrent_device_free_tlb(struct tenstorrent_device *tt_dev,
 				unsigned int id);
 int tenstorrent_device_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,

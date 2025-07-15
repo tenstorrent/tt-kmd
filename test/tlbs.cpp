@@ -667,9 +667,6 @@ void TestTlbs(const EnumeratedDevice &dev)
 {
     switch (dev.type)
     {
-    case Grayskull:
-        // Unsupported.
-        return;
     case Wormhole:
         VerifyTlbQuantitiesWormhole(dev);
         VerifyTlbSizesWormhole(dev);

@@ -132,7 +132,6 @@ DeviceType IdentityDeviceType(PciBusDeviceFunction bdf)
 
     switch (device_id)
     {
-        case 0xfaca: return Grayskull;
         case 0x401e: return Wormhole;
         case 0xb140: return Blackhole;
 

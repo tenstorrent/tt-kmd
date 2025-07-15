@@ -909,7 +909,6 @@ long ioctl_allocate_tlb(struct chardev_private *priv,
 	struct tenstorrent_allocate_tlb_in in = {0};
 	struct tenstorrent_allocate_tlb_out out = {0};
 	struct tlb_descriptor tlb_desc = { 0 };
-	size_t size;
 	int id;
 	u64 encoded_id;
 
@@ -919,8 +918,7 @@ long ioctl_allocate_tlb(struct chardev_private *priv,
 	if (copy_from_user(&in, &arg->in, sizeof(in)))
 		return -EFAULT;
 
-	size = in.size;
-	id = tenstorrent_device_allocate_tlb(tt_dev, &size);
+	id = tenstorrent_device_allocate_tlb(tt_dev, in.size);
 
 	if (id < 0)
 		return id;

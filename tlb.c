@@ -7,7 +7,7 @@
 #include "device.h"
 
 int tenstorrent_device_allocate_tlb(struct tenstorrent_device *tt_dev,
-				    size_t *size)
+				    size_t size)
 {
 	const struct tenstorrent_device_class *dev_class = tt_dev->dev_class;
 	unsigned long id = 0;
@@ -22,8 +22,7 @@ int tenstorrent_device_allocate_tlb(struct tenstorrent_device *tt_dev,
 		long tlb_count = dev_class->tlb_counts[kind];
 		long tlb_size = dev_class->tlb_sizes[kind];
 
-		if (*size <= tlb_size) {
-			*size = tlb_size;
+		if (size == tlb_size) {
 			n = tlb_count;
 			break;
 		}

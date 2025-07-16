@@ -13,7 +13,7 @@
 #include "enumerate.h"
 #include "interrupt.h"
 #include "chardev.h"
-#include "grayskull.h"
+#include "device.h"
 #include "module.h"
 #include "memory.h"
 #include "chardev_private.h"
@@ -48,7 +48,14 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 {
 	struct tenstorrent_device *tt_dev = NULL;
 	int ordinal;
-	const struct tenstorrent_device_class *device_class = (const struct tenstorrent_device_class *)id->driver_data;
+	const struct tenstorrent_device_class *device_class;
+
+	if (!id->driver_data) {
+		dev_warn(&dev->dev, "Unsupported device\n");
+		return -ENODEV;
+	}
+
+	device_class = (const struct tenstorrent_device_class *)id->driver_data;
 
 	printk(KERN_INFO "Found a Tenstorrent %s device at bus %04x:%d.\n",
 	       device_class->name, (unsigned)pci_domain_nr(dev->bus), (int)dev->bus->number);

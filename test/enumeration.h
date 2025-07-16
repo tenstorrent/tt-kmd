@@ -12,7 +12,6 @@
 
 enum DeviceType
 {
-    Grayskull,
     Wormhole,
     Blackhole,
 };

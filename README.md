@@ -5,7 +5,6 @@
 [https://github.com/tenstorrent/tt-kmd](https://github.com/tenstorrent/tt-kmd)
 
 ## Supported hardware:
-* Grayskull
 * Wormhole
 * Blackhole
 

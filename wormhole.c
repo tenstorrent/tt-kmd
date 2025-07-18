@@ -282,7 +282,7 @@ static const struct attribute_group wh_pcie_perf_counters_group = {
 
 static u32 wh_arc_addr_to_sysreg(u32 arc_addr)
 {
-	return ARC_CSM_START + (arc_addr - 0x10000000);
+	return ARC_CSM_START + (arc_addr - ARC_CSM_BASE);
 }
 
 // Program the iATU so that BAR4 is directed to the system registers.
@@ -341,8 +341,7 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 	u32 num_entries;
 	u32 i, j;
 
-	// TODO: check if address is within ARC CSM.
-	if (base_addr == UINT_MAX || data_addr == UINT_MAX) {
+	if (!is_range_within_csm(base_addr, sizeof(u32)) || !is_range_within_csm(data_addr, sizeof(u32))) {
 		dev_err(&tt_dev->pdev->dev, "Telemetry not available\n");
 		return -ENODEV;
 	}
@@ -367,7 +366,12 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 		u32 tag_entry = ioread32(wh->bar4_mapping + wh_arc_addr_to_sysreg(tags_addr + (i * 4)));
 		u16 tag_id = tag_entry & 0xFFFF;
 		u16 offset = (tag_entry >> 16) & 0xFFFF;
-		u32 addr = data_addr + (offset * 4);
+		u32 addr = data_addr + (offset * sizeof(u32));
+
+		if (!is_range_within_csm(addr, sizeof(u32))) {
+			dev_err(&tt_dev->pdev->dev, "Telemetry tag %u has invalid address 0x%08X\n", tag_id, addr);
+			continue;
+		}
 
 		for (j = 0; j < ARRAY_SIZE(wh_sysfs_attributes); ++j) {
 			if (wh_sysfs_attributes[j].tag_id == tag_id)

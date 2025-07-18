@@ -244,13 +244,6 @@ static void noc_write32(struct blackhole_device *bh, u32 x, u32 y, u64 addr, u32
 	mutex_unlock(&bh->kernel_tlb_mutex);
 }
 
-#define ARC_CSM_BASE 0x10000000
-#define ARC_CSM_SIZE (1 << 19)
-static bool is_range_within_csm(u64 addr, size_t len)
-{
-	return (addr >= ARC_CSM_BASE) && (addr <= (ARC_CSM_BASE + ARC_CSM_SIZE) - len);
-}
-
 static int csm_read32(struct blackhole_device *bh, u64 addr, u32 *value)
 {
 	if (!is_range_within_csm(addr, sizeof(u32)))

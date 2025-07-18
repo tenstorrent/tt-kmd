@@ -132,12 +132,6 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 		register_reboot_notifier(&tt_dev->reboot_notifier);
 	}
 
-	if (tt_dev->attributes) {
-		const struct tt_attribute_data *data = tt_dev->attributes;
-		for (; data->attr.attr.name; data++)
-			device_create_file(&tt_dev->dev, &data->attr);
-	}
-
 	if (tt_dev->sysfs_attrs) {
 		const struct tenstorrent_sysfs_attr *data = tt_dev->sysfs_attrs;
 		for (; data->attr.attr.name; data++)
@@ -157,12 +151,6 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 
 	list_for_each_entry_safe(priv, tmp, &tt_dev->open_fds_list, open_fd) {
 		tenstorrent_memory_cleanup(priv);
-	}
-
-	if (tt_dev->attributes) {
-		const struct tt_attribute_data *data = tt_dev->attributes;
-		for (; data->attr.attr.name; data++)
-			device_remove_file(&tt_dev->dev, &data->attr);
 	}
 
 	if (tt_dev->sysfs_attrs) {

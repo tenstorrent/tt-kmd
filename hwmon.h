@@ -34,17 +34,4 @@ struct tt_hwmon_context {
 
 extern const struct hwmon_ops tt_hwmon_ops;
 
-struct tt_attribute_data {
-	struct device_attribute attr;
-	u32 reg_offset;
-	u32 mask;
-};
-
-ssize_t tt_show_attribute(struct device *dev, struct device_attribute *attr, char *buf);
-ssize_t tt_show_card_type(struct device *dev, struct device_attribute *attr, char *buf);
-ssize_t tt_show_card_serial(struct device *dev, struct device_attribute *attr, char *buf);
-ssize_t tt_show_fw_ver(struct device *dev, struct device_attribute *attr, char *buf);
-ssize_t tt_show_eth_fw_ver(struct device *dev, struct device_attribute *attr, char *buf);
-
-
 #endif

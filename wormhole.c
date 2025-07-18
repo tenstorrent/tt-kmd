@@ -13,6 +13,7 @@
 #include "module.h"
 #include "hwmon.h"
 #include "tlb.h"
+#include "telemetry.h"
 
 #define TLB_1M_WINDOW_COUNT 156
 #define TLB_1M_SHIFT 20
@@ -75,6 +76,9 @@
 #define TLB_REGS_START   (0x1FC00000 - BAR4_SOC_TARGET_ADDRESS)
 #define NOC2AXI_START    (0x1FD02000 - BAR4_SOC_TARGET_ADDRESS)
 
+#define ARC_TELEMETRY_PTR  (RESET_UNIT_START + 0x01D0)
+#define ARC_TELEMETRY_DATA (RESET_UNIT_START + 0x01D4)
+
 // kernel TLB is the last 16MB TLB
 #define KERNEL_TLB_INDEX (TLB_WINDOW_COUNT - 1)
 #define KERNEL_TLB_START (0x1E000000 - BAR4_SOC_TARGET_ADDRESS)
@@ -102,20 +106,115 @@ static void write_iatu_reg(struct wormhole_device *wh_dev, unsigned direction,
 	iowrite32(value, wh_dev->bar2_mapping + offset);
 }
 
-static struct tt_attribute_data wh_attributes[] = {
-	{ __ATTR(tt_aiclk,  S_IRUGO, tt_show_attribute, NULL), 0x60, 0xFFFF },
-	{ __ATTR(tt_axiclk, S_IRUGO, tt_show_attribute, NULL), 0x64, 0xFFFF },
-	{ __ATTR(tt_arcclk, S_IRUGO, tt_show_attribute, NULL), 0x68, 0xFFFF },
-	{ __ATTR(tt_card_type, S_IRUGO, tt_show_card_type, NULL), 0x10, 0x0 },
-	{ __ATTR(tt_serial, S_IRUGO, tt_show_card_serial, NULL), 0x10, 0x0 },
-	{ __ATTR(tt_arc_fw_ver, S_IRUGO, tt_show_fw_ver, NULL), 0x18, 0x0 },
-	{ __ATTR(tt_eth_fw_ver, S_IRUGO, tt_show_eth_fw_ver, NULL), 0x2C, 0x0 },
-	{ __ATTR(tt_m3bl_fw_ver, S_IRUGO, tt_show_fw_ver, NULL), 0x30, 0x0 },
-	{ __ATTR(tt_m3app_fw_ver, S_IRUGO, tt_show_fw_ver, NULL), 0x34, 0x0 },
-	{ __ATTR(tt_ttflash_ver, S_IRUGO, tt_show_fw_ver, NULL), 0xB8, 0x0 },
-	{ __ATTR(tt_fw_bundle_ver, S_IRUGO, tt_show_fw_ver, NULL), 0xC4, 0x0 },
-	{ __ATTR_NULL, 0, 0 }
+static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *attr, char *buf);
+static ssize_t sysfs_show_u64_hex(struct device *dev, struct device_attribute *attr, char *buf);
+static ssize_t sysfs_show_u32_ver(struct device *dev, struct device_attribute *attr, char *buf);
+static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute *attr, char *buf);
+
+static struct tenstorrent_sysfs_attr wh_sysfs_attributes[] = {
+	{ TELEMETRY_AICLK, __ATTR(tt_aiclk,  S_IRUGO, sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_AXICLK, __ATTR(tt_axiclk, S_IRUGO, sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_ARCCLK, __ATTR(tt_arcclk, S_IRUGO, sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_BOARD_ID, __ATTR(tt_serial, S_IRUGO, sysfs_show_u64_hex, NULL) },
+	{ TELEMETRY_BOARD_ID, __ATTR(tt_card_type, S_IRUGO, sysfs_show_card_type, NULL) },
+	{ TELEMETRY_FLASH_BUNDLE_VERSION, __ATTR(tt_fw_bundle_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_BM_APP_FW_VERSION, __ATTR(tt_m3app_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_TT_FLASH_VERSION, __ATTR(tt_ttflash_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_BM_BL_FW_VERSION, __ATTR(tt_m3bl_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_CM_FW_VERSION, __ATTR(tt_arc_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_ETH_FW_VERSION, __ATTR(tt_eth_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
+	{ 0, __ATTR_NULL }
 };
+
+static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	struct tenstorrent_sysfs_attr *data = container_of(attr, struct tenstorrent_sysfs_attr, attr);
+	unsigned i = data - wh_sysfs_attributes;
+	u64 offset = wh->sysfs_attr_offsets[i];
+	u32 value = 0;
+
+	if (offset == 0)
+		return -EINVAL;
+
+	value = ioread32(wh->bar4_mapping + offset);
+	return snprintf(buf, PAGE_SIZE, "%u\n", value);
+}
+
+static ssize_t sysfs_show_u64_hex(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	struct tenstorrent_sysfs_attr *data = container_of(attr, struct tenstorrent_sysfs_attr, attr);
+	unsigned i = data - wh_sysfs_attributes;
+	u64 offset = wh->sysfs_attr_offsets[i];
+	u32 hi, lo;
+
+	if (offset == 0)
+		return -EINVAL;
+
+	hi = ioread32(wh->bar4_mapping + offset);
+	lo = ioread32(wh->bar4_mapping + offset + 4);
+	return scnprintf(buf, PAGE_SIZE, "%08X%08X\n", hi, lo);
+}
+
+static ssize_t sysfs_show_u32_ver(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	struct tenstorrent_sysfs_attr *data = container_of(attr, struct tenstorrent_sysfs_attr, attr);
+	unsigned i = data - wh_sysfs_attributes;
+	u64 offset = wh->sysfs_attr_offsets[i];
+	u32 value = 0;
+	u32 major, minor, patch, ver;
+
+	if (offset == 0)
+		return -EINVAL;
+
+	value = ioread32(wh->bar4_mapping + offset);
+
+	// HACK: preserve behavior for eth_fw_ver.
+	if (data->tag_id == TELEMETRY_ETH_FW_VERSION) {
+		major = (value >> 16) & 0xFF;
+		minor = (value >> 12) & 0xF;
+		patch = (value >>  0) & 0xFFF;
+		return scnprintf(buf, PAGE_SIZE, "%u.%u.%u\n", major, minor, patch);
+	}
+
+	major = (value >> 24) & 0xFF;
+	minor = (value >> 16) & 0xFF;
+	patch = (value >>  8) & 0xFF;
+	ver = value & 0xFF;
+
+	return scnprintf(buf, PAGE_SIZE, "%u.%u.%u.%u\n", major, minor, patch, ver);
+}
+
+static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	struct tenstorrent_sysfs_attr *data = container_of(attr, struct tenstorrent_sysfs_attr, attr);
+	unsigned i = data - wh_sysfs_attributes;
+	u64 offset = wh->sysfs_attr_offsets[i];
+	u32 value;
+	u16 card_type;
+	char *card_name;
+
+	if (offset == 0)
+		return -EINVAL;
+
+	value = ioread32(wh->bar4_mapping + offset);
+	card_type = (value >> 4) & 0xFFFF;
+	switch (card_type) {
+	case 0x14: card_name = "n300"; break;
+	case 0x18: card_name = "n150"; break;
+	case 0x35: card_name = "galaxy-wormhole"; break;
+	default: card_name = "unknown"; break;
+	}
+
+	return scnprintf(buf, PAGE_SIZE, "%s\n", card_name);
+}
 
 
 #define NIU_COUNTERS_START (NOC2AXI_START + 0x200)
@@ -181,7 +280,8 @@ static const struct attribute_group wh_pcie_perf_counters_group = {
 	.attrs = wh_pcie_perf_counters_attrs,
 };
 
-static u32 wh_arc_addr_to_sysreg(u32 arc_addr) {
+static u32 wh_arc_addr_to_sysreg(u32 arc_addr)
+{
 	return ARC_CSM_START + (arc_addr - 0x10000000);
 }
 
@@ -228,6 +328,58 @@ fail_bar4:
 fail_bar2:
 	return false;
 }
+
+static int telemetry_probe(struct tenstorrent_device *tt_dev)
+{
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+
+	u32 base_addr = ioread32(wh->bar4_mapping + ARC_TELEMETRY_PTR);
+	u32 data_addr = ioread32(wh->bar4_mapping + ARC_TELEMETRY_DATA);
+
+	u32 version, major_ver, minor_ver, patch_ver;
+	u32 tags_addr = base_addr + 8;
+	u32 num_entries;
+	u32 i, j;
+
+	// TODO: check if address is within ARC CSM.
+	if (base_addr == UINT_MAX || data_addr == UINT_MAX) {
+		dev_err(&tt_dev->pdev->dev, "Telemetry not available\n");
+		return -ENODEV;
+	}
+
+	version = ioread32(wh->bar4_mapping + wh_arc_addr_to_sysreg(base_addr));
+	major_ver = (version >> 16) & 0xFF;
+	minor_ver = (version >> 8) & 0xFF;
+	patch_ver = version & 0xFF;
+
+	if (major_ver > 1) {
+		dev_err(&tt_dev->pdev->dev, "Unsupported telemetry version %u.%u.%u\n", major_ver, minor_ver, patch_ver);
+		return -ENOTSUPP;
+	}
+
+	num_entries = ioread32(wh->bar4_mapping + wh_arc_addr_to_sysreg(base_addr + 4));
+
+	wh->sysfs_attr_offsets = kzalloc(sizeof(u64) * ARRAY_SIZE(wh_sysfs_attributes), GFP_KERNEL);
+	if (!wh->sysfs_attr_offsets)
+		return -ENOMEM;
+
+	for (i = 0; i < num_entries; i++) {
+		u32 tag_entry = ioread32(wh->bar4_mapping + wh_arc_addr_to_sysreg(tags_addr + (i * 4)));
+		u16 tag_id = tag_entry & 0xFFFF;
+		u16 offset = (tag_entry >> 16) & 0xFFFF;
+		u32 addr = data_addr + (offset * 4);
+
+		for (j = 0; j < ARRAY_SIZE(wh_sysfs_attributes); ++j) {
+			if (wh_sysfs_attributes[j].tag_id == tag_id)
+				wh->sysfs_attr_offsets[j] = wh_arc_addr_to_sysreg(addr);
+		}
+	}
+
+	tt_dev->sysfs_attrs = wh_sysfs_attributes;
+
+	return 0;
+}
+
 
 static const struct tt_hwmon_attr wh_hwmon_attributes[] = {
 	{ hwmon_temp,  hwmon_temp_input,  0x74, 0,  GENMASK(15, 0), 1000,    16 },
@@ -280,8 +432,6 @@ static void wormhole_hwmon_init(struct wormhole_device *wh_dev) {
 	if (IS_ERR(hwmon_device))
 		goto wormhole_hwmon_init_err;
 
-	tt_dev->attributes = wh_attributes;
-
 	return;
 
 wormhole_hwmon_init_err:
@@ -307,6 +457,7 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 static bool wormhole_post_hardware_init(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
+	telemetry_probe(tt_dev);
 	wormhole_hwmon_init(wh_dev);
 
 	return true;
@@ -316,6 +467,8 @@ static void wormhole_cleanup_hardware(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
 	grayskull_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
+
+	kfree(wh_dev->sysfs_attr_offsets);
 }
 
 static void wormhole_cleanup(struct tenstorrent_device *tt_dev) {

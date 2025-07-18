@@ -15,6 +15,8 @@ struct wormhole_device {
 	u8 __iomem *bar4_mapping;
 
 	u8 saved_mps;
+
+	u64 *sysfs_attr_offsets;
 };
 
 #define tt_dev_to_wh_dev(ttdev) \

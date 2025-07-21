@@ -549,6 +549,12 @@ static void wormhole_create_sysfs_groups(struct tenstorrent_device *tt_dev) {
 		dev_err(&tt_dev->dev, "PCIe perf counters unavailable: %d\n", ret);
 }
 
+static void wormhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, u32 data, int noc)
+{
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	noc_write32(wh_dev, x, y, addr, data, noc);
+}
+
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
@@ -570,4 +576,5 @@ struct tenstorrent_device_class wormhole_class = {
 	.restore_reset_state = wormhole_restore_reset_state,
 	.configure_outbound_atu = wormhole_configure_outbound_atu,
 	.create_sysfs_groups = wormhole_create_sysfs_groups,
+	.noc_write32 = wormhole_noc_write32,
 };

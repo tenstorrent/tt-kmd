@@ -75,6 +75,7 @@ struct tenstorrent_device_class {
 	void (*restore_reset_state)(struct tenstorrent_device *ttdev);
 	int (*configure_outbound_atu)(struct tenstorrent_device *ttdev, u32 region, u64 base, u64 limit, u64 target);
 	void (*create_sysfs_groups)(struct tenstorrent_device *ttdev);
+	void (*noc_write32)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, u32 data, int noc);
 };
 
 void tenstorrent_device_put(struct tenstorrent_device *);

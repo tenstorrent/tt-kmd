@@ -17,7 +17,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/delay.h>
 #include <linux/types.h>
-#include <linux/timekeeping.h>
+#include <linux/ktime.h>
 #include <linux/stat.h>
 
 #include "grayskull.h"

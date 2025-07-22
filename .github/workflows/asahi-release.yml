@@ -33,7 +33,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tt-kmd
-          path: artifacts/*.rpm
+          path: /github/workspace/artifacts/*.rpm
 
   release:
     needs: build-rpm

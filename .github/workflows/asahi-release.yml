@@ -1,0 +1,49 @@
+name: tt-kmd dkms rpm release for Asahi
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-image:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name:
+        run: |
+          dnf -y update
+          dnf -y install rpmdevtools kernel-16k-devel kernel-headers dkms
+          rpmdev-setuptree
+          cp SPECS/asahi-tt-kmd.spec ~/rpmbuild/SPECS/tt-kmd.spec
+          spectool -C ~/rpmbuild/SOURCES/ -g ~/rpmbuild/SPECS/*.spec
+          rpmbuild -ba ~/rpmbuild/SPECS/*.spec
+          RPM_PATH=$(find ~/rpmbuild/RPMS -name "*.rpm" | head -n 1)
+          mkdir -p /github/workspace/artifacts
+          cp "$RPM_PATH" /github/workspace/artifacts/
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tt-kmd
+          path: artifacts/*.rpm
+
+  release:
+    needs: build-rpm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./artifacts/**/*.rpm

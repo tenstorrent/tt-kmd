@@ -18,8 +18,8 @@ jobs:
 
       - name:
         run: |
-          dnf -y update
-          dnf -y install rpmdevtools kernel-16k-devel kernel-headers dkms
+          sudo dnf -y update
+          sudo dnf -y install rpmdevtools kernel-16k-devel kernel-headers dkms
           rpmdev-setuptree
           cp SPECS/asahi-tt-kmd.spec ~/rpmbuild/SPECS/tt-kmd.spec
           spectool -C ~/rpmbuild/SOURCES/ -g ~/rpmbuild/SPECS/*.spec

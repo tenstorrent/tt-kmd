@@ -14,7 +14,7 @@ The driver registers device files named `/dev/tenstorrent/%d`, one for each enum
 
 * You must have dkms installed.
     * `apt install dkms` (Debian, Ubuntu)
-    * `dnf install dkms` (Fedora)
+    * `dnf install dkms` (Fedora, Asahi)
     * `apk install akms` (Alpine)
     * `dnf install epel-release && dnf install dkms` (Enterprise Linux based)
 ```
@@ -28,6 +28,12 @@ doas akms install .
 doas modeprobe tenstorrent
 ```
 (or reboot, driver will auto-load next boot)
+
+* For Asahi Linux
+```
+sudo dnf install tt-kmd-2.1.0-1.fc42.noarch.rpm
+sudo dkms install tenstorrent/2.1.0
+```
 
 #### With NixOS
 

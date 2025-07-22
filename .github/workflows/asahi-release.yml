@@ -25,15 +25,14 @@ jobs:
           spectool -C ~/rpmbuild/SOURCES/ -g ~/rpmbuild/SPECS/*.spec
           rpmbuild -ba ~/rpmbuild/SPECS/*.spec
           RPM_PATH=$(find ~/rpmbuild/RPMS -name "*.rpm" | head -n 1)
-          export RPM_PATH
-          sudo mkdir -p /github/workspace/artifacts
-          sudo -E bash -c "cp -v $RPM_PATH /github/workspace/artifacts/"
+          mkdir -p ${{ github.workspace }}/artifacts
+          cp -v $RPM_PATH ${{ github.workspace }}/artifacts/
 
       - name: Upload RPM artifact
         uses: actions/upload-artifact@v4
         with:
           name: tt-kmd
-          path: /github/workspace/artifacts/*.rpm
+          path: ${{ github.workspace }}/artifacts/*.rpm
 
   release:
     needs: build-rpm
@@ -42,9 +41,9 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: /github/workspace/artifacts
+          path: ${{ github.workspace }}/artifacts
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: /github/workspace/artifacts/**/*.rpm
+          files: ${{ github.workspace }}/artifacts/**/*.rpm

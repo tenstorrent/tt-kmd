@@ -215,7 +215,8 @@ static int blackhole_configure_tlb_4G(struct blackhole_device *bh, int tlb,
 	return 0;
 }
 
-static u8 __iomem *bh_configure_kernel_tlb(struct blackhole_device *bh, u32 x, u32 y, u64 addr) {
+static u8 __iomem *bh_configure_kernel_tlb(struct blackhole_device *bh, u32 x, u32 y, u64 addr, int noc)
+{
 	struct tenstorrent_noc_tlb_config config = { 0 };
 	u64 offset = addr & TLB_2M_WINDOW_MASK;
 
@@ -223,18 +224,20 @@ static u8 __iomem *bh_configure_kernel_tlb(struct blackhole_device *bh, u32 x, u
 	config.x_end = x;
 	config.y_end = y;
 	config.ordering	= 1; // strict
+	config.noc = noc;
 
 	blackhole_configure_tlb_2M(bh, KERNEL_TLB_INDEX, &config);
 	return bh->kernel_tlb + offset;
 }
 
-static u32 noc_read32(struct blackhole_device *bh, u32 x, u32 y, u64 addr) {
+static u32 noc_read32(struct blackhole_device *bh, u32 x, u32 y, u64 addr, int noc)
+{
 	u32 val;
 	u8 __iomem *tlb_window;
 
 	mutex_lock(&bh->kernel_tlb_mutex);
 
-	tlb_window = bh_configure_kernel_tlb(bh, x, y, addr);
+	tlb_window = bh_configure_kernel_tlb(bh, x, y, addr, noc);
 	val = ioread32(tlb_window);
 
 	mutex_unlock(&bh->kernel_tlb_mutex);
@@ -242,12 +245,13 @@ static u32 noc_read32(struct blackhole_device *bh, u32 x, u32 y, u64 addr) {
 	return val;
 }
 
-static void noc_write32(struct blackhole_device *bh, u32 x, u32 y, u64 addr, u32 data) {
+static void noc_write32(struct blackhole_device *bh, u32 x, u32 y, u64 addr, u32 data, int noc)
+{
 	u8 __iomem *tlb_window;
 
 	mutex_lock(&bh->kernel_tlb_mutex);
 
-	tlb_window = bh_configure_kernel_tlb(bh, x, y, addr);
+	tlb_window = bh_configure_kernel_tlb(bh, x, y, addr, noc);
 	iowrite32(data, tlb_window);
 
 	mutex_unlock(&bh->kernel_tlb_mutex);
@@ -265,7 +269,7 @@ static int csm_read32(struct blackhole_device *bh, u64 addr, u32 *value)
 	if (!is_range_within_csm(addr, sizeof(u32)))
 		return -EINVAL;
 
-	*value = noc_read32(bh, ARC_X, ARC_Y, addr);
+	*value = noc_read32(bh, ARC_X, ARC_Y, addr, 0);
 	return 0;
 }
 
@@ -274,7 +278,7 @@ static int csm_write32(struct blackhole_device *bh, u64 addr, u32 value)
 	if (!is_range_within_csm(addr, sizeof(u32)))
 		return -EINVAL;
 
-	noc_write32(bh, ARC_X, ARC_Y, addr, value);
+	noc_write32(bh, ARC_X, ARC_Y, addr, value, 0);
 	return 0;
 }
 
@@ -294,7 +298,7 @@ static void blackhole_save_reset_state(struct tenstorrent_device *tt_dev) {
 	if (!blackhole_detect_pcie_noc_x(bh, &x))
 		return;
 
-	device_control = noc_read32(bh, x, y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS);
+	device_control = noc_read32(bh, x, y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, 0);
 	bh->saved_mps = FIELD_GET(PCI_EXP_DEVCTL_PAYLOAD, device_control);
 }
 
@@ -307,10 +311,10 @@ static void blackhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
 	if (!blackhole_detect_pcie_noc_x(bh, &x))
 		return;
 
-	device_control = noc_read32(bh, x, y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS);
+	device_control = noc_read32(bh, x, y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, 0);
 	device_control &= ~PCI_EXP_DEVCTL_PAYLOAD;
 	device_control |= FIELD_PREP(PCI_EXP_DEVCTL_PAYLOAD, bh->saved_mps);
-	noc_write32(bh, x, y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, device_control);
+	noc_write32(bh, x, y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, device_control, 0);
 }
 
 static ssize_t bh_show_pcie_single_counter(struct device *dev, char *buf, u32 counter_offset, int noc)
@@ -470,7 +474,7 @@ static ssize_t bh_show_card_type(struct device *dev, struct device_attribute *at
 		}
 
 		if (addr != 0) {
-			board_id_high = noc_read32(bh, ARC_X, ARC_Y, addr);
+			board_id_high = noc_read32(bh, ARC_X, ARC_Y, addr, 0);
 			// UPI starts at bit 36
 			upi = (board_id_high >> 4) & 0xFFFFF;
 			bh_board_type_to_name(upi, &card_name);
@@ -489,7 +493,7 @@ static ssize_t bh_show_attribute(struct device *dev, struct device_attribute *at
 	u32 value = 0;
 
 	if (addr != 0)
-		value = noc_read32(bh, ARC_X, ARC_Y, addr);
+		value = noc_read32(bh, ARC_X, ARC_Y, addr, 0);
 
 	return snprintf(buf, PAGE_SIZE, "%u\n", value);
 }
@@ -504,8 +508,8 @@ static ssize_t bh_show_card_serial(struct device *dev, struct device_attribute *
 	u32 board_id_lo = 0;
 
 	if (addr != 0) {
-		board_id_hi = noc_read32(bh, ARC_X, ARC_Y, addr + 0);
-		board_id_lo = noc_read32(bh, ARC_X, ARC_Y, addr + 4);
+		board_id_hi = noc_read32(bh, ARC_X, ARC_Y, addr + 0, 0);
+		board_id_lo = noc_read32(bh, ARC_X, ARC_Y, addr + 4, 0);
 	}
 	return scnprintf(buf, PAGE_SIZE, "%08X%08X\n", board_id_hi, board_id_lo);
 }
@@ -520,7 +524,7 @@ static ssize_t bh_show_fw_ver(struct device *dev, struct device_attribute *attr,
 	u32 major, minor, patch, ver;
 
 	if (addr != 0)
-		fw_ver = noc_read32(bh, ARC_X, ARC_Y, addr);
+		fw_ver = noc_read32(bh, ARC_X, ARC_Y, addr, 0);
 
 	major = (fw_ver >> 24) & 0xFF;
 	minor = (fw_ver >> 16) & 0xFF;
@@ -560,7 +564,7 @@ static int bh_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 a
 			if (bh->hwmon_attr_addrs[i] == 0)
 				return -ENOTSUPP;
 
-			raw = noc_read32(bh, ARC_X, ARC_Y, bh->hwmon_attr_addrs[i]);
+			raw = noc_read32(bh, ARC_X, ARC_Y, bh->hwmon_attr_addrs[i], 0);
 
 			if (type == hwmon_temp) {
 				u32 int_part = raw >> 16;
@@ -619,8 +623,8 @@ static const struct hwmon_chip_info bh_hwmon_chip_info = {
 static int telemetry_probe(struct tenstorrent_device *tt_dev) {
 	struct device *hwmon_device;
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-	u32 base_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_PTR);
-	u32 data_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_DATA);
+	u32 base_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_PTR, 0);
+	u32 data_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_DATA, 0);
 	u32 version, major_ver, minor_ver, patch_ver;
 	u32 tags_addr = base_addr + 8;
 	u32 num_entries;
@@ -631,7 +635,7 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev) {
 		return -ENODEV;
 	}
 
-	version = noc_read32(bh, ARC_X, ARC_Y, base_addr);
+	version = noc_read32(bh, ARC_X, ARC_Y, base_addr, 0);
 	major_ver = (version >> 16) & 0xFF;
 	minor_ver = (version >> 8) & 0xFF;
 	patch_ver = version & 0xFF;
@@ -641,7 +645,7 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev) {
 		return -ENOTSUPP;
 	}
 
-	num_entries = noc_read32(bh, ARC_X, ARC_Y, base_addr + 4);
+	num_entries = noc_read32(bh, ARC_X, ARC_Y, base_addr + 4, 0);
 
 	bh->hwmon_attr_addrs = kzalloc(sizeof(u64) * ARRAY_SIZE(bh_hwmon_attrs), GFP_KERNEL);
 	if (!bh->hwmon_attr_addrs)
@@ -655,7 +659,7 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev) {
 	}
 
 	for (i = 0; i < num_entries; ++i) {
-		u32 tag_entry = noc_read32(bh, ARC_X, ARC_Y, tags_addr + (i * 4));
+		u32 tag_entry = noc_read32(bh, ARC_X, ARC_Y, tags_addr + (i * 4), 0);
 		u16 tag_id = tag_entry & 0xFFFF;
 		u16 offset = (tag_entry >> 16) & 0xFFFF;
 		u32 addr = data_addr + (offset * 4);
@@ -810,7 +814,7 @@ static bool send_arc_message(struct blackhole_device *bh, struct arc_msg *msg)
 	u32 queue_info;
 	u32 num_entries;
 
-	queue_ctrl_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_MSG_QCB_PTR);
+	queue_ctrl_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_MSG_QCB_PTR, 0);
 
 	if (csm_read32(bh, queue_ctrl_addr + 0, &queue_base) != 0)
 		return false;
@@ -824,7 +828,7 @@ static bool send_arc_message(struct blackhole_device *bh, struct arc_msg *msg)
 		return false;
 
 	// Trigger ARC interrupt
-	noc_write32(bh, ARC_X, ARC_Y, ARC_MSI_FIFO, 0);
+	noc_write32(bh, ARC_X, ARC_Y, ARC_MSI_FIFO, 0, 0);
 
 	if (!pop_arc_msg(bh, msg, queue_base, num_entries))
 		return false;
@@ -990,6 +994,12 @@ static void blackhole_create_sysfs_groups(struct tenstorrent_device *tt_dev) {
 		dev_err(&tt_dev->dev, "PCIe perf counters unavailable: %d\n", ret);
 }
 
+static void blackhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, u32 data, int noc)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	noc_write32(bh, x, y, addr, data, noc);
+}
+
 struct tenstorrent_device_class blackhole_class = {
 	.name = "Blackhole",
 	.instance_size = sizeof(struct blackhole_device),
@@ -1010,4 +1020,5 @@ struct tenstorrent_device_class blackhole_class = {
 	.restore_reset_state = blackhole_restore_reset_state,
 	.configure_outbound_atu = blackhole_configure_outbound_atu,
 	.create_sysfs_groups = blackhole_create_sysfs_groups,
+	.noc_write32 = blackhole_noc_write32,
 };

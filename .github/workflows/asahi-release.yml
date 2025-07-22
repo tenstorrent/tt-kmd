@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  build-image:
+  build-rpm:
     runs-on: self-hosted
 
     steps:

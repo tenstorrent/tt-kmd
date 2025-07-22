@@ -25,8 +25,9 @@ jobs:
           spectool -C ~/rpmbuild/SOURCES/ -g ~/rpmbuild/SPECS/*.spec
           rpmbuild -ba ~/rpmbuild/SPECS/*.spec
           RPM_PATH=$(find ~/rpmbuild/RPMS -name "*.rpm" | head -n 1)
+          export RPM_PATH
           sudo mkdir -p /github/workspace/artifacts
-          sudo cp "$RPM_PATH" /github/workspace/artifacts/
+          sudo -E cp "$RPM_PATH" /github/workspace/artifacts/
 
       - name: Upload RPM artifact
         uses: actions/upload-artifact@v4

@@ -17,6 +17,7 @@
 #include "module.h"
 #include "memory.h"
 #include "chardev_private.h"
+#include "telemetry.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
 #define pci_enable_pcie_error_reporting(dev) do { } while (0)
@@ -131,8 +132,8 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 		register_reboot_notifier(&tt_dev->reboot_notifier);
 	}
 
-	if (tt_dev->attributes) {
-		const struct tt_attribute_data *data = tt_dev->attributes;
+	if (tt_dev->sysfs_attrs) {
+		const struct tenstorrent_sysfs_attr *data = tt_dev->sysfs_attrs;
 		for (; data->attr.attr.name; data++)
 			device_create_file(&tt_dev->dev, &data->attr);
 	}
@@ -152,8 +153,8 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 		tenstorrent_memory_cleanup(priv);
 	}
 
-	if (tt_dev->attributes) {
-		const struct tt_attribute_data *data = tt_dev->attributes;
+	if (tt_dev->sysfs_attrs) {
+		const struct tenstorrent_sysfs_attr *data = tt_dev->sysfs_attrs;
 		for (; data->attr.attr.name; data++)
 			device_remove_file(&tt_dev->dev, &data->attr);
 	}

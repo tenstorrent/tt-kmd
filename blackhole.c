@@ -56,6 +56,7 @@
 #define ARC_MSI_FIFO 0x800B0000           // Write 0 to trigger the ARC message queue processor
 #define ARC_MSG_QUEUE_HEADER_SIZE 32      // Header contains request and response read/write pointers
 #define ARC_MSG_TIMEOUT_MS 100            // Wait this long for ARC message queue operations
+#define ARC_MSG_READY_MS 500              // Wait this long for ARC to be ready for message queue operations
 #define ARC_MSG_QUEUE_REQ_WPTR(base) ((base) + 0x00)
 #define ARC_MSG_QUEUE_RES_RPTR(base) ((base) + 0x04)
 #define ARC_MSG_QUEUE_REQ_RPTR(base) ((base) + 0x10)
@@ -63,6 +64,8 @@
 #define ARC_MSG_TYPE_ASIC_STATE0 0xA0
 #define ARC_MSG_TYPE_ASIC_STATE3 0xA3
 #define ARC_MSG_TYPE_SET_WDT_TIMEOUT 0xC1
+#define ARC_BOOT_STATUS RESET_SCRATCH(2)
+#define ARC_BOOT_STATUS_READY_FOR_MSG 0x1
 
 #define IATU_BASE 0x1000	// Relative to the start of BAR2
 #define IATU_OUTBOUND 0
@@ -760,10 +763,21 @@ static bool pop_arc_msg(struct blackhole_device *bh, struct arc_msg *msg, u32 qu
 
 static bool send_arc_message(struct blackhole_device *bh, struct arc_msg *msg)
 {
+	u32 boot_status;
 	u32 queue_ctrl_addr;
 	u32 queue_base;
 	u32 queue_info;
 	u32 num_entries;
+	unsigned long timeout = jiffies + msecs_to_jiffies(ARC_MSG_READY_MS);
+
+	do {
+		boot_status = noc_read32(bh, ARC_X, ARC_Y, ARC_BOOT_STATUS, 0);
+		if (boot_status & ARC_BOOT_STATUS_READY_FOR_MSG)
+			break;
+	} while (time_before(jiffies, timeout));
+
+	if (!(boot_status & ARC_BOOT_STATUS_READY_FOR_MSG))
+		return false;
 
 	queue_ctrl_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_MSG_QCB_PTR, 0);
 

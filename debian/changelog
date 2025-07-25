@@ -1,0 +1,6 @@
+tt-kmd (2.1.0-1) unstable; urgency=medium
+
+  * Initial packaging of tenstorrent DKMS driver
+
+ -- Tenstorrent <support@tenstorrent.com>  Tue, 23 Jul 2025 11:00:00 +0100
+

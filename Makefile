@@ -7,7 +7,10 @@ tenstorrent-y := module.o chardev.o enumerate.o interrupt.o grayskull.o wormhole
 KDIR := /lib/modules/$(shell uname -r)/build
 KMAKE := $(MAKE) -C $(KDIR) M=$(CURDIR)
 
-.PHONY: all modules modules_install clean help qemu-build archive dkms
+# Extract version from dkms.conf
+VERSION := $(shell tools/current-version)
+
+.PHONY: all modules modules_install clean help qemu-build archive akms dkms dkms-remove akms-remove show-version
 
 all: modules
 
@@ -23,14 +26,25 @@ clean:
 help:
 	+$(KMAKE) help
 
+show-version:
+	@echo "Current version: $(VERSION)"
+
 dkms:
 	sudo dkms add .
-	sudo dkms install tenstorrent/2.1.0
+	sudo dkms install tenstorrent/$(VERSION)
 	sudo modprobe tenstorrent
+	
+dkms-remove:
+	sudo modprobe -r tenstorrent
+	sudo dkms remove tenstorrent/$(VERSION) --all
 
 akms:
 	doas akms install .
 	doas modprobe tenstorrent
+
+akms-remove:
+	doas modprobe -r tenstorrent
+	doas akms remove tenstorrent
 
 # Helper for running the driver tests in a VM.
 # Supposed to be paired with https://github.com/TTDRosen/qemu-utils

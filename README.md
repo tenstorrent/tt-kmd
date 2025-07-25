@@ -10,7 +10,7 @@
 
 The driver registers device files named `/dev/tenstorrent/%d`, one for each enumerated device.
 
-### To install:
+### To install from source:
 
 * You must have dkms installed.
     * `apt install dkms` (Debian, Ubuntu)
@@ -18,16 +18,12 @@ The driver registers device files named `/dev/tenstorrent/%d`, one for each enum
     * `apk install akms` (Alpine)
     * `dnf install epel-release && dnf install dkms` (Enterprise Linux based)
 ```
-sudo dkms add .
-sudo dkms install tenstorrent/2.1.0
-sudo modprobe tenstorrent
+make dkms
 ```
 * For Alpine linux
 ```
-doas akms install .
-doas modeprobe tenstorrent
+make akms
 ```
-(or reboot, driver will auto-load next boot)
 
 #### With NixOS
 
@@ -51,11 +47,9 @@ services.udev.packages = [ config.boot.kernelPackages.tt-kmd ];
 
 ### To uninstall:
 ```
-sudo modprobe -r tenstorrent
-sudo dkms remove tenstorrent/2.1.0 --all
+make dkms-remove
 ```
 * For Alpine linux
 ```
-doas modeprobe -r tenstorrent
-doas akms remove tenstorrent
+make akms-remove
 ```

@@ -1,3 +1,14 @@
+tt-kmd (2.2.0-1) unstable; urgency=medium
+
+  * Deprecate and remove support for Grayskull hardware.
+  * Add new ioctl for robust cleanup on file close (SET_NOC_CLEANUP).
+  * Refactor telemetry system to be dynamic for Wormhole.
+  * Fix bug in Blackhole where disabling an outbound ATU region failed.
+  * Fix race condition in Blackhole ARC firmware communication after reset.
+  * Enforce exact size matching for TLB allocation ioctl.
+
+ -- Tenstorrent <support@tenstorrent.com>  Fri, 25 Jul 2025 17:08:30 +0000
+
 tt-kmd (2.1.0-1) unstable; urgency=medium
 
   * Initial packaging of tenstorrent DKMS driver

@@ -134,8 +134,10 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	if (tt_dev->sysfs_attrs) {
 		const struct tenstorrent_sysfs_attr *data = tt_dev->sysfs_attrs;
-		for (; data->attr.attr.name; data++)
-			device_create_file(&tt_dev->dev, &data->attr);
+		for (; data->attr.attr.name; data++) {
+			if (device_class->is_sysfs_attr_supported(tt_dev, data))
+				device_create_file(&tt_dev->dev, &data->attr);
+		}
 	}
 
 	if (device_class->create_sysfs_groups)

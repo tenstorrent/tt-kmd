@@ -1,0 +1,41 @@
+#!/usr/bin/make -f
+# -*- makefile -*-
+
+include /usr/share/dpkg/default.mk
+
+export DH_VERBOSE = 1
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+VERSION ?= $(shell dpkg-parsechangelog | sed -rne 's/^Version: ([0-9.]+).*$$/\1/p')
+
+%:
+	dh $@ --with dkms
+
+override_dh_auto_install:
+	# Install source files, excluding build artifacts
+	dh_install -ptenstorrent-dkms -X.o -X.ko -X.mod -X.cmd contrib/		usr/src/tenstorrent-$(VERSION)
+	dh_install -ptenstorrent-dkms -X.o -X.ko -X.mod -X.cmd docs/		usr/src/tenstorrent-$(VERSION)
+	dh_install -ptenstorrent-dkms -X.o -X.ko -X.mod -X.cmd tools/		usr/src/tenstorrent-$(VERSION)
+	dh_install -ptenstorrent-dkms -X.o -X.ko -X.mod -X.cmd test/		usr/src/tenstorrent-$(VERSION)
+	
+	# Install individual files
+	dh_install -ptenstorrent-dkms AKMBUILD				usr/src/tenstorrent-$(VERSION)
+	dh_install -ptenstorrent-dkms Makefile				usr/src/tenstorrent-$(VERSION)
+	dh_install -ptenstorrent-dkms LICENSE				usr/src/tenstorrent-$(VERSION)
+	dh_install -ptenstorrent-dkms LICENSE_understanding.txt	usr/src/tenstorrent-$(VERSION)
+	dh_install -ptenstorrent-dkms README.md			usr/src/tenstorrent-$(VERSION)
+	dh_install -ptenstorrent-dkms SUMMARY.md			usr/src/tenstorrent-$(VERSION)
+	dh_install -ptenstorrent-dkms dkms.conf			usr/src/tenstorrent-$(VERSION)
+	dh_install -ptenstorrent-dkms dkms-post-install		usr/src/tenstorrent-$(VERSION)
+	dh_install -ptenstorrent-dkms modprobe.d-tenstorrent.conf	usr/src/tenstorrent-$(VERSION)
+	dh_install -ptenstorrent-dkms udev-50-tenstorrent.rules	usr/src/tenstorrent-$(VERSION)
+	
+	# Install all C source and header files
+	dh_install -ptenstorrent-dkms *.c				usr/src/tenstorrent-$(VERSION)
+	dh_install -ptenstorrent-dkms *.h				usr/src/tenstorrent-$(VERSION)
+
+override_dh_dkms:
+	dh_dkms -V
+
+override_dh_auto_build:
+	:

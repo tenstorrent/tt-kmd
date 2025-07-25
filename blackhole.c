@@ -924,7 +924,7 @@ static int blackhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	u64 size = limit - base + 1;
 	u32 region_ctrl_1 = 0;
-	u32 region_ctrl_2 = REGION_EN;
+	u32 region_ctrl_2 = (limit == 0) ? 0 : REGION_EN;
 	u32 region_ctrl_3 = 0;
 	u32 lower_base = lower_32_bits(base);
 	u32 upper_base = upper_32_bits(base);

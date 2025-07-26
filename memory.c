@@ -585,6 +585,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 {
 	const u32 valid_flags = TENSTORRENT_PIN_PAGES_CONTIGUOUS | TENSTORRENT_PIN_PAGES_NOC_DMA |
 				TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN;
+	const u32 noc_dma_flags = TENSTORRENT_PIN_PAGES_NOC_DMA | TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN;
 	unsigned long nr_pages;
 	struct page **pages;
 	int pages_pinned;
@@ -697,7 +698,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 
 		out.physical_address = sg_dma_address(dma_mapping.sgl);
 
-		if (in.flags & TENSTORRENT_PIN_PAGES_NOC_DMA) {
+		if (in.flags & noc_dma_flags) {
 			ret = setup_noc_dma(priv, top_down, in.size, out.physical_address, &noc_address);
 
 			if (ret < 0)
@@ -717,7 +718,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 
 		out.physical_address = page_to_phys(pages[0]);
 
-		if (in.flags & TENSTORRENT_PIN_PAGES_NOC_DMA) {
+		if (in.flags & noc_dma_flags) {
 			ret = setup_noc_dma(priv, top_down, in.size, out.physical_address, &noc_address);
 
 			if (ret < 0)

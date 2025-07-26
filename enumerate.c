@@ -18,6 +18,7 @@
 #include "memory.h"
 #include "chardev_private.h"
 #include "telemetry.h"
+#include "tlb.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
 #define pci_enable_pcie_error_reporting(dev) do { } while (0)
@@ -34,6 +35,69 @@ struct device *devm_hwmon_device_register_with_info(struct device *,
 	const char *, void *, const struct hwmon_chip_info *, const struct
 	attribute_group **) { return NULL; }
 #endif
+
+static ssize_t mappings_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct chardev_private *priv;
+	struct pinned_page_range *pinning;
+	unsigned int tlb_id;
+	struct tlb_descriptor desc;
+	size_t len = 0;
+	bool sensitive = capable(CAP_SYS_ADMIN);
+
+	len += scnprintf(buf + len, PAGE_SIZE - len, "%-8s %-16s %-14s %s\n", "PID", "Comm", "Type", "Mapping Details");
+	len += scnprintf(buf + len, PAGE_SIZE - len, "%-8s %-16s %-14s %s\n", "----", "----", "----", "---------------");
+
+	mutex_lock(&tt_dev->chardev_mutex);
+	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
+		len += scnprintf(buf + len, (len < PAGE_SIZE) ? (PAGE_SIZE - len) : 0,
+				 "%-8d %-16s %-14s\n", priv->pid, priv->comm,
+				 "OPEN_FD");
+
+		mutex_lock(&priv->mutex);
+		list_for_each_entry(pinning, &priv->pinnings, list) {
+			unsigned long long va_start = pinning->virtual_address;
+			unsigned long size_kb = (pinning->page_count * PAGE_SIZE) / 1024;
+			unsigned long long iova_start = sensitive ? pinning->dma_mapping.sgl->dma_address : 0;
+
+			// Check if there is a corresponding IATU mapping
+			if (pinning->outbound_iatu_region >= 0) {
+				const struct tenstorrent_outbound_iatu_region *region;
+				region = &priv->device->outbound_iatus[pinning->outbound_iatu_region];
+
+				len += scnprintf(buf + len, (len < PAGE_SIZE) ? (PAGE_SIZE - len) : 0,
+						 "%-8d %-16s %-14s VA: 0x%016llx -> IOVA: 0x%016llx -> NOC: 0x%llx (%lukB)\n",
+						 priv->pid, priv->comm, "PIN_PAGES+IATU",
+						 va_start, iova_start,
+						 sensitive ? region->base : 0, size_kb);
+			} else {
+				// This is just a VA -> IOVA mapping
+				len += scnprintf(buf + len, (len < PAGE_SIZE) ? (PAGE_SIZE - len) : 0,
+						 "%-8d %-16s %-14s VA: 0x%016llx -> IOVA: 0x%016llx (%lukB)\n",
+						 priv->pid, priv->comm, "PIN_PAGES",
+						 va_start, iova_start, size_kb);
+			}
+		}
+		for_each_set_bit(tlb_id, priv->tlbs, TENSTORRENT_MAX_INBOUND_TLBS) {
+			if (tt_dev->dev_class->describe_tlb &&
+			    tt_dev->dev_class->describe_tlb(tt_dev, tlb_id, &desc) == 0) {
+				len += scnprintf(buf + len, (len < PAGE_SIZE) ? (PAGE_SIZE - len) : 0,
+						 "%-8d %-16s %-14s ID: %-3u -> BAR%d + 0x%lx (%lukB) (refs: %d)\n",
+						 priv->pid, priv->comm, "TLB",
+						 tlb_id, desc.bar, desc.bar_offset,
+						 desc.size / 1024,
+						 atomic_read(&tt_dev->tlb_refs[tlb_id]));
+			}
+		}
+		mutex_unlock(&priv->mutex);
+	}
+	mutex_unlock(&tt_dev->chardev_mutex);
+
+	return len;
+}
+static DEVICE_ATTR_RO(mappings);
+
 
 static int tenstorrent_reboot_notifier(struct notifier_block *nb,
 				       unsigned long action, void *data) {
@@ -137,6 +201,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 		for (; data->attr.attr.name; data++)
 			device_create_file(&tt_dev->dev, &data->attr);
 	}
+	device_create_file(&tt_dev->dev, &dev_attr_mappings);
 
 	if (device_class->create_sysfs_groups)
 		device_class->create_sysfs_groups(tt_dev);
@@ -158,6 +223,7 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 		for (; data->attr.attr.name; data++)
 			device_remove_file(&tt_dev->dev, &data->attr);
 	}
+	device_remove_file(&tt_dev->dev, &dev_attr_mappings);
 
 
 	// These remove child sysfs entries which must happen before remove returns.

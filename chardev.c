@@ -480,6 +480,9 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	private_data->device = tt_dev;
 	file->private_data = private_data;
 
+	private_data->pid = task_tgid_vnr(current);
+	get_task_comm(private_data->comm, current);
+
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_add(&private_data->open_fd, &tt_dev->open_fds_list);
 	mutex_unlock(&tt_dev->chardev_mutex);

@@ -5,6 +5,7 @@
 #define TENSTORRENT_MEMORY_H_INCLUDED
 
 #include <linux/compiler.h>
+#include <linux/scatterlist.h>
 
 #define MAX_DMA_BUF_SIZE_LOG2 28
 
@@ -15,6 +16,19 @@ struct tenstorrent_free_dma_buf;
 struct tenstorrent_pin_pages;
 struct tenstorrent_map_peer_bar;
 struct vm_area_struct;
+
+struct pinned_page_range {
+	struct list_head list;
+
+	unsigned long page_count;
+	struct page **pages;	// vmalloc/vfree
+
+	struct sg_table dma_mapping;	// alloc_chained_sgt_for_pages / free_chained_sgt
+	u64 virtual_address;
+
+	int outbound_iatu_region;
+};
+
 
 long ioctl_query_mappings(struct chardev_private *priv,
 			  struct tenstorrent_query_mappings __user *arg);

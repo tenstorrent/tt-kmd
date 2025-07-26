@@ -7,6 +7,7 @@
 #include <linux/types.h>
 #include <linux/mutex.h>
 #include <linux/hashtable.h>
+#include <linux/sched.h>
 
 #include "ioctl.h"
 
@@ -32,6 +33,9 @@ struct chardev_private {
 	DECLARE_HASHTABLE(dmabufs, DMABUF_HASHTABLE_BITS);	// keyed on by dmabuf.index, chained on struct dmabuf.hash_chain
 	struct list_head pinnings;	// struct pinned_page_range.list
 	struct list_head peer_mappings; // struct peer_resource_mapping.list
+
+	pid_t pid;
+	char comm[TASK_COMM_LEN];
 
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
 

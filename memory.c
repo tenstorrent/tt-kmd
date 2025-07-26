@@ -306,18 +306,6 @@ static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npage
 
 #define MMAP_SIZE_DMA_BUF (U64_C(1) << 32)
 
-struct pinned_page_range {
-	struct list_head list;
-
-	unsigned long page_count;
-	struct page **pages;	// vmalloc/vfree
-
-	struct sg_table dma_mapping;	// alloc_chained_sgt_for_pages / free_chained_sgt
-	u64 virtual_address;
-
-	int outbound_iatu_region;
-};
-
 static void teardown_outbound_iatu(struct chardev_private *priv, int iatu_region)
 {
 	struct tenstorrent_device *tt_dev = priv->device;

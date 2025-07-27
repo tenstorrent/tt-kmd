@@ -7,11 +7,6 @@
 #include <linux/types.h>
 #include <linux/pci.h>
 
-#define TENSTORRENT_DRIVER_VERSION_MAJOR 2
-#define TENSTORRENT_DRIVER_VERSION_MINOR 3
-#define TENSTORRENT_DRIVER_VERSION_PATCH 0
-#define TENSTORRENT_DRIVER_VERSION_SUFFIX ""    // e.g. "-rc1"
-
 // Module options that need to be passed to other files
 extern uint dma_address_bits;
 extern uint reset_limit;

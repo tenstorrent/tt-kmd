@@ -21,7 +21,7 @@
 #include "ioctl.h"
 #include "pcie.h"
 #include "memory.h"
-#include "module.h"
+#include "version.h"
 #include "tlb.h"
 
 static dev_t tt_device_id;

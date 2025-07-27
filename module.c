@@ -10,6 +10,7 @@
 #include "enumerate.h"
 
 #include "module.h"
+#include "version.h"
 
 #define TENSTORRENT_DRIVER_VERSION_STRING \
 	__stringify(TENSTORRENT_DRIVER_VERSION_MAJOR) "." \

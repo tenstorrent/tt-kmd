@@ -953,10 +953,20 @@ static int blackhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u
 	return 0;
 }
 
-static void blackhole_create_sysfs_groups(struct tenstorrent_device *tt_dev) {
+static void blackhole_create_sysfs_groups(struct tenstorrent_device *tt_dev)
+{
 	int ret = devm_device_add_group(&tt_dev->dev, &bh_pcie_perf_counters_group);
 	if (ret)
 		dev_err(&tt_dev->dev, "PCIe perf counters unavailable: %d\n", ret);
+}
+
+static bool blackhole_is_sysfs_attr_supported(struct tenstorrent_device *tt_dev,
+				 const struct tenstorrent_sysfs_attr *attr)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	unsigned i = attr - bh_sysfs_attributes;
+
+	return bh->sysfs_attr_addrs[i] != 0;
 }
 
 static void blackhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, u32 data, int noc)
@@ -985,5 +995,6 @@ struct tenstorrent_device_class blackhole_class = {
 	.restore_reset_state = blackhole_restore_reset_state,
 	.configure_outbound_atu = blackhole_configure_outbound_atu,
 	.create_sysfs_groups = blackhole_create_sysfs_groups,
+	.is_sysfs_attr_supported = blackhole_is_sysfs_attr_supported,
 	.noc_write32 = blackhole_noc_write32,
 };

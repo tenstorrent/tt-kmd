@@ -123,6 +123,7 @@ static struct tenstorrent_sysfs_attr wh_sysfs_attributes[] = {
 	{ TELEMETRY_BM_BL_FW_VERSION, __ATTR(tt_m3bl_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
 	{ TELEMETRY_CM_FW_VERSION, __ATTR(tt_arc_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
 	{ TELEMETRY_ETH_FW_VERSION, __ATTR(tt_eth_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_ASIC_ID, __ATTR(tt_asic_id, S_IRUGO, sysfs_show_u64_hex, NULL) },
 	{ 0, __ATTR_NULL }
 };
 
@@ -134,9 +135,6 @@ static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *a
 	unsigned i = data - wh_sysfs_attributes;
 	u64 offset = wh->sysfs_attr_offsets[i];
 	u32 value = 0;
-
-	if (offset == 0)
-		return -EINVAL;
 
 	value = ioread32(wh->bar4_mapping + offset);
 	return snprintf(buf, PAGE_SIZE, "%u\n", value);
@@ -150,9 +148,6 @@ static ssize_t sysfs_show_u64_hex(struct device *dev, struct device_attribute *a
 	unsigned i = data - wh_sysfs_attributes;
 	u64 offset = wh->sysfs_attr_offsets[i];
 	u32 hi, lo;
-
-	if (offset == 0)
-		return -EINVAL;
 
 	hi = ioread32(wh->bar4_mapping + offset);
 	lo = ioread32(wh->bar4_mapping + offset + 4);
@@ -168,9 +163,6 @@ static ssize_t sysfs_show_u32_ver(struct device *dev, struct device_attribute *a
 	u64 offset = wh->sysfs_attr_offsets[i];
 	u32 value = 0;
 	u32 major, minor, patch, ver;
-
-	if (offset == 0)
-		return -EINVAL;
 
 	value = ioread32(wh->bar4_mapping + offset);
 
@@ -200,9 +192,6 @@ static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute 
 	u32 value;
 	u16 card_type;
 	char *card_name;
-
-	if (offset == 0)
-		return -EINVAL;
 
 	value = ioread32(wh->bar4_mapping + offset);
 	card_type = (value >> 4) & 0xFFFF;
@@ -700,10 +689,20 @@ static int wormhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u3
 	return 0;
 }
 
-static void wormhole_create_sysfs_groups(struct tenstorrent_device *tt_dev) {
+static void wormhole_create_sysfs_groups(struct tenstorrent_device *tt_dev)
+{
 	int ret = devm_device_add_group(&tt_dev->dev, &wh_pcie_perf_counters_group);
 	if (ret)
 		dev_err(&tt_dev->dev, "PCIe perf counters unavailable: %d\n", ret);
+}
+
+static bool wormhole_is_sysfs_attr_supported(struct tenstorrent_device *tt_dev,
+				 const struct tenstorrent_sysfs_attr *attr)
+{
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	unsigned i = attr - wh_sysfs_attributes;
+
+	return wh->sysfs_attr_offsets[i] != 0;
 }
 
 static void wormhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, u32 data, int noc)
@@ -733,5 +732,6 @@ struct tenstorrent_device_class wormhole_class = {
 	.restore_reset_state = wormhole_restore_reset_state,
 	.configure_outbound_atu = wormhole_configure_outbound_atu,
 	.create_sysfs_groups = wormhole_create_sysfs_groups,
+	.is_sysfs_attr_supported = wormhole_is_sysfs_attr_supported,
 	.noc_write32 = wormhole_noc_write32,
 };

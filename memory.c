@@ -614,7 +614,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	if (!is_pin_pages_size_safe(in.size))
 		return -EINVAL;
 
-	noc_dma = in.flags & TENSTORRENT_PIN_PAGES_NOC_DMA || in.flags & TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN;
+	noc_dma = in.flags & (TENSTORRENT_PIN_PAGES_NOC_DMA | TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN);
 	top_down = in.flags & TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN;
 
 	mutex_lock(&priv->mutex);

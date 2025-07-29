@@ -125,6 +125,12 @@ bool complete_pcie_init(struct tenstorrent_device *tt_dev, u8 __iomem* reset_uni
 
 bool pcie_timer_interrupt(struct pci_dev *pdev)
 {
+	u16 pci_command;
+
+	// pci_command_parity is used as reset marker. Set to 1, check if cleared to 0 after reset
+	pci_read_config_word(pdev, PCI_COMMAND, &pci_command);
+	pci_write_config_word(pdev, PCI_COMMAND, pci_command | PCI_COMMAND_PARITY);
+
 	pci_write_config_dword(pdev, INTERFACE_TIMER_TARGET_OFF, INTERFACE_TIMER_TARGET);
 	pci_write_config_dword(pdev, INTERFACE_TIMER_CONTROL_OFF, INTERFACE_TIMER_EN | INTERFACE_FORCE_PENDING);
 	return true;

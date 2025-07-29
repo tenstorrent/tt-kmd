@@ -140,6 +140,7 @@ struct tenstorrent_get_driver_info {
 #define TENSTORRENT_RESET_DEVICE_RESTORE_STATE 0
 #define TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK 1
 #define TENSTORRENT_RESET_DEVICE_CONFIG_WRITE 2
+#define TENSTORRENT_RESET_DEVICE_SET_RESET_MARKER 3
 
 struct tenstorrent_reset_device_in {
 	__u32 output_size_bytes;

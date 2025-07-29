@@ -198,6 +198,8 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		ok = pcie_hot_reset_and_restore_state(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_CONFIG_WRITE) {
 		ok = pcie_timer_interrupt(pdev);
+	} else if (in.flags == TENSTORRENT_RESET_DEVICE_SET_RESET_MARKER) {
+		ok = set_reset_marker(pdev);
 	} else {
 		return -EINVAL;
 	}

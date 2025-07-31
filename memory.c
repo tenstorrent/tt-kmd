@@ -594,6 +594,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	u32 bytes_to_copy;
 	u64 noc_address = 0;
 	int iatu_region = -1;
+	bool noc_dma = false;
 	bool top_down = false;
 
 	struct tenstorrent_pin_pages_in in;
@@ -613,6 +614,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	if (!is_pin_pages_size_safe(in.size))
 		return -EINVAL;
 
+	noc_dma = in.flags & (TENSTORRENT_PIN_PAGES_NOC_DMA | TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN);
 	top_down = in.flags & TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN;
 
 	mutex_lock(&priv->mutex);
@@ -697,7 +699,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 
 		out.physical_address = sg_dma_address(dma_mapping.sgl);
 
-		if (in.flags & TENSTORRENT_PIN_PAGES_NOC_DMA) {
+		if (noc_dma) {
 			ret = setup_noc_dma(priv, top_down, in.size, out.physical_address, &noc_address);
 
 			if (ret < 0)
@@ -717,7 +719,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 
 		out.physical_address = page_to_phys(pages[0]);
 
-		if (in.flags & TENSTORRENT_PIN_PAGES_NOC_DMA) {
+		if (noc_dma) {
 			ret = setup_noc_dma(priv, top_down, in.size, out.physical_address, &noc_address);
 
 			if (ret < 0)

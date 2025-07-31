@@ -81,8 +81,15 @@
 #define IATU_REGION_CTRL_3_OUTBOUND 0x1C
 #define IATU_UPPER_LIMIT_ADDR_OUTBOUND 0x20
 
+// IATU_REGION_CTRL_1_OUTBOUND fields
+#define INCREASE_REGION_SIZE (1 << 13)
+
 // IATU_REGION_CTRL_2_OUTBOUND fields
 #define REGION_EN (1 << 31)
+
+#ifndef SZ_1T
+#define SZ_1T 0x10000000000ULL
+#endif
 
 #define WRITE_IATU_REG(wh_dev, direction, region, reg, value) \
 	write_iatu_reg(wh_dev, IATU_##direction, region, \
@@ -923,7 +930,7 @@ static int blackhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	u64 size = limit - base + 1;
-	u32 region_ctrl_1 = 0;
+	u32 region_ctrl_1 = INCREASE_REGION_SIZE;
 	u32 region_ctrl_2 = (limit == 0) ? 0 : REGION_EN;
 	u32 region_ctrl_3 = 0;
 	u32 lower_base = lower_32_bits(base);
@@ -933,8 +940,8 @@ static int blackhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u
 	u32 lower_limit = lower_32_bits(limit);
 	u32 upper_limit = upper_32_bits(limit);
 
-	// iATU has a max region size of 4G.
-	if (size > U32_MAX)
+	// iATU has a max region size of 1T.
+	if (size > SZ_1T)
 		return -EINVAL;
 
 	if (region >= IATU_OUTBOUND_REGIONS)

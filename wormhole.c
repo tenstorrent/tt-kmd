@@ -459,7 +459,8 @@ static bool wormhole_post_hardware_init(struct tenstorrent_device *tt_dev) {
 static void wormhole_cleanup_hardware(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
-	grayskull_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
+	if (!tt_dev->detached)
+		grayskull_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
 
 	kfree(wh_dev->sysfs_attr_offsets);
 }

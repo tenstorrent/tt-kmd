@@ -88,6 +88,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	// The refcount created here persists until remove.
 	kref_init(&tt_dev->kref);
 
+	tt_dev->detached = false;
 	tt_dev->dev_class = device_class;
 	tt_dev->pdev = pci_dev_get(dev);
 	tt_dev->ordinal = ordinal;
@@ -150,6 +151,16 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 {
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(dev);
 	struct chardev_private *priv, *tmp;
+	u16 vendor_id;
+
+	// In a hotplug scenario, the device may not be accessible anymore. Check
+	// if it is still accessible by reading the vendor ID. If it is not, set the
+	// detached flag to prevent further hardware access.
+	pci_read_config_word(dev, PCI_VENDOR_ID, &vendor_id);
+	if (vendor_id == U16_MAX)
+		tt_dev->detached = true;
+	else
+		tt_dev->dev_class->cleanup_hardware(tt_dev);
 
 	list_for_each_entry_safe(priv, tmp, &tt_dev->open_fds_list, open_fd) {
 		tenstorrent_memory_cleanup(priv);
@@ -161,10 +172,13 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 			device_remove_file(&tt_dev->dev, &data->attr);
 	}
 
-
 	// These remove child sysfs entries which must happen before remove returns.
 	tenstorrent_unregister_device(tt_dev);
 	tenstorrent_disable_interrupts(tt_dev);
+
+	pci_disable_pcie_error_reporting(dev);
+	pci_disable_device(dev);
+	tt_dev->detached = true;
 
 	pci_set_drvdata(dev, NULL);
 
@@ -183,11 +197,7 @@ static void tt_dev_release(struct kref *tt_dev_kref) {
 	if (tt_dev->dev_class->reboot)
 		unregister_reboot_notifier(&tt_dev->reboot_notifier);
 
-	tt_dev->dev_class->cleanup_hardware(tt_dev);
 	tt_dev->dev_class->cleanup_device(tt_dev);
-
-	pci_disable_pcie_error_reporting(pdev);
-	pci_disable_device(pdev);
 
 	pci_dev_put(pdev);
 	kfree(tt_dev);

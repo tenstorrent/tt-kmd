@@ -871,6 +871,9 @@ static void blackhole_cleanup_hardware(struct tenstorrent_device *tt_dev)
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	struct arc_msg msg = { 0 };
 
+	if (tt_dev->detached)
+		return;
+
 	msg.header = ARC_MSG_TYPE_ASIC_STATE3;
 	if (!send_arc_message(bh, &msg))
 		dev_err(&tt_dev->dev, "Failed to send ARC message for A3 state\n");

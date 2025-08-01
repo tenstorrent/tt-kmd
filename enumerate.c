@@ -88,6 +88,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	// The refcount created here persists until remove.
 	kref_init(&tt_dev->kref);
 
+	tt_dev->detached = false;
 	tt_dev->dev_class = device_class;
 	tt_dev->pdev = pci_dev_get(dev);
 	tt_dev->ordinal = ordinal;
@@ -151,6 +152,12 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(dev);
 	struct chardev_private *priv, *tmp;
 
+	// Flag to indicate:
+	// 1. No subsequent driver-initiated hardware access via this tt_dev.
+	// 2. ioctl operations are no longer allowed for the file descriptor.
+	// NB: Userspace mappings can persist, this can be a stability hazard.
+	tt_dev->detached = true;
+
 	list_for_each_entry_safe(priv, tmp, &tt_dev->open_fds_list, open_fd) {
 		tenstorrent_memory_cleanup(priv);
 	}
@@ -180,14 +187,19 @@ static void tt_dev_release(struct kref *tt_dev_kref) {
 	struct tenstorrent_device *tt_dev = container_of(tt_dev_kref, struct tenstorrent_device, kref);
 	struct pci_dev *pdev = tt_dev->pdev;
 
-	if (tt_dev->dev_class->reboot)
-		unregister_reboot_notifier(&tt_dev->reboot_notifier);
+	if (!tt_dev->detached) {
+		if (tt_dev->dev_class->reboot)
+			unregister_reboot_notifier(&tt_dev->reboot_notifier);
 
-	tt_dev->dev_class->cleanup_hardware(tt_dev);
+		tt_dev->dev_class->cleanup_hardware(tt_dev);
+	}
+
 	tt_dev->dev_class->cleanup_device(tt_dev);
 
-	pci_disable_pcie_error_reporting(pdev);
-	pci_disable_device(pdev);
+	if (!tt_dev->detached) {
+		pci_disable_pcie_error_reporting(pdev);
+		pci_disable_device(pdev);
+	}
 
 	pci_dev_put(pdev);
 	kfree(tt_dev);

@@ -24,6 +24,7 @@ struct tenstorrent_device {
 	struct cdev chardev;
 	struct pci_dev *pdev;
 	const struct tenstorrent_device_class *dev_class;
+	bool detached; // No longer valid for hardware access
 
 	unsigned int ordinal;
 	bool dma_capable;
@@ -64,8 +65,8 @@ struct tenstorrent_device_class {
 	bool (*init_device)(struct tenstorrent_device *ttdev);
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);
 	bool (*post_hardware_init)(struct tenstorrent_device *ttdev);
-	void (*cleanup_hardware)(struct tenstorrent_device *ttdev);
-	void (*cleanup_device)(struct tenstorrent_device *ttdev);
+	void (*cleanup_hardware)(struct tenstorrent_device *ttdev); // Touches hardware.
+	void (*cleanup_device)(struct tenstorrent_device *ttdev); // Does not touch hardware.
 	void (*first_open_cb)(struct tenstorrent_device *ttdev);
 	void (*last_release_cb)(struct tenstorrent_device *ttdev);
 	void (*reboot)(struct tenstorrent_device *ttdev);

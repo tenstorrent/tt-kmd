@@ -62,6 +62,7 @@ struct tenstorrent_device_class {
 	u32 tlb_kinds;
 	u32 tlb_counts[MAX_TLB_KINDS];
 	u64 tlb_sizes[MAX_TLB_KINDS];
+	bool (*reset)(struct tenstorrent_device *ttdev, u32 reset_flag);
 	bool (*init_device)(struct tenstorrent_device *ttdev);
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);
 	bool (*post_hardware_init)(struct tenstorrent_device *ttdev);

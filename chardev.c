@@ -175,8 +175,9 @@ static long ioctl_get_driver_info(struct chardev_private *priv,
 static long ioctl_reset_device(struct chardev_private *priv,
 			       struct tenstorrent_reset_device __user *arg)
 {
+	struct tenstorrent_device *tt_dev = priv->device;
 	struct pci_dev *pdev = priv->device->pdev;
-	bool ok;
+	bool ok = false;
 	u32 bytes_to_copy;
 
 	struct tenstorrent_reset_device_in in;
@@ -198,6 +199,20 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		ok = pcie_hot_reset_and_restore_state(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_CONFIG_WRITE) {
 		ok = pcie_timer_interrupt(pdev);
+	} else if (in.flags == TENSTORRENT_RESET_DEVICE_USER_RESET) {
+		ok = set_reset_marker(pdev);
+	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
+		ok = priv->device->dev_class->reset(tt_dev, in.flags);
+	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
+		ok = priv->device->dev_class->reset(tt_dev, in.flags);
+	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {
+		ok = is_reset_marker_zero(pdev);
+		if (ok && safe_pci_restore_state(pdev)) {
+			priv->device->dev_class->restore_reset_state(priv->device);
+			ok = priv->device->dev_class->init_hardware(priv->device);
+		} else {
+			ok = false;
+		}
 	} else {
 		return -EINVAL;
 	}

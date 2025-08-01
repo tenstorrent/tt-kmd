@@ -14,6 +14,7 @@
 #include "hwmon.h"
 #include "tlb.h"
 #include "telemetry.h"
+#include "pcie.h"
 
 #define TLB_1M_WINDOW_COUNT 156
 #define TLB_1M_SHIFT 20
@@ -296,6 +297,25 @@ static void update_device_index(struct wormhole_device *wh_dev) {
 						WH_FW_MSG_PCIE_INDEX,
 						wh_dev->tt.ordinal | INDEX_VALID, 0,
 						10*1000, NULL);
+}
+
+static bool wormhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
+{
+	struct pci_dev *pdev = tt_dev->pdev;
+
+	switch (reset_flag) {
+	case TENSTORRENT_RESET_DEVICE_ASIC_RESET:
+		set_reset_marker(pdev);
+		return pcie_hot_reset_and_restore_state(pdev);
+	case TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET:
+		set_reset_marker(pdev);
+		// TODO
+		return false;
+	default:
+		return false;
+	}
+
+	return false;
 }
 
 static bool wormhole_init(struct tenstorrent_device *tt_dev) {
@@ -720,6 +740,7 @@ struct tenstorrent_device_class wormhole_class = {
 	.tlb_kinds = NUM_TLB_KINDS,
 	.tlb_counts = { TLB_1M_WINDOW_COUNT, TLB_2M_WINDOW_COUNT, TLB_16M_WINDOW_COUNT },
 	.tlb_sizes = { TLB_1M_WINDOW_SIZE, TLB_2M_WINDOW_SIZE, TLB_16M_WINDOW_SIZE },
+	.reset = wormhole_reset,
 	.init_device = wormhole_init,
 	.init_hardware = wormhole_init_hardware,
 	.post_hardware_init = wormhole_post_hardware_init,

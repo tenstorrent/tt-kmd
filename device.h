@@ -24,6 +24,7 @@ struct tenstorrent_device {
 	struct cdev chardev;
 	struct pci_dev *pdev;
 	const struct tenstorrent_device_class *dev_class;
+	bool detached; // No longer valid for hardware access
 
 	unsigned int ordinal;
 	bool dma_capable;

@@ -88,6 +88,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	// The refcount created here persists until remove.
 	kref_init(&tt_dev->kref);
 
+	tt_dev->detached = false;
 	tt_dev->dev_class = device_class;
 	tt_dev->pdev = pci_dev_get(dev);
 	tt_dev->ordinal = ordinal;
@@ -151,6 +152,16 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(dev);
 	struct chardev_private *priv, *tmp;
 
+	// The problem the detach flag solves is that the device may be removed
+	// while userspace has open file descriptors to it. Subsequent operations on
+	// such a tenstorrent_device can cause different issues, depending on
+	// whether the device has returned or not. The flag exists to block driver
+	// interactions with the hardware via this tenstorrent_device, since we
+	// cannot assume the hardware is still present. Userspace interactions via
+	// ioctl on stale file descriptors are similarly blocked.
+	// NB: user mappings survive device removal; this is a stability hazard.
+	tt_dev->detached = true;
+
 	list_for_each_entry_safe(priv, tmp, &tt_dev->open_fds_list, open_fd) {
 		tenstorrent_memory_cleanup(priv);
 	}
@@ -183,11 +194,13 @@ static void tt_dev_release(struct kref *tt_dev_kref) {
 	if (tt_dev->dev_class->reboot)
 		unregister_reboot_notifier(&tt_dev->reboot_notifier);
 
-	tt_dev->dev_class->cleanup_hardware(tt_dev);
-	tt_dev->dev_class->cleanup_device(tt_dev);
+	if (!tt_dev->detached) {
+		tt_dev->dev_class->cleanup_hardware(tt_dev);
+		pci_disable_pcie_error_reporting(pdev);
+		pci_disable_device(pdev);
+	}
 
-	pci_disable_pcie_error_reporting(pdev);
-	pci_disable_device(pdev);
+	tt_dev->dev_class->cleanup_device(tt_dev);
 
 	pci_dev_put(pdev);
 	kfree(tt_dev);

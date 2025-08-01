@@ -332,6 +332,9 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	long ret = -EINVAL;
 	struct chardev_private *priv = f->private_data;
 
+	if (priv->device->detached)
+		return -ENODEV;
+
 	switch (cmd) {
 		case TENSTORRENT_IOCTL_GET_DEVICE_INFO:
 			ret = ioctl_get_device_info(priv, (struct tenstorrent_get_device_info __user *)arg);
@@ -462,7 +465,7 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	struct tenstorrent_device *tt_dev = priv->device;
 	unsigned int bitpos;
 
-	if (priv->noc_cleanup.enabled) {
+	if (!tt_dev->detached && priv->noc_cleanup.enabled) {
 		tt_dev->dev_class->noc_write32(
 			tt_dev,
 			priv->noc_cleanup.x,

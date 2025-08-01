@@ -329,7 +329,9 @@ static void teardown_outbound_iatu(struct chardev_private *priv, int iatu_region
 	mutex_lock(&tt_dev->iatu_mutex);
 
 	region = &priv->device->outbound_iatus[iatu_region];
-	tt_dev->dev_class->configure_outbound_atu(tt_dev, iatu_region, 0, 0, 0);
+
+	if (!tt_dev->detached)
+		tt_dev->dev_class->configure_outbound_atu(tt_dev, iatu_region, 0, 0, 0);
 
 	region->priv = NULL;
 	region->base = 0;

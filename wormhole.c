@@ -14,6 +14,7 @@
 #include "hwmon.h"
 #include "tlb.h"
 #include "telemetry.h"
+#include "pcie.h"
 
 #define TLB_1M_WINDOW_COUNT 156
 #define TLB_1M_SHIFT 20
@@ -37,6 +38,7 @@
 #define WH_FW_MSG_PCIE_INDEX 0x51
 #define WH_FW_MSG_ASTATE0 0xA0
 #define WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT 0xBC
+#define WH_FW_MSG_TRIGGER_RESET 0x56
 
 // The iATU can be used to match & remap PCIE transactions.
 #define IATU_BASE 0x1200	// Relative to the start of BAR2
@@ -296,6 +298,41 @@ static void update_device_index(struct wormhole_device *wh_dev) {
 						WH_FW_MSG_PCIE_INDEX,
 						wh_dev->tt.ordinal | INDEX_VALID, 0,
 						10*1000, NULL);
+}
+
+static bool wormhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
+{
+	struct pci_dev *pdev = tt_dev->pdev;
+
+	switch (reset_flag) {
+	case TENSTORRENT_RESET_DEVICE_ASIC_RESET:
+		set_reset_marker(pdev);
+
+		if (!pcie_hot_reset_and_restore_state(pdev))
+			return false;
+
+		if (!grayskull_shutdown_firmware(pdev, reset_unit_regs(tt_dev_to_wh_dev(tt_dev))))
+			return false;
+
+		grayskull_send_arc_fw_message_with_args(reset_unit_regs(tt_dev_to_wh_dev(tt_dev)),
+						 WH_FW_MSG_TRIGGER_RESET, 0, 0,
+						 10, NULL);
+		return true;
+	case TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET:
+		set_reset_marker(pdev);
+		if (!grayskull_send_arc_fw_message_with_args(reset_unit_regs(tt_dev_to_wh_dev(tt_dev)),
+						 WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT, auto_reset_timeout, 0, 10000, NULL))
+			return false;
+
+		grayskull_send_arc_fw_message_with_args(reset_unit_regs(tt_dev_to_wh_dev(tt_dev)),
+						 WH_FW_MSG_TRIGGER_RESET, 3, 0,
+						 10, NULL);
+		return true; // Possibly a lie.
+	default:
+		return false;
+	}
+
+	return false;
 }
 
 static bool wormhole_init(struct tenstorrent_device *tt_dev) {
@@ -720,6 +757,7 @@ struct tenstorrent_device_class wormhole_class = {
 	.tlb_kinds = NUM_TLB_KINDS,
 	.tlb_counts = { TLB_1M_WINDOW_COUNT, TLB_2M_WINDOW_COUNT, TLB_16M_WINDOW_COUNT },
 	.tlb_sizes = { TLB_1M_WINDOW_SIZE, TLB_2M_WINDOW_SIZE, TLB_16M_WINDOW_SIZE },
+	.reset = wormhole_reset,
 	.init_device = wormhole_init,
 	.init_hardware = wormhole_init_hardware,
 	.post_hardware_init = wormhole_post_hardware_init,

@@ -198,6 +198,29 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		ok = pcie_hot_reset_and_restore_state(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_CONFIG_WRITE) {
 		ok = pcie_timer_interrupt(pdev);
+	} else if (in.flags == TENSTORRENT_RESET_DEVICE_USER_RESET) {
+		ok = set_reset_marker(pdev);
+		priv->device->needs_hw_init = true;
+	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
+		ok = priv->device->dev_class->reset(priv->device, in.flags);
+		priv->device->needs_hw_init = true;
+	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
+		ok = priv->device->dev_class->reset(priv->device, in.flags);
+		priv->device->needs_hw_init = true;
+	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {
+		ok = is_reset_marker_zero(pdev);
+
+		// In the hotplug case, needs_hw_init is false and there is nothing to
+		// do here. Otherwise this was an in-place reset, so re-initialize now.
+		if (ok && priv->device->needs_hw_init) {
+			priv->device->needs_hw_init = false;
+			if (safe_pci_restore_state(pdev)) {
+				priv->device->dev_class->restore_reset_state(priv->device);
+				ok = priv->device->dev_class->init_hardware(priv->device);
+			} else {
+				ok = false;
+			}
+		}
 	} else {
 		return -EINVAL;
 	}

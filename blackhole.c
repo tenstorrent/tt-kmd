@@ -64,6 +64,7 @@
 #define ARC_MSG_TYPE_ASIC_STATE0 0xA0
 #define ARC_MSG_TYPE_ASIC_STATE3 0xA3
 #define ARC_MSG_TYPE_SET_WDT_TIMEOUT 0xC1
+#define ARC_MSG_TYPE_TRIGGER_RESET 0x56
 #define ARC_BOOT_STATUS RESET_SCRATCH(2)
 #define ARC_BOOT_STATUS_READY_FOR_MSG 0x1
 
@@ -808,6 +809,36 @@ static bool send_arc_message(struct blackhole_device *bh, struct arc_msg *msg)
 	return msg->header == 0;
 }
 
+static bool blackhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	struct pci_dev *pdev = tt_dev->pdev;
+	struct arc_msg msg = { 0 };
+
+	switch (reset_flag) {
+	case TENSTORRENT_RESET_DEVICE_ASIC_RESET:
+		set_reset_marker(pdev);
+		return pcie_timer_interrupt(pdev);
+	case TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET:
+
+		msg.header = ARC_MSG_TYPE_SET_WDT_TIMEOUT;
+		msg.payload[0] = 1000 * auto_reset_timeout;
+		if (!send_arc_message(bh, &msg)) {
+			dev_warn(&tt_dev->pdev->dev, "Can't trigger DMC reset; NOC likely hung.\n");
+			return false;
+		}
+
+		set_reset_marker(pdev);
+		memset(&msg, 0, sizeof(msg));
+		msg.header = ARC_MSG_TYPE_TRIGGER_RESET;
+		msg.payload[0] = 3; // Argument for ASIC + M3 reset
+		send_arc_message(bh, &msg);
+		return true;
+	default:
+		return false;
+	}
+}
+
 static bool blackhole_init(struct tenstorrent_device *tt_dev) {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 
@@ -991,6 +1022,7 @@ struct tenstorrent_device_class blackhole_class = {
 	.tlb_kinds = 2,
 	.tlb_counts = { TLB_2M_WINDOW_COUNT, TLB_4G_WINDOW_COUNT },
 	.tlb_sizes = { TLB_2M_WINDOW_SIZE, TLB_4G_WINDOW_SIZE },
+	.reset = blackhole_reset,
 	.init_device = blackhole_init,
 	.init_hardware = blackhole_init_hardware,
 	.post_hardware_init = blackhole_post_hardware_init,

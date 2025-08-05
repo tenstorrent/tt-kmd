@@ -818,7 +818,7 @@ static bool blackhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 	switch (reset_flag) {
 	case TENSTORRENT_RESET_DEVICE_ASIC_RESET:
 		set_reset_marker(pdev);
-		return pcie_timer_interrupt(pdev);
+		return pcie_timer_interrupt2(pdev);
 	case TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET:
 
 		msg.header = ARC_MSG_TYPE_SET_WDT_TIMEOUT;

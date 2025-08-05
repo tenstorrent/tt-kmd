@@ -130,6 +130,32 @@ bool pcie_timer_interrupt(struct pci_dev *pdev)
 	return true;
 }
 
+bool pcie_timer_interrupt2(struct pci_dev *pdev)
+{
+	struct pci_dev *bridge_dev = pci_upstream_bridge(pdev);
+	u16 bridge_ctrl;
+
+	if (!bridge_dev)
+		return false;
+
+	pci_read_config_word(bridge_dev, PCI_BRIDGE_CONTROL, &bridge_ctrl);
+	pci_write_config_dword(pdev, INTERFACE_TIMER_TARGET_OFF, INTERFACE_TIMER_TARGET);
+	pci_write_config_dword(pdev, INTERFACE_TIMER_CONTROL_OFF, INTERFACE_TIMER_EN | INTERFACE_FORCE_PENDING);
+	pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl | PCI_BRIDGE_CTL_BUS_RESET);
+
+	msleep(2);
+	pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl);
+	msleep(500);
+
+	if (!poll_pcie_link_up(pdev, 10000))
+		return false;
+
+	if (!safe_pci_restore_state(pdev))
+		return false;
+
+	return true;
+}
+
 bool set_reset_marker(struct pci_dev *pdev)
 {
 	u16 pci_command;

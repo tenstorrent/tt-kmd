@@ -6,6 +6,7 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sysfs.h>
+#include <linux/delay.h>
 
 #include "wormhole.h"
 #include "grayskull.h"
@@ -303,36 +304,56 @@ static void update_device_index(struct wormhole_device *wh_dev) {
 static bool wormhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 {
 	struct pci_dev *pdev = tt_dev->pdev;
+	struct pci_dev *bridge_dev = pci_upstream_bridge(pdev);
+	u16 bridge_ctrl;
+	u16 reset_arg = 0;
 
-	switch (reset_flag) {
-	case TENSTORRENT_RESET_DEVICE_ASIC_RESET:
-		set_reset_marker(pdev);
-
-		if (!pcie_hot_reset_and_restore_state(pdev))
-			return false;
-
-		if (!grayskull_shutdown_firmware(pdev, reset_unit_regs(tt_dev_to_wh_dev(tt_dev))))
-			return false;
-
-		grayskull_send_arc_fw_message_with_args(reset_unit_regs(tt_dev_to_wh_dev(tt_dev)),
-						 WH_FW_MSG_TRIGGER_RESET, 0, 0,
-						 10, NULL);
-		return true;
-	case TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET:
-		set_reset_marker(pdev);
-		if (!grayskull_send_arc_fw_message_with_args(reset_unit_regs(tt_dev_to_wh_dev(tt_dev)),
-						 WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT, auto_reset_timeout, 0, 10000, NULL))
-			return false;
-
-		grayskull_send_arc_fw_message_with_args(reset_unit_regs(tt_dev_to_wh_dev(tt_dev)),
-						 WH_FW_MSG_TRIGGER_RESET, 3, 0,
-						 10, NULL);
-		return true; // Possibly a lie.
-	default:
+	if (!bridge_dev)
 		return false;
+
+	if (reset_flag == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET)
+		reset_arg = 3;
+	else if (reset_flag != TENSTORRENT_RESET_DEVICE_ASIC_RESET)
+		return false;
+
+	// Step 1: Secondary bus reset
+	pci_read_config_word(bridge_dev, PCI_BRIDGE_CONTROL, &bridge_ctrl);
+	pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl | PCI_BRIDGE_CTL_BUS_RESET);
+
+	msleep(2);
+	pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl);
+	msleep(500);
+
+	if (!poll_pcie_link_up(pdev, 10000))
+		return false;
+
+	if (!safe_pci_restore_state(pdev))
+		return false;
+
+	// Step 2: trigger state where there are no more pending regulator requests.
+	if (!grayskull_shutdown_firmware(pdev, reset_unit_regs(tt_dev_to_wh_dev(tt_dev)))) {
+		dev_warn(&pdev->dev, "Could not put FW into A3 state before reset, proceeding anyway.\n");
 	}
 
-	return false;
+	// Step 3: trigger the reset.
+	grayskull_send_arc_fw_message_with_args(reset_unit_regs(tt_dev_to_wh_dev(tt_dev)), WH_FW_MSG_TRIGGER_RESET,
+						reset_arg, 0,
+						U32_MAX, // U32_MAX timeout: return immediately.
+						NULL);
+
+	// Step 4: Immediately secondary bus reset (necessary for some platforms).
+	pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl | PCI_BRIDGE_CTL_BUS_RESET);
+	msleep(2);
+	pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl);
+	msleep(500);
+
+	if (!poll_pcie_link_up(pdev, 10000))
+		return false;
+
+	if (!safe_pci_restore_state(pdev))
+		return false;
+
+	return true;
 }
 
 static bool wormhole_init(struct tenstorrent_device *tt_dev) {

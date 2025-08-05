@@ -20,7 +20,7 @@
 #define INTERFACE_TIMER_EN 0x1
 #define INTERFACE_FORCE_PENDING 0x10
 
-static bool poll_pcie_link_up(struct pci_dev *pdev, u32 timeout_ms) {
+bool poll_pcie_link_up(struct pci_dev *pdev, u32 timeout_ms) {
 	u16 tt_vendor_id;
 	ktime_t end_time = ktime_add_ms(ktime_get(), timeout_ms);
 

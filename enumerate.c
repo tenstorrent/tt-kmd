@@ -122,6 +122,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	if (device_class->init_device(tt_dev))
 		if (device_class->init_hardware(tt_dev))
 			device_class->post_hardware_init(tt_dev);
+	tt_dev->needs_hw_init = false;
 
 	pci_save_state(dev);
 	device_class->save_reset_state(tt_dev);
@@ -160,7 +161,9 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	if (vendor_id == U16_MAX)
 		tt_dev->detached = true;
 	else
-		tt_dev->dev_class->cleanup_hardware(tt_dev);
+		tt_dev->dev_class->cleanup_hardware(tt_dev); // Put FW into A3 state
+
+	tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
 
 	list_for_each_entry_safe(priv, tmp, &tt_dev->open_fds_list, open_fd) {
 		tenstorrent_memory_cleanup(priv);
@@ -197,7 +200,6 @@ static void tt_dev_release(struct kref *tt_dev_kref) {
 	if (tt_dev->dev_class->reboot)
 		unregister_reboot_notifier(&tt_dev->reboot_notifier);
 
-	tt_dev->dev_class->cleanup_device(tt_dev);
 
 	pci_dev_put(pdev);
 	kfree(tt_dev);

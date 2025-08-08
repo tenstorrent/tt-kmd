@@ -6,6 +6,8 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sysfs.h>
+#include <linux/delay.h>
+#include <linux/pci.h>
 
 #include "wormhole.h"
 #include "grayskull.h"
@@ -14,6 +16,7 @@
 #include "hwmon.h"
 #include "tlb.h"
 #include "telemetry.h"
+#include "pcie.h"
 
 #define TLB_1M_WINDOW_COUNT 156
 #define TLB_1M_SHIFT 20
@@ -37,6 +40,8 @@
 #define WH_FW_MSG_PCIE_INDEX 0x51
 #define WH_FW_MSG_ASTATE0 0xA0
 #define WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT 0xBC
+#define WH_FW_MSG_TRIGGER_RESET 0x56
+#define WH_FW_MSG_NOP 0x11
 
 // The iATU can be used to match & remap PCIE transactions.
 #define IATU_BASE 0x1200	// Relative to the start of BAR2
@@ -298,6 +303,31 @@ static void update_device_index(struct wormhole_device *wh_dev) {
 						10*1000, NULL);
 }
 
+static bool wormhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
+{
+	struct pci_dev *pdev = tt_dev->pdev;
+	u16 reset_arg = (reset_flag == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) ? 3 : 0;
+
+	// Step 1: Secondary bus reset.
+	pcie_hot_reset_and_restore_state(pdev);
+
+	// Step 2: Check if the device is functioning enough to respond to a message.
+	if (!grayskull_send_arc_fw_message_with_args(reset_unit_regs(tt_dev_to_wh_dev(tt_dev)), WH_FW_MSG_NOP,
+						     reset_arg, 0, 10000, NULL)) {
+		dev_warn(&tt_dev->pdev->dev, "Couldn't communicate with firmware; NOC is likely hung.\n");
+		return false;
+	}
+
+	// Step 3: trigger the reset.
+	grayskull_send_arc_fw_message_with_args(reset_unit_regs(tt_dev_to_wh_dev(tt_dev)), WH_FW_MSG_TRIGGER_RESET,
+						reset_arg, 0,
+						0,
+						NULL);
+
+	return true; // Assumes the reset was successful.
+}
+
+
 static bool wormhole_init(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
@@ -459,7 +489,8 @@ static bool wormhole_post_hardware_init(struct tenstorrent_device *tt_dev) {
 static void wormhole_cleanup_hardware(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
-	grayskull_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
+	if (!tt_dev->detached)
+		grayskull_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
 
 	kfree(wh_dev->sysfs_attr_offsets);
 }
@@ -720,6 +751,7 @@ struct tenstorrent_device_class wormhole_class = {
 	.tlb_kinds = NUM_TLB_KINDS,
 	.tlb_counts = { TLB_1M_WINDOW_COUNT, TLB_2M_WINDOW_COUNT, TLB_16M_WINDOW_COUNT },
 	.tlb_sizes = { TLB_1M_WINDOW_SIZE, TLB_2M_WINDOW_SIZE, TLB_16M_WINDOW_SIZE },
+	.reset = wormhole_reset,
 	.init_device = wormhole_init,
 	.init_hardware = wormhole_init_hardware,
 	.post_hardware_init = wormhole_post_hardware_init,

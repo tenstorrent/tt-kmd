@@ -136,10 +136,16 @@ struct tenstorrent_get_driver_info {
 	struct tenstorrent_get_driver_info_out out;
 };
 
-// tenstorrent_reset_device_in.flags
+// legacy tenstorrent_reset_device_in.flags
 #define TENSTORRENT_RESET_DEVICE_RESTORE_STATE 0
 #define TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK 1
 #define TENSTORRENT_RESET_DEVICE_CONFIG_WRITE 2
+
+// tenstorrent_reset_device_in.flags
+#define TENSTORRENT_RESET_DEVICE_USER_RESET 3
+#define TENSTORRENT_RESET_DEVICE_ASIC_RESET 4
+#define TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET 5
+#define TENSTORRENT_RESET_DEVICE_POST_RESET 6
 
 struct tenstorrent_reset_device_in {
 	__u32 output_size_bytes;
@@ -324,5 +330,6 @@ struct tenstorrent_set_noc_cleanup {
 	__u64 addr;
 	__u64 data;
 };
+
 
 #endif

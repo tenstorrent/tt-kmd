@@ -24,6 +24,8 @@ struct tenstorrent_device {
 	struct cdev chardev;
 	struct pci_dev *pdev;
 	const struct tenstorrent_device_class *dev_class;
+	bool detached; // No longer valid for hardware access
+	bool needs_hw_init;
 
 	unsigned int ordinal;
 	bool dma_capable;
@@ -61,6 +63,7 @@ struct tenstorrent_device_class {
 	u32 tlb_kinds;
 	u32 tlb_counts[MAX_TLB_KINDS];
 	u64 tlb_sizes[MAX_TLB_KINDS];
+	bool (*reset)(struct tenstorrent_device *ttdev, u32 reset_flag);
 	bool (*init_device)(struct tenstorrent_device *ttdev);
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);
 	bool (*post_hardware_init)(struct tenstorrent_device *ttdev);

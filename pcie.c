@@ -129,3 +129,23 @@ bool pcie_timer_interrupt(struct pci_dev *pdev)
 	pci_write_config_dword(pdev, INTERFACE_TIMER_CONTROL_OFF, INTERFACE_TIMER_EN | INTERFACE_FORCE_PENDING);
 	return true;
 }
+
+bool set_reset_marker(struct pci_dev *pdev)
+{
+	u16 pci_command;
+
+	// pci_command_parity is used as reset marker. Set to 1, check if cleared to 0 after reset
+	pci_read_config_word(pdev, PCI_COMMAND, &pci_command);
+	pci_write_config_word(pdev, PCI_COMMAND, pci_command | PCI_COMMAND_PARITY);
+
+	return true;
+}
+
+bool is_reset_marker_zero(struct pci_dev *pdev)
+{
+	u16 pci_command;
+
+	// Read the reset marker
+	pci_read_config_word(pdev, PCI_COMMAND, &pci_command);
+	return (pci_command & PCI_COMMAND_PARITY) == 0;
+}

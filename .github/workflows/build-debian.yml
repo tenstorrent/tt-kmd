@@ -1,0 +1,166 @@
+name: Build Ubuntu Packages 📦
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to build from'
+        default: ${{ github.ref }}
+        required: true
+        type: string
+      MAJOR:
+        required: false
+        type: string
+      MINOR:
+        required: false
+        type: string
+      PATCH:
+        required: false
+        type: string
+      NUMBER_OF_COMMITS_SINCE_TAG:
+        required: false
+        type: string
+
+jobs:
+  build-deb:
+    name: Build ${{ matrix.os }} Package
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - ubuntu-24.04
+          - ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: |
+          echo "What started this ref: ${{ github.ref }}"
+          echo "What started this ref: ${{ github.ref_name }}"
+          echo "What started this sha: ${{ github.sha }}"
+          echo "Did we get a ref pass in? ${{ inputs.ref }}"
+      - name: Figure out branch name
+        id: ref_name
+        run: |
+          echo "ref_name=${{ github.ref_name }}"
+          echo "ref_name=${{ github.ref_name }}" >> $GITHUB_ENV
+          if [[ -n "${{ inputs.ref }}" ]]
+          then
+            echo "ref_name=${{ inputs.ref }}"
+            echo "ref_name=${{ inputs.ref }}" >> $GITHUB_ENV
+          fi
+      - run: sudo apt update
+      - name: Install build dependencies
+        run: |
+          sudo apt install -y \
+            build-essential \
+            debhelper \
+            dkms \
+            git-buildpackage \
+            gnupg
+          if [[ "$( lsb_release -rs )" != "22.04" ]]
+          then
+            sudo apt install -y \
+              dh-dkms
+          fi
+      - name: Import GPG key
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.PKG_SIGNING_KEY_DEB }}
+      - run: gpg --list-keys
+      - run: gpg --list-secret-keys
+      - uses: actions/checkout@v4
+        name: Checkout
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-tags: true
+          fetch-depth: 0
+      - name: Extract version from tag
+        uses: damienaicheh/extract-version-from-tag-action@v1.3.0
+      - run: git tag
+      - name: Ok Figure out version
+        run: |
+          echo "MAJOR=$( echo "${MAJOR}" | sed 's/^ttkmd-//' )" >> $GITHUB_ENV
+          echo "MAJOR=$( echo "${MAJOR}" | sed 's/^ttkmd-//' )"
+
+          if [[ -n "${{ inputs.MAJOR }}" ]]
+          then
+            echo "MAJOR=${{ inputs.MAJOR }}" >> $GITHUB_ENV
+            echo "MAJOR=${{ inputs.MAJOR }}"
+          fi
+
+          if [[ -n "${{ inputs.MINOR }}" ]]
+          then
+            echo "MINOR=${{ inputs.MINOR }}" >> $GITHUB_ENV
+            echo "MINOR=${{ inputs.MINOR }}"
+          fi
+
+          if [[ -n "${{ inputs.PATCH }}" ]]
+          then
+            echo "PATCH=${{ inputs.PATCH }}" >> $GITHUB_ENV
+            echo "PATCH=${{ inputs.PATCH }}"
+          fi
+
+          if [[ -n "${{ inputs.NUMBER_OF_COMMITS_SINCE_TAG }}" ]]
+          then
+            echo "NUMBER_OF_COMMITS_SINCE_TAG=${{ inputs.NUMBER_OF_COMMITS_SINCE_TAG }}" >> $GITHUB_ENV
+            echo "NUMBER_OF_COMMITS_SINCE_TAG=${{ inputs.NUMBER_OF_COMMITS_SINCE_TAG }}"
+          fi
+
+          if [[ -n "${{ inputs.ref }}" ]]
+          then
+            echo "REF=${{ inputs.ref }}" >> $GITHUB_ENV
+            echo "REF=${{ inputs.ref }}"
+          else
+            echo "REF=${{ github.ref_name }}" >> $GITHUB_ENV
+            echo "REF=${{ github.ref_name }}"
+          fi
+      # Ok this needs to get up leveled somewhere so that it can be shared across Debian and Ubuntu obviously
+      - run: ls -lah
+      - run: |
+          gbp dch \
+            --debian-branch ${ref_name} \
+            -R \
+            -N ${MAJOR}.${MINOR}.${PATCH} \
+            --spawn-editor=never
+        env:
+          EMAIL: releases@tenstorrent.com
+          NAME: Tenstorrent Releases
+      - run: |
+          gbp buildpackage \
+            --git-ignore-new
+        continue-on-error: true
+
+      - name: Move Debian packages
+        run: mkdir -p artifacts && mv ../*.deb artifacts/
+      - name: Copy Changelog to artifacts
+        run: cp debian/changelog artifacts/changelog
+      - name: Set environment variable for distro
+        id: distro_ident
+        run: |
+          source /etc/os-release && \
+          #echo "DISTRO_IDENT=$( echo \"${NAME}\" | sed 's/"//g' | tr '[:upper:]' '[:lower:]' )-${VERSION_ID}" \
+          #      >> $GITHUB_ENV
+          echo "DISTRO_IDENT=${{ matrix.os }}" >> $GITHUB_ENV
+      - name: Set environment variable for deb filename
+        id: deb_filename
+        run: echo "DEB_FILENAME=$(basename artifacts/*.deb)" >> $GITHUB_ENV
+      - name: Set environment variable for deb filename
+        id: deb_filename_distro
+        run: echo DEB_FILENAME_DISTRO=$(basename artifacts/*.deb | sed "s/_all/_all-${{ env.DISTRO_IDENT }}/" ) >> $GITHUB_ENV
+      - name: Upload Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DEB_FILENAME_DISTRO }}
+          path: artifacts/${{ env.DEB_FILENAME }}
+      - name: Upload Changelog
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-changelog-${{ env.DISTRO_IDENT }}
+          path: debian/changelog
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ env.DISTRO_IDENT }}.zip
+          path: artifacts/
+

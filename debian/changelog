@@ -1,9 +1,9 @@
-tt-kmd (2.3.0-1) unstable; urgency=medium
+tt-kmd (2.3.0) unstable; urgency=medium
 
   * Add new 'tt_asic_id' sysfs attribute for Wormhole.
   * Improve sysfs telemetry: only create files for supported attributes.
 
- -- Tenstorrent <support@tenstorrent.com>  Mon, 28 Jul 2025 17:13:23 +0000
+ -- Tenstorrent Releases <releases@tenstorrent.com>  Mon, 28 Jul 2025 17:13:23 +0000
 
 tt-kmd (2.2.0-1) unstable; urgency=medium
 
@@ -14,11 +14,11 @@ tt-kmd (2.2.0-1) unstable; urgency=medium
   * Fix race condition in Blackhole ARC firmware communication after reset.
   * Enforce exact size matching for TLB allocation ioctl.
 
- -- Tenstorrent <support@tenstorrent.com>  Fri, 25 Jul 2025 17:08:30 +0000
+ -- Tenstorrent Releases <releases@tenstorrent.com>  Fri, 25 Jul 2025 17:08:30 +0000
 
 tt-kmd (2.1.0-1) unstable; urgency=medium
 
   * Initial packaging of tenstorrent DKMS driver
 
- -- Tenstorrent <support@tenstorrent.com>  Tue, 23 Jul 2025 11:00:00 +0100
+ -- Tenstorrent Releases <releases@tenstorrent.com>  Tue, 23 Jul 2025 11:00:00 +0100
 

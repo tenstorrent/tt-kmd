@@ -1,0 +1,12 @@
+// SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+// SPDX-License-Identifier: GPL-2.0-only
+
+#ifndef TTDRIVER_VERSION_H_INCLUDED
+#define TTDRIVER_VERSION_H_INCLUDED
+
+#define TENSTORRENT_DRIVER_VERSION_MAJOR 2
+#define TENSTORRENT_DRIVER_VERSION_MINOR 3
+#define TENSTORRENT_DRIVER_VERSION_PATCH 0
+#define TENSTORRENT_DRIVER_VERSION_SUFFIX ""    // e.g. "-rc1"
+
+#endif

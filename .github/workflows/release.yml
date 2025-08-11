@@ -1,0 +1,405 @@
+name: Create Release
+run-name: Create Release
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+env:
+  project_name: tt-kmd
+
+jobs:
+  ###
+  # Repo Updates
+  #   So, fun fact, the way actions/checkout@v4 works it pulls / works based on what triggered it
+  #   this leads to a problem because I don't want to progress till various things have completed
+  #   in a roughly specific order, but I also need to know what/where things came from - which ok
+  #   fair enough.
+  #
+  #   This means that repo changes, so version changes, changelogs, etc I guess all need to happen
+  #   not only at once but somehow need to wait on things down the line outside this triggering to
+  #   come back and allow other things to happen.  Or I suppose I snag the sha from versionchange
+  #   and pass it along as "latest" in the series, could work too and bypass some of this?
+  ###
+
+  create-temp-branch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      temp_branch_ref: ${{ steps.temp_branch_ref.outputs.temp_branch_ref }}
+    steps:
+      - name: Checkout the repo
+        uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+          fetch-depth: 0
+      - name: Figure out branch name
+        id: temp_branch_ref
+        run: |
+          export temp_branch_ref="temp_branch_ref=rc-temp-$( git rev-parse --short HEAD )-$( date +%Y.%m.%d-%H.%M.%S )"
+          echo "${temp_branch_ref}"
+          echo "${temp_branch_ref}" >> "$GITHUB_OUTPUT"
+      - name: Create the branch
+        run: git checkout -b "${{ steps.temp_branch_ref.outputs.temp_branch_ref }}"
+      - name: Push the branch to work from
+        run: git push --branches
+
+  versionchange:
+    needs:
+      - create-temp-branch
+    # Runs on needs to be the oldest we can make it
+    # just to make sure that the python environment is the oldest
+    # we likely need to support
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    outputs:
+      git_hash: ${{ steps.new-git-hash.outputs.git_hash }}
+      package_name: ${{ steps.packagename.outputs.package_name }}
+      package_version: ${{ steps.packagever.outputs.package_version }}
+      package_version_new: ${{ steps.new-package-version.outputs.package_version_new }}
+      version_major: ${{ steps.version.outputs.major }}
+      version_minor: ${{ steps.version.outputs.minor }}
+      version_patch: ${{ steps.version.outputs.patch }}
+      version_prerelease: ${{ steps.version.outputs.prerelease }}
+      version_build: ${{ steps.version.outputs.build }}
+      version_full: ${{ steps.version.outputs.full }}
+      number_of_commits_since_tag: ${{ steps.num-commits-since-tag.outputs.num_commits_since_tag }}
+    steps:
+      - name: Update apt
+        run: sudo apt update
+      - name: Install crudini
+        run: sudo apt install crudini -y
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+          fetch-depth: 0
+          ref: ${{ needs.create-temp-branch.outputs.temp_branch_ref }}
+      - name: Git e-mail
+        run: git config --global user.email "${EMAIL}"
+      - name: Git name
+        run: git config --global user.name "${NAME}"
+      - name: What version are we?
+        id: packagever
+        run: |
+          export package_version="$( crudini --get dkms.conf "" PACKAGE_VERSION | sed 's/"//g' )"
+          echo "package_version=${package_version}"
+          echo "package_version=${package_version}" >> "$GITHUB_OUTPUT"
+      - name: What package are we?
+        id: packagename
+        run: |
+          export package_name="$( crudini --get dkms.conf "" PACKAGE_NAME | sed 's/"//g' )"
+          echo "package_name=${package_name}"
+          echo "package_name=${package_name}" >> "$GITHUB_OUTPUT"
+      - name: Bump the version
+        run: |
+          export bump_level="patch"
+          if [[ -e bump_minor ]]
+          then
+            export bump_level="minor"
+          fi
+
+          if [[ -e bump_major ]]
+          then
+            export bump_level="major"
+          fi
+
+          echo "Bump Level: ${bump_level}"
+
+          python3 -m venv venv
+          . ./venv/bin/activate
+          pip install bump2version
+          bump2version \
+            --list ${bump_level} \
+            --verbose \
+            --no-commit
+      - name: What NEW Version?
+        id: new-package-version
+        run: |
+          export package_version_new="$( crudini --get dkms.conf "" PACKAGE_VERSION | sed 's/"//g' )"
+          echo "package_version_new=${package_version_new}"
+          echo "package_version_new=${package_version_new}" >> "$GITHUB_OUTPUT"
+      - name: Parse version from string
+        id: version
+        uses: release-kit/semver@v2
+        with:
+          string: ${{ steps.new-package-version.outputs.package_version_new }}
+      - name: Bump the module.h now that we know the version
+        run: |
+          sed -i \
+            -e "s/#define TENSTORRENT_DRIVER_VERSION_MAJOR [0-9]\{1,\}/#define TENSTORRENT_DRIVER_VERSION_MAJOR ${{ steps.version.outputs.major }}/g" \
+            -e "s/#define TENSTORRENT_DRIVER_VERSION_MINOR [0-9]\{1,\}/#define TENSTORRENT_DRIVER_VERSION_MINOR ${{ steps.version.outputs.minor }}/g" \
+            -e "s/#define TENSTORRENT_DRIVER_VERSION_PATCH [0-9]\{1,\}/#define TENSTORRENT_DRIVER_VERSION_PATCH ${{ steps.version.outputs.patch }}/g" \
+            module.h
+      - name: Find number of commits since last tag
+        id: num-commits-since-tag
+        run: |
+          export num_commits_since="$( git rev-list $(git describe --tags --abbrev=0)..HEAD --count )"
+          echo "num_commits_since_tag=${num_commits_since}"
+          echo "num_commits_since_tag=${num_commits_since}" >> "$GITHUB_OUTPUT"
+      - run: echo ${{ steps.packagever.outputs.package_version }}
+      - name: Update Version - git push
+        run: |
+          if [[ -e "bump_major" ]]
+          then
+            git rm bump_major
+          fi
+
+          if [[ -e "bump_minor" ]]
+          then
+            git rm bump_minor
+          fi
+
+          git add \
+            .bumpversion.cfg \
+            module.h \
+            dkms.conf \
+            AKMBUILD
+          git commit \
+            -m "Updating version to ${{ steps.new-package-version.outputs.package_version_new }}"
+          git push
+      - name: Find New Git Hash
+        id: new-git-hash
+        run: |
+          export git_hash_env="git_hash=$( git log --format="%H" -n 1 )"
+          echo "${git_hash_env}"
+          echo "${git_hash_env}" >> "$GITHUB_OUTPUT"
+      - name: New Git Hash
+        run: echo "${git_hash_env}"
+    env:
+      EMAIL: releases@tenstorrent.com
+      NAME: Tenstorrent Releases
+
+  ###
+  # Change Logs Generation
+  ###
+  changelogs:
+    needs:
+      - create-temp-branch
+      - versionchange
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    outputs:
+      git_hash: ${{ steps.new-git-hash.outputs.git_hash }}
+    env:
+        MAJOR: ${{ needs.versionchange.outputs.version_major }}
+        MINOR: ${{ needs.versionchange.outputs.version_minor }}
+        PATCH: ${{ needs.versionchange.outputs.version_patch }}
+        NUMBER_OF_COMMITS_SINCE_TAG: ${{ needs.versionchange.outputs.number_of_commits_since_tag }}
+    steps:
+      - name: New Git Hash
+        run: echo "${{ needs.versionchange.outputs.git_hash }}"
+      - run: echo ${{ needs.versionchange.outputs.git_hash }}
+      - run: sudo apt update
+      - run: |
+          sudo apt install -y \
+            git-buildpackage
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+          fetch-depth: 0
+          ref: ${{ needs.create-temp-branch.outputs.temp_branch_ref }}
+      # Ok checkout doesn't do what I want it to do in the way it does it *sigh*
+      # so we need to snag a pull to catch up from where it started
+      #- run: git pull
+      - run: git log --format="%H" -n 1
+      #- name: Extract version from tag
+      #  uses: damienaicheh/extract-version-from-tag-action@v1.3.0
+      - run: git tag
+      # Ok this needs to get up leveled somewhere so that it can be shared across Debian and Ubuntu obviously
+      - run: ls -lah
+      - name: Generate Ubuntu / Debian Changelog
+        run: |
+          echo "Major: ${MAJOR}"
+          echo "Minor: ${MINOR}"
+          echo "Patch: ${PATCH}"
+          echo "Num Patch: ${NUMBER_OF_COMMITS_SINCE_TAG}"
+          gbp dch \
+            --debian-branch ${{ needs.create-temp-branch.outputs.temp_branch_ref }} \
+            -R \
+            -N ${MAJOR}.${MINOR}.${PATCH} \
+            --spawn-editor=never
+        env:
+          EMAIL: releases@tenstorrent.com
+          NAME: Tenstorrent Releases
+      - name: ok what happened
+        run: git diff
+      - name: Setup commit
+        run: |
+          git config --global user.email "${EMAIL}"
+          git config --global user.name "${NAME}"
+          git add .
+          git commit \
+            -m "Generating Ubuntu & Debian Changelog for ${MAJOR}.${MINOR}.${PATCH}-${NUMBER_OF_COMMITS_SINCE_TAG}"
+          git pull --rebase
+          git push
+        env:
+          EMAIL: releases@tenstorrent.com
+          NAME: Tenstorrent Releases
+      - name: Find New Git Hash
+        id: new-git-hash
+        run: |
+          export git_hash_env="git_hash=$( git log --format="%H" -n 1 )"
+          echo "${git_hash_env}"
+          echo "${git_hash_env}" >> "$GITHUB_OUTPUT"
+
+  ###
+  # Trigger Building Everything
+  ###
+  build_all_depends:
+    needs:
+      - create-temp-branch
+      - versionchange
+      - changelogs
+    uses: ./.github/workflows/build-all.yml
+    with:
+      ref: ${{ needs.create-temp-branch.outputs.temp_branch_ref }}
+      MAJOR: ${{ needs.versionchange.outputs.version_major }}
+      MINOR: ${{ needs.versionchange.outputs.version_minor }}
+      PATCH: ${{ needs.versionchange.outputs.version_patch }}
+      NUMBER_OF_COMMITS_SINCE_TAG: ${{ needs.versionchange.outputs.number_of_commits_since_tag }}
+    secrets: inherit
+
+  # Tag the Release
+  ###
+  tagrelease:
+    name: Tag the Release
+    needs:
+      - versionchange
+      - changelogs
+      - build_all_depends
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - name: New Git Hash
+        run: echo "${{ needs.changelogs.outputs.git_hash }}"
+      - run: echo ${{ needs.versionchange.outputs.git_hash }}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.changelogs.outputs.git_hash }}
+          fetch-tags: true
+          fetch-depth: 0
+      - run: git log --format="%H" -n 1
+      - run: |
+          echo ${{ needs.versionchange.outputs.package_version_new }}
+          echo ${{ needs.versionchange.outputs.git_hash }}
+          git tag ttkmd-${{ needs.versionchange.outputs.package_version_new }}
+          git tag
+          git push --tags
+
+  ###
+  # Generate Release
+  ###
+  generate-release:
+    name: Create GitHub Release
+    needs:
+      - create-temp-branch
+      - versionchange
+      - changelogs
+      - build_all_depends
+      - tagrelease
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.changelogs.outputs.git_hash }}
+          fetch-tags: true
+          fetch-depth: 0
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Build Changelog
+        id: build_changelog
+        uses: mikepenz/release-changelog-builder-action@v5
+        with:
+          fromTag: ttkmd-${{ needs.versionchange.outputs.package_version }}
+          mode: "COMMIT" # Include both PRs and direct commits
+          configurationJSON: |
+            {
+              "template": "#{{CHANGELOG}}\n\n## Contributors\n#{{CONTRIBUTORS}}",
+              "categories": [
+                {
+                  "title": "## 🔄 Changes",
+                  "labels": []
+                }
+              ],
+              "pr_template": "- #{{TITLE}} (#{{NUMBER}}) by @#{{AUTHOR}}",
+              "commit_template": "- #{{TITLE}} (#{{MERGE_SHA}}) by @#{{AUTHOR}}"
+            }
+
+      - name: Find the deb & whl files
+        run: |
+          find ${GITHUB_WORKSPACE} -type f -iname \*.deb -o -iname \*.whl -exec ls -lah {} \;
+          find /home/runner/work/${{ env.project_name }}/${{ env.project_name }}/ -exec ls -lah {} \;
+
+      - name: Deb file renames so they don't overlap
+        run: |
+          for x in $( \
+            find ${GITHUB_WORKSPACE} -type f -iname \*.deb | \
+            grep -v "artifacts-ubuntu" \
+          )
+          do
+            want="$( \
+              echo "${x}" | \
+              xargs dirname | \
+              tr "/" "\n" | \
+              tail -n 1 \
+              )"
+            mv -v \
+              "${x}" \
+              "$( echo "${x}" | xargs dirname )/${want}"
+          done
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ttkmd-${{ needs.versionchange.outputs.package_version_new }}
+          files: |
+            ${{ github.workspace }}/${{ env.project_name }}*/*.deb
+            ${{ github.workspace }}/tenstorrent-dkms*/*.deb
+            ${{ github.workspace }}/[!artifacts-]*/*.deb
+          body: ${{ steps.build_changelog.outputs.changelog }}
+          draft: false
+          prerelease: false
+
+  ###
+  # Merge back
+  ###
+  mergeback:
+    needs:
+      - create-temp-branch
+      - generate-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout fun!
+        uses: actions/checkout@v4
+        with:
+          # Note: you want the original ref, we are merging back
+          #ref: ${{ github.ref }}"
+          fetch-tags: true
+          fetch-depth: 0
+      - name: Merge back
+        run: |
+          git log -3 --oneline
+          git rebase origin/${{ needs.create-temp-branch.outputs.temp_branch_ref }}
+          git pull --rebase
+          git log -3 --oneline
+          git push
+          git push origin --delete ${{ needs.create-temp-branch.outputs.temp_branch_ref }}

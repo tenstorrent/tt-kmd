@@ -1,0 +1,45 @@
+name: Build All
+run-name: Build All
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        default: ${{ github.ref }}
+        required: false
+        type: string
+      MAJOR:
+        required: false
+        type: string
+      MINOR:
+        required: false
+        type: string
+      PATCH:
+        required: false
+        type: string
+      NUMBER_OF_COMMITS_SINCE_TAG:
+        required: false
+        type: string
+
+jobs:
+  build_all_depends:
+    name: Build All the packages!
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Ok, so here we go for building *ALL* the packages.  I said *ALL* of them now!"
+      - run: |
+          echo "What started this ref: ${{ github.ref }}"
+          echo "What started this sha: ${{ github.sha }}"
+          echo "Did we get a ref pass in? ${{ inputs.ref }}"
+  builddebian:
+    needs:
+      - build_all_depends
+    name: Build Ubuntu / Debian
+    uses: ./.github/workflows/build-debian.yml
+    with:
+      ref: ${{ inputs.ref }}
+      MAJOR:  ${{ inputs.MAJOR }}
+      MINOR:  ${{ inputs.MINOR }}
+      PATCH:  ${{ inputs.PATCH }}
+      NUMBER_OF_COMMITS_SINCE_TAG:  ${{ inputs.NUMBER_OF_COMMITS_SINCE_TAG }}
+    secrets: inherit

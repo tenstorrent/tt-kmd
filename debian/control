@@ -1,8 +1,11 @@
 Source: tt-kmd
 Section: misc
 Priority: optional
-Maintainer: Tenstorrent <support@tenstorrent.com>
-Build-Depends: debhelper (>= 12), dkms, udev
+Maintainer: Joel Smith <joelsmith@tenstorrent.com>
+Build-depends:
+ debhelper (>= 10),
+ dkms
+# dh-dkms # this is used on 24.04 as dkms got split out
 Standards-Version: 4.6.0
 Homepage: https://github.com/tenstorrent/tt-kmd
 Vcs-Git: https://github.com/tenstorrent/tt-kmd.git
@@ -10,7 +13,10 @@ Vcs-Browser: https://github.com/tenstorrent/tt-kmd
 
 Package: tenstorrent-dkms
 Architecture: all
-Depends: dkms, ${misc:Depends}, linux-headers-generic | linux-headers
-Description: Tenstorrent kernel driver (DKMS)
+Depends:
+ ${misc:Depends},
+ dkms,
+ linux-headers-generic | linux-headers
+Description: Tenstorrent kernel mode driver (DKMS)
  This package provides the Tenstorrent kernel module as DKMS source.
 

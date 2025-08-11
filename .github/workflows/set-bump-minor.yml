@@ -1,0 +1,24 @@
+name: Version Bump- Minor
+run-name: Version Bump- Minor
+on:
+  workflow_dispatch:
+  workflow_call:
+jobs:
+  build_all_depends:
+    name: Add the Bump Minor!
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+          fetch-depth: 0
+      - run: |
+          touch bump_minor
+          git config --global user.email "${EMAIL}"
+          git config --global user.name "${NAME}"
+          git add bump_minor
+          git commit -m "Setting up to do a minor version bump"
+          git push
+        env:
+          EMAIL: releases@tenstorrent.com
+          NAME: Tenstorrent Releases

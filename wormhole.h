@@ -17,6 +17,8 @@ struct wormhole_device {
 	u8 saved_mps;
 
 	u64 *sysfs_attr_offsets;
+	struct attribute **telemetry_attrs;
+	struct attribute_group telemetry_group;
 };
 
 #define tt_dev_to_wh_dev(ttdev) \

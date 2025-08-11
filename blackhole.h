@@ -18,6 +18,8 @@ struct blackhole_device {
 
 	u64 *hwmon_attr_addrs;
 	u64 *sysfs_attr_addrs;
+	struct attribute **telemetry_attrs;
+	struct attribute_group telemetry_group;
 
 	u8 saved_mps;
 };

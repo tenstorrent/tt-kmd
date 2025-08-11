@@ -477,7 +477,7 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 	return true;
 }
 
-static bool wormhole_post_hardware_init(struct tenstorrent_device *tt_dev) {
+static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
 	telemetry_probe(tt_dev);
@@ -754,7 +754,7 @@ struct tenstorrent_device_class wormhole_class = {
 	.reset = wormhole_reset,
 	.init_device = wormhole_init,
 	.init_hardware = wormhole_init_hardware,
-	.post_hardware_init = wormhole_post_hardware_init,
+	.init_telemetry = wormhole_init_telemetry,
 	.cleanup_hardware = wormhole_cleanup_hardware,
 	.cleanup_device = wormhole_cleanup,
 	.reboot = wormhole_cleanup_hardware,

@@ -892,7 +892,7 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 	return true;
 }
 
-static bool blackhole_post_hardware_init(struct tenstorrent_device *tt_dev)
+static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
 {
 	telemetry_probe(tt_dev);
 	return true;
@@ -1029,7 +1029,7 @@ struct tenstorrent_device_class blackhole_class = {
 	.reset = blackhole_reset,
 	.init_device = blackhole_init,
 	.init_hardware = blackhole_init_hardware,
-	.post_hardware_init = blackhole_post_hardware_init,
+	.init_telemetry = blackhole_init_telemetry,
 	.cleanup_hardware = blackhole_cleanup_hardware,
 	.cleanup_device = blackhole_cleanup,
 	.configure_tlb = blackhole_configure_tlb,

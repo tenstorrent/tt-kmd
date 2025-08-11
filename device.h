@@ -66,7 +66,7 @@ struct tenstorrent_device_class {
 	bool (*reset)(struct tenstorrent_device *ttdev, u32 reset_flag);
 	bool (*init_device)(struct tenstorrent_device *ttdev);
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);
-	bool (*post_hardware_init)(struct tenstorrent_device *ttdev);
+	bool (*init_telemetry)(struct tenstorrent_device *ttdev);
 	void (*cleanup_hardware)(struct tenstorrent_device *ttdev);
 	void (*cleanup_device)(struct tenstorrent_device *ttdev);
 	void (*first_open_cb)(struct tenstorrent_device *ttdev);

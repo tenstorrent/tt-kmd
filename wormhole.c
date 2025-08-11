@@ -115,6 +115,7 @@ static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *a
 static ssize_t sysfs_show_u64_hex(struct device *dev, struct device_attribute *attr, char *buf);
 static ssize_t sysfs_show_u32_ver(struct device *dev, struct device_attribute *attr, char *buf);
 static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute *attr, char *buf);
+static umode_t sysfs_telemetry_is_visible(struct kobject *kobj, struct attribute *attr, int n);
 
 static struct tenstorrent_sysfs_attr wh_sysfs_attributes[] = {
 	{ TELEMETRY_AICLK, __ATTR(tt_aiclk,  S_IRUGO, sysfs_show_u32_dec, NULL) },
@@ -129,7 +130,6 @@ static struct tenstorrent_sysfs_attr wh_sysfs_attributes[] = {
 	{ TELEMETRY_CM_FW_VERSION, __ATTR(tt_arc_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
 	{ TELEMETRY_ETH_FW_VERSION, __ATTR(tt_eth_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
 	{ TELEMETRY_ASIC_ID, __ATTR(tt_asic_id, S_IRUGO, sysfs_show_u64_hex, NULL) },
-	{ 0, __ATTR_NULL }
 };
 
 static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *attr, char *buf)
@@ -208,6 +208,19 @@ static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute 
 	}
 
 	return scnprintf(buf, PAGE_SIZE, "%s\n", card_name);
+}
+
+static umode_t sysfs_telemetry_is_visible(struct kobject *kobj, struct attribute *attr, int n)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct device_attribute *dev_attr = container_of(attr, struct device_attribute, attr);
+	struct tenstorrent_sysfs_attr *ts_attr = container_of(dev_attr, struct tenstorrent_sysfs_attr, attr);
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	unsigned i = ts_attr - wh_sysfs_attributes;
+	bool visible = wh->sysfs_attr_offsets[i] != 0;
+
+	return visible ? attr->mode : 0;
 }
 
 
@@ -327,27 +340,6 @@ static bool wormhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 	return true; // Assumes the reset was successful.
 }
 
-
-static bool wormhole_init(struct tenstorrent_device *tt_dev) {
-	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
-
-	wh_dev->bar2_mapping = pci_iomap(wh_dev->tt.pdev, 2, 0);
-	if (wh_dev->bar2_mapping == NULL) goto fail_bar2;
-
-	wh_dev->bar4_mapping = pci_iomap(wh_dev->tt.pdev, 4, 0);
-	if (wh_dev->bar4_mapping == NULL) goto fail_bar4;
-
-	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
-	mutex_init(&wh_dev->kernel_tlb_mutex);
-
-	return true;
-
-fail_bar4:
-	pci_iounmap(wh_dev->tt.pdev, wh_dev->bar2_mapping);
-fail_bar2:
-	return false;
-}
-
 static int telemetry_probe(struct tenstorrent_device *tt_dev)
 {
 	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
@@ -361,6 +353,7 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 	u32 i, j;
 
 	if (!is_range_within_csm(base_addr, sizeof(u32)) || !is_range_within_csm(data_addr, sizeof(u32))) {
+		// TODO: this can happen on Galaxy 6U; need to support deferred probing.
 		dev_err(&tt_dev->pdev->dev, "Telemetry not available\n");
 		return -ENODEV;
 	}
@@ -376,10 +369,6 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 	}
 
 	num_entries = ioread32(wh->bar4_mapping + wh_arc_addr_to_sysreg(base_addr + 4));
-
-	wh->sysfs_attr_offsets = kzalloc(sizeof(u64) * ARRAY_SIZE(wh_sysfs_attributes), GFP_KERNEL);
-	if (!wh->sysfs_attr_offsets)
-		return -ENOMEM;
 
 	for (i = 0; i < num_entries; i++) {
 		u32 tag_entry = ioread32(wh->bar4_mapping + wh_arc_addr_to_sysreg(tags_addr + (i * 4)));
@@ -398,11 +387,8 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 		}
 	}
 
-	tt_dev->sysfs_attrs = wh_sysfs_attributes;
-
 	return 0;
 }
-
 
 static const struct tt_hwmon_attr wh_hwmon_attributes[] = {
 	{ hwmon_temp,  hwmon_temp_input,  0x74, 0,  GENMASK(15, 0), 1000,    16 },
@@ -445,7 +431,7 @@ static void wormhole_hwmon_init(struct wormhole_device *wh_dev) {
 	u32 telemetry_offset;
 
 	if (!grayskull_read_fw_telemetry_offset(reset_unit_regs(wh_dev), &telemetry_offset))
-		goto wormhole_hwmon_init_err;
+		goto wormhole_hwmon_init_err; // TODO: see comment in telemetry_probe()
 
 	context->attributes = wh_hwmon_attributes;
 	context->labels = wh_hwmon_labels;
@@ -459,6 +445,80 @@ static void wormhole_hwmon_init(struct wormhole_device *wh_dev) {
 
 wormhole_hwmon_init_err:
 	dev_warn(dev, "Failed to initialize hwmon.\n");
+}
+
+static bool is_fw_ready_for_telemetry(struct wormhole_device *wh)
+{
+	u32 base_addr = ioread32(wh->bar4_mapping + ARC_TELEMETRY_PTR);
+	u32 data_addr = ioread32(wh->bar4_mapping + ARC_TELEMETRY_DATA);
+	bool ready = is_range_within_csm(base_addr, 4) && is_range_within_csm(data_addr, 4);
+
+	return ready;
+}
+
+static void wormhole_hwmon_init(struct wormhole_device *wh_dev);
+
+static int init_sysfs_and_hwmon_telemetry(struct tenstorrent_device *tt_dev)
+{
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	int r = telemetry_probe(tt_dev);
+
+	if (!r) {
+		r = devm_device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
+		wormhole_hwmon_init(wh_dev);
+	}
+	return r;
+}
+
+static void fw_ready_work_func(struct work_struct *work)
+{
+	struct delayed_work *dwork = to_delayed_work(work);
+	struct wormhole_device *wh = container_of(dwork, struct wormhole_device, fw_ready_work);
+	struct tenstorrent_device *tt_dev = &wh->tt;
+
+	if (tt_dev->detached)
+		return;
+
+	if (is_fw_ready_for_telemetry(wh))
+		init_sysfs_and_hwmon_telemetry(tt_dev);
+	else if (wh->telemetry_retries-- > 0)
+		schedule_delayed_work(&wh->fw_ready_work, msecs_to_jiffies(1000));
+	else
+		dev_err(&tt_dev->pdev->dev, "Timed out waiting for FW telemetry; sysfs/hwmon will be unavailable\n");
+}
+
+static bool wormhole_init(struct tenstorrent_device *tt_dev)
+{
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	struct device *dev = &tt_dev->pdev->dev;
+	int i;
+
+	wh_dev->sysfs_attr_offsets = devm_kzalloc(dev, sizeof(u64) * ARRAY_SIZE(wh_sysfs_attributes), GFP_KERNEL);
+	tt_dev->telemetry_attrs = devm_kzalloc(dev, sizeof(struct attribute *) * ARRAY_SIZE(wh_sysfs_attributes), GFP_KERNEL);
+
+	if (!wh_dev->sysfs_attr_offsets || !tt_dev->telemetry_attrs)
+		return false;
+
+	wh_dev->bar2_mapping = pci_iomap(wh_dev->tt.pdev, 2, 0);
+	if (wh_dev->bar2_mapping == NULL) goto fail_bar2;
+
+	wh_dev->bar4_mapping = pci_iomap(wh_dev->tt.pdev, 4, 0);
+	if (wh_dev->bar4_mapping == NULL) goto fail_bar4;
+
+	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
+	mutex_init(&wh_dev->kernel_tlb_mutex);
+
+	for (i = 0; i < ARRAY_SIZE(wh_sysfs_attributes); ++i)
+		tt_dev->telemetry_attrs[i] = &wh_sysfs_attributes[i].attr.attr;
+	tt_dev->telemetry_group.attrs = tt_dev->telemetry_attrs;
+	tt_dev->telemetry_group.is_visible = sysfs_telemetry_is_visible;
+
+	return true;
+
+fail_bar4:
+	pci_iounmap(wh_dev->tt.pdev, wh_dev->bar2_mapping);
+fail_bar2:
+	return false;
 }
 
 static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
@@ -477,10 +537,19 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 	return true;
 }
 
-static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev) {
+static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev)
+{
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	int r;
 
-	telemetry_probe(tt_dev);
+	r = devm_device_add_group(&tt_dev->dev, &wh_pcie_perf_counters_group);
+	if (r)
+		dev_err(&tt_dev->dev, "PCIe perf counters unavailable: %d\n", r);
+
+	r = telemetry_probe(tt_dev);
+	if (!r)
+		r = devm_device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
+
 	wormhole_hwmon_init(wh_dev);
 
 	return true;
@@ -491,8 +560,6 @@ static void wormhole_cleanup_hardware(struct tenstorrent_device *tt_dev) {
 
 	if (!tt_dev->detached)
 		grayskull_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
-
-	kfree(wh_dev->sysfs_attr_offsets);
 }
 
 static void wormhole_cleanup(struct tenstorrent_device *tt_dev) {
@@ -720,22 +787,6 @@ static int wormhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u3
 	return 0;
 }
 
-static void wormhole_create_sysfs_groups(struct tenstorrent_device *tt_dev)
-{
-	int ret = devm_device_add_group(&tt_dev->dev, &wh_pcie_perf_counters_group);
-	if (ret)
-		dev_err(&tt_dev->dev, "PCIe perf counters unavailable: %d\n", ret);
-}
-
-static bool wormhole_is_sysfs_attr_supported(struct tenstorrent_device *tt_dev,
-				 const struct tenstorrent_sysfs_attr *attr)
-{
-	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
-	unsigned i = attr - wh_sysfs_attributes;
-
-	return wh->sysfs_attr_offsets[i] != 0;
-}
-
 static void wormhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, u32 data, int noc)
 {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
@@ -763,7 +814,5 @@ struct tenstorrent_device_class wormhole_class = {
 	.save_reset_state = wormhole_save_reset_state,
 	.restore_reset_state = wormhole_restore_reset_state,
 	.configure_outbound_atu = wormhole_configure_outbound_atu,
-	.create_sysfs_groups = wormhole_create_sysfs_groups,
-	.is_sysfs_attr_supported = wormhole_is_sysfs_attr_supported,
 	.noc_write32 = wormhole_noc_write32,
 };

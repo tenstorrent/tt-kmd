@@ -120,9 +120,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	tt_dev->interrupt_enabled = tenstorrent_enable_interrupts(tt_dev);
 
 	if (device_class->init_device(tt_dev))
-		if (device_class->init_hardware(tt_dev))
-			device_class->init_telemetry(tt_dev);
-	tt_dev->needs_hw_init = false;
+		tt_dev->needs_hw_init = !device_class->init_hardware(tt_dev);
 
 	pci_save_state(dev);
 	device_class->save_reset_state(tt_dev);
@@ -134,16 +132,8 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 		register_reboot_notifier(&tt_dev->reboot_notifier);
 	}
 
-	if (tt_dev->sysfs_attrs) {
-		const struct tenstorrent_sysfs_attr *data = tt_dev->sysfs_attrs;
-		for (; data->attr.attr.name; data++) {
-			if (device_class->is_sysfs_attr_supported(tt_dev, data))
-				device_create_file(&tt_dev->dev, &data->attr);
-		}
-	}
-
-	if (device_class->create_sysfs_groups)
-		device_class->create_sysfs_groups(tt_dev);
+	if (!tt_dev->needs_hw_init)
+		device_class->init_telemetry(tt_dev);
 
 	return 0;
 }
@@ -167,12 +157,6 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 
 	list_for_each_entry_safe(priv, tmp, &tt_dev->open_fds_list, open_fd) {
 		tenstorrent_memory_cleanup(priv);
-	}
-
-	if (tt_dev->sysfs_attrs) {
-		const struct tenstorrent_sysfs_attr *data = tt_dev->sysfs_attrs;
-		for (; data->attr.attr.name; data++)
-			device_remove_file(&tt_dev->dev, &data->attr);
 	}
 
 	// These remove child sysfs entries which must happen before remove returns.

@@ -400,6 +400,7 @@ static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *a
 static ssize_t sysfs_show_u64_hex(struct device *dev, struct device_attribute *attr, char *buf);
 static ssize_t sysfs_show_u32_ver(struct device *dev, struct device_attribute *attr, char *buf);
 static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute *attr, char *buf);
+static umode_t sysfs_telemetry_is_visible(struct kobject *kobj, struct attribute *attr, int n);
 
 static struct tenstorrent_sysfs_attr bh_sysfs_attributes[] = {
 	{ TELEMETRY_AICLK, __ATTR(tt_aiclk,  S_IRUGO, sysfs_show_u32_dec, NULL) },
@@ -410,7 +411,6 @@ static struct tenstorrent_sysfs_attr bh_sysfs_attributes[] = {
 	{ TELEMETRY_FLASH_BUNDLE_VERSION, __ATTR(tt_fw_bundle_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
 	{ TELEMETRY_BM_APP_FW_VERSION, __ATTR(tt_m3app_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
 	{ TELEMETRY_ASIC_ID, __ATTR(tt_asic_id, S_IRUGO, sysfs_show_u64_hex, NULL) },
-	{ 0, __ATTR_NULL }
 };
 
 static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *attr, char *buf)
@@ -496,6 +496,19 @@ static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute 
 	}
 
 	return scnprintf(buf, PAGE_SIZE, "%s\n", card_name);
+}
+
+static umode_t sysfs_telemetry_is_visible(struct kobject *kobj, struct attribute *attr, int n)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct device_attribute *dev_attr = container_of(attr, struct device_attribute, attr);
+	struct tenstorrent_sysfs_attr *ts_attr = container_of(dev_attr, struct tenstorrent_sysfs_attr, attr);
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	unsigned i = ts_attr - bh_sysfs_attributes;
+	bool visible = bh->sysfs_attr_addrs[i] != 0;
+
+	return visible ? attr->mode : 0;
 }
 
 static umode_t bh_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type, u32 attr, int channel) {
@@ -585,8 +598,8 @@ static const struct hwmon_chip_info bh_hwmon_chip_info = {
 	.info = bh_hwmon_channel_info,
 };
 
-static int telemetry_probe(struct tenstorrent_device *tt_dev) {
-	struct device *hwmon_device;
+static int telemetry_probe(struct tenstorrent_device *tt_dev)
+{
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	u32 base_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_PTR, 0);
 	u32 data_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_DATA, 0);
@@ -612,17 +625,6 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev) {
 
 	num_entries = noc_read32(bh, ARC_X, ARC_Y, base_addr + 4, 0);
 
-	bh->hwmon_attr_addrs = kzalloc(sizeof(u64) * ARRAY_SIZE(bh_hwmon_attrs), GFP_KERNEL);
-	if (!bh->hwmon_attr_addrs)
-		return -ENOMEM;
-
-	bh->sysfs_attr_addrs = kzalloc(sizeof(u64) * ARRAY_SIZE(bh_sysfs_attributes), GFP_KERNEL);
-	if (!bh->sysfs_attr_addrs) {
-		kfree(bh->hwmon_attr_addrs);
-		bh->hwmon_attr_addrs = NULL;
-		return -ENOMEM;
-	}
-
 	for (i = 0; i < num_entries; ++i) {
 		u32 tag_entry = noc_read32(bh, ARC_X, ARC_Y, tags_addr + (i * 4), 0);
 		u16 tag_id = tag_entry & 0xFFFF;
@@ -643,18 +645,6 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev) {
 				bh->sysfs_attr_addrs[j] = addr;
 		}
 	}
-
-	hwmon_device = devm_hwmon_device_register_with_info(&bh->tt.pdev->dev, "blackhole", bh, &bh_hwmon_chip_info, NULL);
-
-	if (IS_ERR(hwmon_device)) {
-		kfree(bh->hwmon_attr_addrs);
-		kfree(bh->sysfs_attr_addrs);
-		bh->hwmon_attr_addrs = NULL;
-		bh->sysfs_attr_addrs = NULL;
-		return PTR_ERR(hwmon_device);
-	}
-
-	tt_dev->sysfs_attrs = bh_sysfs_attributes;
 
 	return 0;
 }
@@ -840,8 +830,18 @@ static bool blackhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 	return false;
 }
 
-static bool blackhole_init(struct tenstorrent_device *tt_dev) {
+static bool blackhole_init(struct tenstorrent_device *tt_dev)
+{
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	struct device *dev = &tt_dev->pdev->dev;
+	int i;
+
+	bh->hwmon_attr_addrs = devm_kzalloc(dev, sizeof(u64) * ARRAY_SIZE(bh_hwmon_attrs), GFP_KERNEL);
+	bh->sysfs_attr_addrs = devm_kzalloc(dev, sizeof(u64) * ARRAY_SIZE(bh_sysfs_attributes), GFP_KERNEL);
+	tt_dev->telemetry_attrs = devm_kzalloc(dev, sizeof(struct attribute *) * ARRAY_SIZE(bh_sysfs_attributes), GFP_KERNEL);
+
+	if (!bh->hwmon_attr_addrs || !bh->sysfs_attr_addrs || !tt_dev->telemetry_attrs)
+		return false;
 
 	bh->tlb_regs = pci_iomap_range(bh->tt.pdev, 0, TLB_REGS_START, TLB_REGS_LEN);
 	bh->kernel_tlb = pci_iomap_range(bh->tt.pdev, 0, KERNEL_TLB_START, KERNEL_TLB_LEN);
@@ -867,6 +867,11 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev) {
 	// Claim the topmost 2M window for kernel use.
 	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
 	mutex_init(&bh->kernel_tlb_mutex);
+
+	for (i = 0; i < ARRAY_SIZE(bh_sysfs_attributes); ++i)
+		tt_dev->telemetry_attrs[i] = &bh_sysfs_attributes[i].attr.attr;
+	tt_dev->telemetry_group.attrs = tt_dev->telemetry_attrs;
+	tt_dev->telemetry_group.is_visible = sysfs_telemetry_is_visible;
 
 	return true;
 }
@@ -894,7 +899,24 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 
 static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
 {
-	telemetry_probe(tt_dev);
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	int r;
+
+	r = devm_device_add_group(&tt_dev->dev, &bh_pcie_perf_counters_group);
+	if (r)
+		dev_err(&tt_dev->dev, "PCIe perf counters unavailable: %d\n", r);
+
+	r = telemetry_probe(tt_dev);
+	if (!r) {
+		struct device *dev = &tt_dev->pdev->dev;
+		struct device *hwmon_device;
+		r = devm_device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
+		hwmon_device = devm_hwmon_device_register_with_info(dev, "blackhole", bh, &bh_hwmon_chip_info, NULL);
+
+		if (r || IS_ERR(hwmon_device))
+			return false;
+	}
+
 	return true;
 }
 
@@ -923,9 +945,6 @@ static void blackhole_cleanup(struct tenstorrent_device *tt_dev)
 		pci_iounmap(tt_dev->pdev, bh->noc2axi_cfg);
 	if (bh->bar2_mapping)
 		pci_iounmap(tt_dev->pdev, bh->bar2_mapping);
-
-	kfree(bh->hwmon_attr_addrs);
-	kfree(bh->sysfs_attr_addrs);
 }
 
 static int blackhole_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
@@ -995,22 +1014,6 @@ static int blackhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u
 	return 0;
 }
 
-static void blackhole_create_sysfs_groups(struct tenstorrent_device *tt_dev)
-{
-	int ret = devm_device_add_group(&tt_dev->dev, &bh_pcie_perf_counters_group);
-	if (ret)
-		dev_err(&tt_dev->dev, "PCIe perf counters unavailable: %d\n", ret);
-}
-
-static bool blackhole_is_sysfs_attr_supported(struct tenstorrent_device *tt_dev,
-				 const struct tenstorrent_sysfs_attr *attr)
-{
-	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-	unsigned i = attr - bh_sysfs_attributes;
-
-	return bh->sysfs_attr_addrs[i] != 0;
-}
-
 static void blackhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, u32 data, int noc)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
@@ -1037,7 +1040,5 @@ struct tenstorrent_device_class blackhole_class = {
 	.save_reset_state = blackhole_save_reset_state,
 	.restore_reset_state = blackhole_restore_reset_state,
 	.configure_outbound_atu = blackhole_configure_outbound_atu,
-	.create_sysfs_groups = blackhole_create_sysfs_groups,
-	.is_sysfs_attr_supported = blackhole_is_sysfs_attr_supported,
 	.noc_write32 = blackhole_noc_write32,
 };

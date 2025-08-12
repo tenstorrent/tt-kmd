@@ -353,7 +353,6 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 	u32 i, j;
 
 	if (!is_range_within_csm(base_addr, sizeof(u32)) || !is_range_within_csm(data_addr, sizeof(u32))) {
-		// TODO: this can happen on Galaxy 6U; need to support deferred probing.
 		dev_err(&tt_dev->pdev->dev, "Telemetry not available\n");
 		return -ENODEV;
 	}
@@ -423,7 +422,8 @@ static const struct hwmon_chip_info wh_hwmon_chip_info = {
 	.info = wh_hwmon_info,
 };
 
-static void wormhole_hwmon_init(struct wormhole_device *wh_dev) {
+static void wormhole_hwmon_init(struct wormhole_device *wh_dev)
+{
 	struct tenstorrent_device *tt_dev = &wh_dev->tt;
 	struct device *dev = &tt_dev->pdev->dev;
 	struct tt_hwmon_context *context = &tt_dev->hwmon_context;
@@ -431,7 +431,7 @@ static void wormhole_hwmon_init(struct wormhole_device *wh_dev) {
 	u32 telemetry_offset;
 
 	if (!grayskull_read_fw_telemetry_offset(reset_unit_regs(wh_dev), &telemetry_offset))
-		goto wormhole_hwmon_init_err; // TODO: see comment in telemetry_probe()
+		goto wormhole_hwmon_init_err;
 
 	context->attributes = wh_hwmon_attributes;
 	context->labels = wh_hwmon_labels;
@@ -493,6 +493,9 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev)
 	struct device *dev = &tt_dev->pdev->dev;
 	int i;
 
+	INIT_DELAYED_WORK(&wh_dev->fw_ready_work, fw_ready_work_func);
+	wh_dev->telemetry_retries = 120;	// If telemetry is not ready, defer initialization for up to 2 minutes.
+
 	wh_dev->sysfs_attr_offsets = devm_kzalloc(dev, sizeof(u64) * ARRAY_SIZE(wh_sysfs_attributes), GFP_KERNEL);
 	tt_dev->telemetry_attrs = devm_kzalloc(dev, sizeof(struct attribute *) * ARRAY_SIZE(wh_sysfs_attributes), GFP_KERNEL);
 
@@ -546,11 +549,12 @@ static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev)
 	if (r)
 		dev_err(&tt_dev->dev, "PCIe perf counters unavailable: %d\n", r);
 
-	r = telemetry_probe(tt_dev);
-	if (!r)
-		r = devm_device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
-
-	wormhole_hwmon_init(wh_dev);
+	// If the firmware is already ready, initialize telemetry immediately.
+	// Otherwise, wait for the fw_ready_work to detect when it becomes ready.
+	if (is_fw_ready_for_telemetry(wh_dev))
+		init_sysfs_and_hwmon_telemetry(tt_dev);
+	else
+		schedule_delayed_work(&wh_dev->fw_ready_work, msecs_to_jiffies(1000));
 
 	return true;
 }

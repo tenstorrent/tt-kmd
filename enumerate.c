@@ -18,6 +18,7 @@
 #include "memory.h"
 #include "chardev_private.h"
 #include "telemetry.h"
+#include "wormhole.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
 #define pci_enable_pcie_error_reporting(dev) do { } while (0)
@@ -143,6 +144,11 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(dev);
 	struct chardev_private *priv, *tmp;
 	u16 vendor_id;
+
+	if (tt_dev->dev_class == &wormhole_class) {
+		struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+		cancel_delayed_work_sync(&wh->fw_ready_work);
+	}
 
 	// In a hotplug scenario, the device may not be accessible anymore. Check
 	// if it is still accessible by reading the vendor ID. If it is not, set the

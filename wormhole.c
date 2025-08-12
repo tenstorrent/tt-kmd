@@ -354,7 +354,6 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 	u32 i, j;
 
 	if (!is_range_within_csm(base_addr, sizeof(u32)) || !is_range_within_csm(data_addr, sizeof(u32))) {
-		// TODO: this can happen on Galaxy 6U; need to support deferred probing.
 		dev_err(&tt_dev->pdev->dev, "Telemetry not available\n");
 		return -ENODEV;
 	}
@@ -424,7 +423,8 @@ static const struct hwmon_chip_info wh_hwmon_chip_info = {
 	.info = wh_hwmon_info,
 };
 
-static void wormhole_hwmon_init(struct wormhole_device *wh_dev) {
+static void wormhole_hwmon_init(struct wormhole_device *wh_dev)
+{
 	struct tenstorrent_device *tt_dev = &wh_dev->tt;
 	struct device *dev = &tt_dev->pdev->dev;
 	struct tt_hwmon_context *context = &tt_dev->hwmon_context;
@@ -432,7 +432,7 @@ static void wormhole_hwmon_init(struct wormhole_device *wh_dev) {
 	u32 telemetry_offset;
 
 	if (!grayskull_read_fw_telemetry_offset(reset_unit_regs(wh_dev), &telemetry_offset))
-		goto wormhole_hwmon_init_err; // TODO: see comment in telemetry_probe()
+		goto wormhole_hwmon_init_err;
 
 	context->attributes = wh_hwmon_attributes;
 	context->labels = wh_hwmon_labels;
@@ -448,10 +448,53 @@ wormhole_hwmon_init_err:
 	dev_warn(dev, "Failed to initialize hwmon.\n");
 }
 
+static bool is_fw_ready_for_telemetry(struct wormhole_device *wh)
+{
+	u32 base_addr = ioread32(wh->bar4_mapping + ARC_TELEMETRY_PTR);
+	u32 data_addr = ioread32(wh->bar4_mapping + ARC_TELEMETRY_DATA);
+	bool ready = is_range_within_csm(base_addr, 4) && is_range_within_csm(data_addr, 4);
+
+	return ready;
+}
+
+static void wormhole_hwmon_init(struct wormhole_device *wh_dev);
+
+static int init_sysfs_and_hwmon_telemetry(struct tenstorrent_device *tt_dev)
+{
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	int r = telemetry_probe(tt_dev);
+
+	if (!r) {
+		r = devm_device_add_group(&tt_dev->dev, &wh_dev->telemetry_group);
+		wormhole_hwmon_init(wh_dev);
+	}
+	return r;
+}
+
+static void fw_ready_work_func(struct work_struct *work)
+{
+	struct delayed_work *dwork = to_delayed_work(work);
+	struct wormhole_device *wh = container_of(dwork, struct wormhole_device, fw_ready_work);
+	struct tenstorrent_device *tt_dev = &wh->tt;
+
+	if (tt_dev->detached)
+		return;
+
+	if (is_fw_ready_for_telemetry(wh))
+		init_sysfs_and_hwmon_telemetry(tt_dev);
+	else if (wh->telemetry_retries-- > 0)
+		schedule_delayed_work(&wh->fw_ready_work, msecs_to_jiffies(1000));
+	else
+		dev_err(&tt_dev->pdev->dev, "Timed out waiting for FW telemetry; sysfs/hwmon will be unavailable\n");
+}
+
 static bool wormhole_init(struct tenstorrent_device *tt_dev)
 {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 	struct device *dev = &tt_dev->pdev->dev;
+
+	INIT_DELAYED_WORK(&wh_dev->fw_ready_work, fw_ready_work_func);
+	wh_dev->telemetry_retries = 120;	// If telemetry is not ready, defer initialization for up to 2 minutes.
 
 	wh_dev->sysfs_attr_offsets = devm_kzalloc(dev, sizeof(u64) * ARRAY_SIZE(wh_sysfs_attributes), GFP_KERNEL);
 	wh_dev->telemetry_attrs = devm_kzalloc(dev, sizeof(struct attribute *) * ARRAY_SIZE(wh_sysfs_attributes), GFP_KERNEL);
@@ -507,11 +550,12 @@ static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev)
 	if (r)
 		dev_err(&tt_dev->dev, "PCIe perf counters unavailable: %d\n", r);
 
-	r = telemetry_probe(tt_dev);
-	if (!r)
-		r = devm_device_add_group(&tt_dev->dev, &wh_dev->telemetry_group);
-
-	wormhole_hwmon_init(wh_dev);
+	// If the firmware is already ready, initialize telemetry immediately.
+	// Otherwise, wait for the fw_ready_work to detect when it becomes ready.
+	if (is_fw_ready_for_telemetry(wh_dev))
+		init_sysfs_and_hwmon_telemetry(tt_dev);
+	else
+		schedule_delayed_work(&wh_dev->fw_ready_work, msecs_to_jiffies(1000));
 
 	return true;
 }

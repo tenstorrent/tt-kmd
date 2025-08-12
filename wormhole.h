@@ -19,6 +19,9 @@ struct wormhole_device {
 	u64 *sysfs_attr_offsets;
 	struct attribute **telemetry_attrs;
 	struct attribute_group telemetry_group;
+
+	struct delayed_work fw_ready_work;
+	int telemetry_retries;
 };
 
 #define tt_dev_to_wh_dev(ttdev) \

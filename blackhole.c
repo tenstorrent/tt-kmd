@@ -806,6 +806,8 @@ static bool blackhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	struct pci_dev *pdev = tt_dev->pdev;
 
+	pcie_hot_reset_and_restore_state(pdev);
+
 	if (reset_flag == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
 		struct arc_msg msg = { 0 };
 		u16 reset_arg = 3; // Argument for ASIC + M3 reset

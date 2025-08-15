@@ -61,8 +61,10 @@ bool pcie_hot_reset_and_restore_state(struct pci_dev *pdev) {
 	struct pci_dev *bridge_dev = pci_upstream_bridge(pdev);
 	u16 bridge_ctrl;
 
-	if (!bridge_dev)
+	if (!bridge_dev) {
+		dev_warn(&pdev->dev, "No upstream bridge found.\n");
 		return false;
+	}
 
 	// reset link - like pci_reset_secondary_bus, but we don't want the full 1s delay.
 	pci_read_config_word(bridge_dev, PCI_BRIDGE_CONTROL, &bridge_ctrl);
@@ -72,11 +74,15 @@ bool pcie_hot_reset_and_restore_state(struct pci_dev *pdev) {
 	pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl);
 	msleep(500);
 
-	if (!poll_pcie_link_up(pdev, 10000))
+	if (!poll_pcie_link_up(pdev, 10000)) {
+		dev_warn(&pdev->dev, "PCIe link up failed.\n");
 		return false;
+	}
 
-	if (!safe_pci_restore_state(pdev))
+	if (!safe_pci_restore_state(pdev)) {
+		dev_warn(&pdev->dev, "Failed to restore PCIe state after hot reset.\n");
 		return false;
+	}
 
 	return true;
 }

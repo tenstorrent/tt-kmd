@@ -319,25 +319,50 @@ static void update_device_index(struct wormhole_device *wh_dev) {
 static bool wormhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 {
 	struct pci_dev *pdev = tt_dev->pdev;
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 	u16 reset_arg = (reset_flag == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) ? 3 : 0;
+	bool responsive;
 
-	// Step 1: Secondary bus reset.
+	// 1. Attempt a secondary bus reset.
 	pcie_hot_reset_and_restore_state(pdev);
 
-	// Step 2: Check if the device is functioning enough to respond to a message.
-	if (!grayskull_send_arc_fw_message_with_args(reset_unit_regs(tt_dev_to_wh_dev(tt_dev)), WH_FW_MSG_NOP,
-						     reset_arg, 0, 10000, NULL)) {
-		dev_warn(&tt_dev->pdev->dev, "Couldn't communicate with firmware; NOC is likely hung.\n");
-		return false;
+	// 2. See if the device is responsive.
+	responsive = grayskull_send_arc_fw_message(reset_unit_regs(wh_dev), WH_FW_MSG_NOP, 1000, NULL);
+
+	// 3. If not responsive, wait for the watchdog.
+	if (!responsive) {
+		ktime_t end_time;
+
+		// Give up immediately if the watchdog is disabled.
+		if (auto_reset_timeout == 0) {
+			dev_err(&pdev->dev, "Watchdog is disabled and device is unresponsive, cannot reset.\n");
+			return false;
+		}
+
+		end_time = ktime_add_ms(ktime_get(), (auto_reset_timeout * 1000) + 500);
+		while (ktime_before(ktime_get(), end_time)) {
+			pcie_hot_reset_and_restore_state(pdev);
+
+			responsive = grayskull_send_arc_fw_message(reset_unit_regs(wh_dev), WH_FW_MSG_NOP, 1000, NULL);
+			if (responsive)
+				break;
+
+			if (msleep_interruptible(1000))
+				return false;
+		}
 	}
 
-	// Step 3: trigger the reset.
-	grayskull_send_arc_fw_message_with_args(reset_unit_regs(tt_dev_to_wh_dev(tt_dev)), WH_FW_MSG_TRIGGER_RESET,
-						reset_arg, 0,
-						0,
-						NULL);
+	// 4. If the device is responsive, finalize the reset.
+	if (responsive) {
+		set_reset_marker(pdev);
+		grayskull_send_arc_fw_message_with_args(reset_unit_regs(wh_dev), WH_FW_MSG_TRIGGER_RESET, reset_arg, 0,
+							0, NULL);
+		return true; // Assumes the reset was successful.
+	}
 
-	return true; // Assumes the reset was successful.
+	// If we've reached this point, the device is still unresponsive.
+	dev_err(&pdev->dev, "Device is unresponsive, cannot reset.\n");
+	return false;
 }
 
 static int telemetry_probe(struct tenstorrent_device *tt_dev)

@@ -126,6 +126,9 @@ bool grayskull_send_arc_fw_message_with_args(u8 __iomem* reset_unit_regs,
 	arc_misc_cntl = ioread32(arc_misc_cntl_reg);
 	iowrite32(arc_misc_cntl | ARC_MISC_CNTL_IRQ0_MASK, arc_misc_cntl_reg);
 
+	if (timeout_us == 0)
+		return false;
+
 	if (arc_msg_poll_completion(reset_unit_regs, message_reg, message_id, timeout_us, exit_code) < 0) {
 		return false;
 	} else {

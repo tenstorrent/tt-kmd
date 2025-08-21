@@ -18,6 +18,7 @@
 #include "memory.h"
 #include "chardev_private.h"
 #include "telemetry.h"
+#include "wormhole.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
 #define pci_enable_pcie_error_reporting(dev) do { } while (0)
@@ -58,8 +59,8 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	device_class = (const struct tenstorrent_device_class *)id->driver_data;
 
-	printk(KERN_INFO "Found a Tenstorrent %s device at bus %04x:%d.\n",
-	       device_class->name, (unsigned)pci_domain_nr(dev->bus), (int)dev->bus->number);
+	printk(KERN_INFO "Found a Tenstorrent %s device at bus %04x:%02x.\n",
+	       device_class->name, (unsigned)pci_domain_nr(dev->bus), (unsigned)dev->bus->number);
 
 	// During pre-test, unflashed boards have no class code which trips up __dev_sort_resources.
 	// Assign the proper class code and rerun resource assignment to clear things up.
@@ -120,9 +121,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	tt_dev->interrupt_enabled = tenstorrent_enable_interrupts(tt_dev);
 
 	if (device_class->init_device(tt_dev))
-		if (device_class->init_hardware(tt_dev))
-			device_class->post_hardware_init(tt_dev);
-	tt_dev->needs_hw_init = false;
+		tt_dev->needs_hw_init = !device_class->init_hardware(tt_dev);
 
 	pci_save_state(dev);
 	device_class->save_reset_state(tt_dev);
@@ -134,16 +133,8 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 		register_reboot_notifier(&tt_dev->reboot_notifier);
 	}
 
-	if (tt_dev->sysfs_attrs) {
-		const struct tenstorrent_sysfs_attr *data = tt_dev->sysfs_attrs;
-		for (; data->attr.attr.name; data++) {
-			if (device_class->is_sysfs_attr_supported(tt_dev, data))
-				device_create_file(&tt_dev->dev, &data->attr);
-		}
-	}
-
-	if (device_class->create_sysfs_groups)
-		device_class->create_sysfs_groups(tt_dev);
+	if (!tt_dev->needs_hw_init)
+		device_class->init_telemetry(tt_dev);
 
 	return 0;
 }
@@ -153,6 +144,11 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(dev);
 	struct chardev_private *priv, *tmp;
 	u16 vendor_id;
+
+	if (tt_dev->dev_class == &wormhole_class) {
+		struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+		cancel_delayed_work_sync(&wh->fw_ready_work);
+	}
 
 	// In a hotplug scenario, the device may not be accessible anymore. Check
 	// if it is still accessible by reading the vendor ID. If it is not, set the
@@ -167,12 +163,6 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 
 	list_for_each_entry_safe(priv, tmp, &tt_dev->open_fds_list, open_fd) {
 		tenstorrent_memory_cleanup(priv);
-	}
-
-	if (tt_dev->sysfs_attrs) {
-		const struct tenstorrent_sysfs_attr *data = tt_dev->sysfs_attrs;
-		for (; data->attr.attr.name; data++)
-			device_remove_file(&tt_dev->dev, &data->attr);
 	}
 
 	// These remove child sysfs entries which must happen before remove returns.

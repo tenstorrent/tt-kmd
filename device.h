@@ -40,8 +40,6 @@ struct tenstorrent_device {
 
 	struct tt_hwmon_context hwmon_context;
 
-	const struct tenstorrent_sysfs_attr *sysfs_attrs;
-
 	struct list_head open_fds_list;	// List of struct chardev_private, linked through open_fds field
 
 	DECLARE_BITMAP(tlbs, TENSTORRENT_MAX_INBOUND_TLBS);
@@ -49,6 +47,9 @@ struct tenstorrent_device {
 
 	struct mutex iatu_mutex;
 	struct tenstorrent_outbound_iatu_region outbound_iatus[TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS];
+
+	struct attribute **telemetry_attrs;
+	struct attribute_group telemetry_group;
 };
 
 struct tlb_descriptor;
@@ -66,7 +67,7 @@ struct tenstorrent_device_class {
 	bool (*reset)(struct tenstorrent_device *ttdev, u32 reset_flag);
 	bool (*init_device)(struct tenstorrent_device *ttdev);
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);
-	bool (*post_hardware_init)(struct tenstorrent_device *ttdev);
+	bool (*init_telemetry)(struct tenstorrent_device *ttdev);
 	void (*cleanup_hardware)(struct tenstorrent_device *ttdev);
 	void (*cleanup_device)(struct tenstorrent_device *ttdev);
 	void (*first_open_cb)(struct tenstorrent_device *ttdev);
@@ -77,8 +78,6 @@ struct tenstorrent_device_class {
 	void (*save_reset_state)(struct tenstorrent_device *ttdev);
 	void (*restore_reset_state)(struct tenstorrent_device *ttdev);
 	int (*configure_outbound_atu)(struct tenstorrent_device *ttdev, u32 region, u64 base, u64 limit, u64 target);
-	void (*create_sysfs_groups)(struct tenstorrent_device *ttdev);
-	bool (*is_sysfs_attr_supported)(struct tenstorrent_device *ttdev, const struct tenstorrent_sysfs_attr *attr);
 	void (*noc_write32)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, u32 data, int noc);
 };
 

@@ -1,3 +1,15 @@
+tt-kmd (2.4.0) unstable; urgency=medium
+
+  * Add new ASIC reset ioctls and implementation
+  * Add userspace reset tool
+  * Blackhole: Do a Secondary Bus Reset in reset path
+  * Refactor telemetry initialization and sysfs
+  * Wormhole: Defer telemetry setup until FW is ready
+  * Print PCI bus number in hexadecimal at enumeration
+  * Improve Wormhole reset robustness
+
+ -- Tenstorrent Releases <releases@tenstorrent.com>  Thu, 28 Aug 2025 23:48:08 +0000
+
 tt-kmd (2.3.0) unstable; urgency=medium
 
   * Add new 'tt_asic_id' sysfs attribute for Wormhole.

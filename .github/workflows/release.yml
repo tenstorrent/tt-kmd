@@ -3,6 +3,11 @@ run-name: Create Release
 
 on:
   workflow_dispatch:
+    inputs:
+      version_string:
+        description: 'The exact version to release (e.g., 2.4.0 or 2.4.0-rc1)'
+        required: true
+        type: string
   workflow_call:
 
 env:
@@ -43,7 +48,7 @@ jobs:
       - name: Create the branch
         run: git checkout -b "${{ steps.temp_branch_ref.outputs.temp_branch_ref }}"
       - name: Push the branch to work from
-        run: git push --branches
+        run: git push --set-upstream origin ${{ steps.temp_branch_ref.outputs.temp_branch_ref }}
 
   versionchange:
     needs:
@@ -58,7 +63,7 @@ jobs:
       git_hash: ${{ steps.new-git-hash.outputs.git_hash }}
       package_name: ${{ steps.packagename.outputs.package_name }}
       package_version: ${{ steps.packagever.outputs.package_version }}
-      package_version_new: ${{ steps.new-package-version.outputs.package_version_new }}
+      package_version_new: ${{ github.event.inputs.version_string }}
       version_major: ${{ steps.version.outputs.major }}
       version_minor: ${{ steps.version.outputs.minor }}
       version_patch: ${{ steps.version.outputs.patch }}
@@ -67,19 +72,19 @@ jobs:
       version_full: ${{ steps.version.outputs.full }}
       number_of_commits_since_tag: ${{ steps.num-commits-since-tag.outputs.num_commits_since_tag }}
     steps:
-      - name: Update apt
-        run: sudo apt update
-      - name: Install crudini
-        run: sudo apt install crudini -y
+      - name: Update apt and install crudini
+        run: |
+          sudo apt update
+          sudo apt install crudini -y
       - uses: actions/checkout@v4
         with:
           fetch-tags: true
           fetch-depth: 0
           ref: ${{ needs.create-temp-branch.outputs.temp_branch_ref }}
-      - name: Git e-mail
-        run: git config --global user.email "${EMAIL}"
-      - name: Git name
-        run: git config --global user.name "${NAME}"
+      - name: Configure Git
+        run: |
+          git config --global user.email "${EMAIL}"
+          git config --global user.name "${NAME}"
       - name: What version are we?
         id: packagever
         run: |
@@ -92,72 +97,50 @@ jobs:
           export package_name="$( crudini --get dkms.conf "" PACKAGE_NAME | sed 's/"//g' )"
           echo "package_name=${package_name}"
           echo "package_name=${package_name}" >> "$GITHUB_OUTPUT"
-      - name: Bump the version
+      - name: Parse user-provided version string
+        id: version
+        uses: release-kit/semver@v2
+        with:
+          string: ${{ github.event.inputs.version_string }}
+      - name: Set the new version
         run: |
-          export bump_level="patch"
-          if [[ -e bump_minor ]]
-          then
-            export bump_level="minor"
-          fi
-
-          if [[ -e bump_major ]]
-          then
-            export bump_level="major"
-          fi
-
-          echo "Bump Level: ${bump_level}"
-
+          echo "Setting version to: ${{ github.event.inputs.version_string }}"
           python3 -m venv venv
           . ./venv/bin/activate
           pip install bump2version
           bump2version \
-            --list ${bump_level} \
+            --new-version ${{ github.event.inputs.version_string }} \
+            --allow-dirty \
             --verbose \
-            --no-commit
-      - name: What NEW Version?
-        id: new-package-version
-        run: |
-          export package_version_new="$( crudini --get dkms.conf "" PACKAGE_VERSION | sed 's/"//g' )"
-          echo "package_version_new=${package_version_new}"
-          echo "package_version_new=${package_version_new}" >> "$GITHUB_OUTPUT"
-      - name: Parse version from string
-        id: version
-        uses: release-kit/semver@v2
-        with:
-          string: ${{ steps.new-package-version.outputs.package_version_new }}
-      - name: Bump the module.h now that we know the version
+            --no-commit \
+            patch
+      - name: Update module.h with parsed version components
         run: |
           sed -i \
             -e "s/#define TENSTORRENT_DRIVER_VERSION_MAJOR [0-9]\{1,\}/#define TENSTORRENT_DRIVER_VERSION_MAJOR ${{ steps.version.outputs.major }}/g" \
             -e "s/#define TENSTORRENT_DRIVER_VERSION_MINOR [0-9]\{1,\}/#define TENSTORRENT_DRIVER_VERSION_MINOR ${{ steps.version.outputs.minor }}/g" \
             -e "s/#define TENSTORRENT_DRIVER_VERSION_PATCH [0-9]\{1,\}/#define TENSTORRENT_DRIVER_VERSION_PATCH ${{ steps.version.outputs.patch }}/g" \
             module.h
+          if [[ -n "${{ steps.version.outputs.prerelease }}" ]]; then
+            sed -i -e 's/#define TENSTORRENT_DRIVER_VERSION_SUFFIX ""/#define TENSTORRENT_DRIVER_VERSION_SUFFIX "-${{ steps.version.outputs.prerelease }}"/g' module.h
+          else
+            sed -i -e 's/#define TENSTORRENT_DRIVER_VERSION_SUFFIX ".*"/#define TENSTORRENT_DRIVER_VERSION_SUFFIX ""/g' module.h
+          fi
       - name: Find number of commits since last tag
         id: num-commits-since-tag
         run: |
           export num_commits_since="$( git rev-list $(git describe --tags --abbrev=0)..HEAD --count )"
           echo "num_commits_since_tag=${num_commits_since}"
           echo "num_commits_since_tag=${num_commits_since}" >> "$GITHUB_OUTPUT"
-      - run: echo ${{ steps.packagever.outputs.package_version }}
       - name: Update Version - git push
         run: |
-          if [[ -e "bump_major" ]]
-          then
-            git rm bump_major
-          fi
-
-          if [[ -e "bump_minor" ]]
-          then
-            git rm bump_minor
-          fi
-
           git add \
             .bumpversion.cfg \
             module.h \
             dkms.conf \
             AKMBUILD
           git commit \
-            -m "Updating version to ${{ steps.new-package-version.outputs.package_version_new }}"
+            -m "Updating version to ${{ github.event.inputs.version_string }}"
           git push
       - name: Find New Git Hash
         id: new-git-hash
@@ -165,8 +148,6 @@ jobs:
           export git_hash_env="git_hash=$( git log --format="%H" -n 1 )"
           echo "${git_hash_env}"
           echo "${git_hash_env}" >> "$GITHUB_OUTPUT"
-      - name: New Git Hash
-        run: echo "${git_hash_env}"
     env:
       EMAIL: releases@tenstorrent.com
       NAME: Tenstorrent Releases
@@ -267,6 +248,7 @@ jobs:
   # Tag the Release
   ###
   tagrelease:
+    if: always()
     name: Tag the Release
     needs:
       - versionchange
@@ -299,6 +281,7 @@ jobs:
   ###
   generate-release:
     name: Create GitHub Release
+    if: always()
     needs:
       - create-temp-branch
       - versionchange
@@ -379,6 +362,7 @@ jobs:
   # Merge back
   ###
   mergeback:
+    if: always()
     needs:
       - create-temp-branch
       - generate-release
@@ -398,8 +382,7 @@ jobs:
       - name: Merge back
         run: |
           git log -3 --oneline
-          git rebase origin/${{ needs.create-temp-branch.outputs.temp_branch_ref }}
-          git pull --rebase
+          git merge --ff-only origin/${{ needs.create-temp-branch.outputs.temp_branch_ref }}
           git log -3 --oneline
           git push
           git push origin --delete ${{ needs.create-temp-branch.outputs.temp_branch_ref }}

@@ -76,7 +76,9 @@ jobs:
           fetch-tags: true
           fetch-depth: 0
       - name: Extract version from tag
+        if: inputs.MAJOR == '' && inputs.MINOR == '' && inputs.PATCH == ''
         uses: damienaicheh/extract-version-from-tag-action@v1.3.0
+        continue-on-error: true
       - run: git tag
       - name: Ok Figure out version
         run: |

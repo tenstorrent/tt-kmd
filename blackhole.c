@@ -401,6 +401,7 @@ static ssize_t sysfs_show_u64_hex(struct device *dev, struct device_attribute *a
 static ssize_t sysfs_show_u32_ver(struct device *dev, struct device_attribute *attr, char *buf);
 static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute *attr, char *buf);
 static umode_t sysfs_telemetry_is_visible(struct kobject *kobj, struct attribute *attr, int n);
+static ssize_t sysfs_show_asic_location(struct device *dev, struct device_attribute *attr, char *buf);
 
 static struct tenstorrent_sysfs_attr bh_sysfs_attributes[] = {
 	{ TELEMETRY_AICLK, __ATTR(tt_aiclk,  S_IRUGO, sysfs_show_u32_dec, NULL) },
@@ -411,7 +412,16 @@ static struct tenstorrent_sysfs_attr bh_sysfs_attributes[] = {
 	{ TELEMETRY_FLASH_BUNDLE_VERSION, __ATTR(tt_fw_bundle_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
 	{ TELEMETRY_BM_APP_FW_VERSION, __ATTR(tt_m3app_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
 	{ TELEMETRY_ASIC_ID, __ATTR(tt_asic_id, S_IRUGO, sysfs_show_u64_hex, NULL) },
+	{ TELEMETRY_ASIC_LOCATION, __ATTR(tt_asic_location, S_IRUGO, sysfs_show_asic_location, NULL) },
 };
+
+static ssize_t sysfs_show_asic_location(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", bh->asic_location);
+}
 
 static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -643,6 +653,12 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 		for (j = 0; j < ARRAY_SIZE(bh_sysfs_attributes); ++j) {
 			if (bh_sysfs_attributes[j].tag_id == tag_id)
 				bh->sysfs_attr_addrs[j] = addr;
+		}
+
+		if (tag_id == TELEMETRY_ASIC_LOCATION) {
+			u32 val;
+			if (csm_read32(bh, addr, &val) == 0)
+				bh->asic_location = val;
 		}
 	}
 

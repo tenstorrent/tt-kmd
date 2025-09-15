@@ -18,6 +18,7 @@ struct blackhole_device {
 
 	u64 *hwmon_attr_addrs;
 	u64 *sysfs_attr_addrs;
+	u32 asic_location;
 
 	u8 saved_mps;
 };

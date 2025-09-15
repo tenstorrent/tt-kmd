@@ -17,6 +17,7 @@ struct wormhole_device {
 	u8 saved_mps;
 
 	u64 *sysfs_attr_offsets;
+	u32 asic_location;
 
 	struct delayed_work fw_ready_work;
 	int telemetry_retries;

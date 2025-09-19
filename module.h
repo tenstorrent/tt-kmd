@@ -9,7 +9,7 @@
 
 #define TENSTORRENT_DRIVER_VERSION_MAJOR 2
 #define TENSTORRENT_DRIVER_VERSION_MINOR 4
-#define TENSTORRENT_DRIVER_VERSION_PATCH 0
+#define TENSTORRENT_DRIVER_VERSION_PATCH 1
 #define TENSTORRENT_DRIVER_VERSION_SUFFIX ""    // e.g. "-rc1"
 
 // Module options that need to be passed to other files

@@ -1,3 +1,9 @@
+tt-kmd (2.4.1) unstable; urgency=medium
+
+  * Remove Secondary Bus Reset from driver-managed reset paths
+
+ -- Tenstorrent Releases <releases@tenstorrent.com>  Fri, 19 Sep 2025 15:21:42 +0000
+
 tt-kmd (2.4.0) unstable; urgency=medium
 
   * Add new ASIC reset ioctls and implementation

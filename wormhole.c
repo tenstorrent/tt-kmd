@@ -323,13 +323,10 @@ static bool wormhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 	u16 reset_arg = (reset_flag == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) ? 3 : 0;
 	bool responsive;
 
-	// 1. Attempt a secondary bus reset.
-	pcie_hot_reset_and_restore_state(pdev);
-
-	// 2. See if the device is responsive.
+	// See if the device is responsive.
 	responsive = grayskull_send_arc_fw_message(reset_unit_regs(wh_dev), WH_FW_MSG_NOP, 1000, NULL);
 
-	// 3. If not responsive, wait for the watchdog.
+	// If not responsive, wait for the watchdog.
 	if (!responsive) {
 		ktime_t end_time;
 
@@ -352,7 +349,7 @@ static bool wormhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 		}
 	}
 
-	// 4. If the device is responsive, finalize the reset.
+	// If the device is responsive, finalize the reset.
 	if (responsive) {
 		set_reset_marker(pdev);
 		grayskull_send_arc_fw_message_with_args(reset_unit_regs(wh_dev), WH_FW_MSG_TRIGGER_RESET, reset_arg, 0,

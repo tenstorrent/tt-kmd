@@ -10,7 +10,7 @@
 #include "module.h"
 #include "device.h"
 #include "enumerate.h"
-#include "grayskull.h"
+#include "wormhole.h"
 
 #define FW_MSG_PCIE_RETRAIN 0xB6
 #define INTERFACE_TIMER_CONTROL_OFF 0x930
@@ -81,7 +81,6 @@ bool pcie_hot_reset_and_restore_state(struct pci_dev *pdev) {
 	return true;
 }
 
-
 bool complete_pcie_init(struct tenstorrent_device *tt_dev, u8 __iomem* reset_unit_regs) {
 	struct pci_dev *pdev = tt_dev->pdev;
 	struct pci_dev *bridge_dev = pci_upstream_bridge(pdev);
@@ -102,7 +101,7 @@ bool complete_pcie_init(struct tenstorrent_device *tt_dev, u8 __iomem* reset_uni
 
 		pci_read_config_word(bridge_dev, PCI_SUBSYSTEM_VENDOR_ID, &subsys_vendor_id);
 
-		if (!grayskull_send_arc_fw_message_with_args(reset_unit_regs, FW_MSG_PCIE_RETRAIN,
+		if (!wormhole_send_arc_fw_message_with_args(reset_unit_regs, FW_MSG_PCIE_RETRAIN,
 			target_link_speed | (last_retry << 15), subsys_vendor_id, 200000, &exit_code))
 			return false;
 

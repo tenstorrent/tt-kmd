@@ -745,7 +745,7 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 		wormhole_send_curr_date(reset_unit_regs(wh_dev));
 		wormhole_send_arc_fw_message(reset_unit_regs(wh_dev), WH_FW_MSG_ASTATE0, 10000, NULL);
 		update_device_index(wh_dev);
-		complete_pcie_init(&wh_dev->tt, reset_unit_regs(wh_dev));
+		wormhole_complete_pcie_init(&wh_dev->tt, reset_unit_regs(wh_dev));
 		wormhole_send_arc_fw_message_with_args(reset_unit_regs(wh_dev), WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT, auto_reset_timeout, 0, 10000, NULL);
 	}
 

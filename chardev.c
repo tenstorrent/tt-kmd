@@ -468,6 +468,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	hash_init(private_data->dmabufs);
 	INIT_LIST_HEAD(&private_data->pinnings);
 	INIT_LIST_HEAD(&private_data->peer_mappings);
+	INIT_LIST_HEAD(&private_data->bar_mappings);
 
 	kref_get(&tt_dev->kref);
 	private_data->device = tt_dev;

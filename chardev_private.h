@@ -13,6 +13,16 @@
 struct file;
 struct tenstorrent_device;
 
+enum bar_mapping_type { BAR_MAPPING_UC, BAR_MAPPING_WC };
+
+struct bar_mapping {
+	struct list_head list;
+	u64 offset;
+	u64 size;
+	unsigned int bar_index;
+	enum bar_mapping_type type;
+};
+
 #define DMABUF_HASHTABLE_BITS 4
 struct dmabuf {
 	struct hlist_node hash_chain;
@@ -32,6 +42,7 @@ struct chardev_private {
 	DECLARE_HASHTABLE(dmabufs, DMABUF_HASHTABLE_BITS);	// keyed on by dmabuf.index, chained on struct dmabuf.hash_chain
 	struct list_head pinnings;	// struct pinned_page_range.list
 	struct list_head peer_mappings; // struct peer_resource_mapping.list
+	struct list_head bar_mappings;	// struct bar_mapping.list
 
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
 

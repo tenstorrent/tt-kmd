@@ -525,6 +525,7 @@ long ioctl_allocate_dma_buf(struct chardev_private *priv,
 			goto out;
 		}
 		iatu_region = ret;
+		ret = 0;
 	}
 
 	dmabuf->index = in.buf_index;

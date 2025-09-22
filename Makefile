@@ -31,9 +31,9 @@ show-version:
 
 dkms:
 	sudo dkms add .
-	sudo dkms install tenstorrent/$(VERSION)
+	sudo dkms install --force tenstorrent/$(VERSION)
 	sudo modprobe tenstorrent
-	
+
 dkms-remove:
 	sudo modprobe -r tenstorrent
 	sudo dkms remove tenstorrent/$(VERSION) --all

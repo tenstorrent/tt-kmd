@@ -25,4 +25,7 @@ struct wormhole_device {
 #define tt_dev_to_wh_dev(ttdev) \
 	container_of((tt_dev), struct wormhole_device, tt)
 
+bool wormhole_send_arc_fw_message_with_args(u8 __iomem *reset_unit_regs, u8 message_id, u16 arg0, u16 arg1,
+					    u32 timeout_us, u16 *exit_code);
+
 #endif

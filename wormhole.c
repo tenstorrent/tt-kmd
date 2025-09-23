@@ -1009,6 +1009,11 @@ static void wormhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y
 	noc_write32(wh_dev, x, y, addr, data, noc);
 }
 
+static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct tenstorrent_power_state *power_state)
+{
+	return 0; // Treat as success/no-op rather than an error.
+}
+
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
@@ -1031,4 +1036,5 @@ struct tenstorrent_device_class wormhole_class = {
 	.restore_reset_state = wormhole_restore_reset_state,
 	.configure_outbound_atu = wormhole_configure_outbound_atu,
 	.noc_write32 = wormhole_noc_write32,
+	.set_power_state = wormhole_set_power_state,
 };

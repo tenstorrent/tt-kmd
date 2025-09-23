@@ -350,6 +350,55 @@ static long ioctl_set_noc_cleanup(struct chardev_private *priv,
 	return 0;
 }
 
+static int tenstorrent_update_aggregated_power_state(struct tenstorrent_device *tt_dev)
+{
+	struct tenstorrent_power_state aggregated_state = { 0 };
+	struct chardev_private *priv;
+
+	mutex_lock(&tt_dev->chardev_mutex);
+
+	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
+		int i;
+		mutex_lock(&priv->mutex);
+
+		for (i = 0; i < ARRAY_SIZE(aggregated_state.power_settings); i++) {
+			aggregated_state.power_settings[i] = max(aggregated_state.power_settings[i], priv->power_state.power_settings[i]);
+		}
+
+		aggregated_state.power_flags |= priv->power_state.power_flags;
+
+		mutex_unlock(&priv->mutex);
+	}
+
+	mutex_unlock(&tt_dev->chardev_mutex);
+
+	return tt_dev->dev_class->set_power_state(tt_dev, &aggregated_state);
+}
+
+static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorrent_power_state __user *arg)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_power_state data = {0};
+
+	if (copy_from_user(&data, arg, sizeof(data)) != 0)
+		return -EFAULT;
+
+	if (data.argsz != sizeof(data))
+		return -EINVAL;
+
+	if (data.flags != 0 || data.reserved0 != 0)
+		return -EINVAL;
+
+	if (data.validity > 0xFF)
+		return -EINVAL;
+
+	mutex_lock(&priv->mutex);
+	priv->power_state = data;
+	mutex_unlock(&priv->mutex);
+
+	return tenstorrent_update_aggregated_power_state(tt_dev);
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	long ret = -EINVAL;
@@ -416,6 +465,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_SET_NOC_CLEANUP:
 			ret = ioctl_set_noc_cleanup(priv, (struct tenstorrent_set_noc_cleanup __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_SET_POWER_STATE:
+			ret = ioctl_set_power_state(priv, (struct tenstorrent_power_state __user *)arg);
 			break;
 
 		default:
@@ -497,6 +550,9 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 			priv->noc_cleanup.data & 0xFFFFFFFF,
 			priv->noc_cleanup.noc);
 	}
+
+	memset(&priv->power_state, 0, sizeof(priv->power_state));
+	tenstorrent_update_aggregated_power_state(tt_dev);
 
 	decrement_cdev_open_count(tt_dev);
 

@@ -13,6 +13,7 @@ void TestGetDeviceInfo(const EnumeratedDevice &dev);
 void TestConfigSpace(const EnumeratedDevice &dev, bool check_aer);
 void TestQueryMappings(const EnumeratedDevice &dev);
 void TestDmaBuf(const EnumeratedDevice &dev);
+void TestNocDmaBuf(const EnumeratedDevice &dev);
 void TestPinPages(const EnumeratedDevice &dev);
 void TestLock(const EnumeratedDevice &dev);
 void TestHwmon(const EnumeratedDevice &dev);
@@ -41,6 +42,7 @@ int main(int argc, char *argv[])
         TestConfigSpace(d, check_aer);
         TestQueryMappings(d);
         TestDmaBuf(d);
+        TestNocDmaBuf(d);
         TestPinPages(d);
         TestLock(d);
         TestHwmon(d);

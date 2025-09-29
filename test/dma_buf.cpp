@@ -34,18 +34,25 @@ std::size_t MaxDmaBufSize(int dev_fd)
 }
 
 std::variant<tenstorrent_allocate_dma_buf_out, int>
-AllocateDmaBuf(int dev_fd, std::uint32_t size, std::uint32_t index)
+AllocateDmaBuf(int dev_fd, std::uint32_t size, std::uint32_t index, std::uint8_t flags)
 {
     tenstorrent_allocate_dma_buf allocate_dma_buf;
     zero(&allocate_dma_buf);
 
     allocate_dma_buf.in.requested_size = size;
     allocate_dma_buf.in.buf_index = index;
+    allocate_dma_buf.in.flags = flags;
 
     if (ioctl(dev_fd, TENSTORRENT_IOCTL_ALLOCATE_DMA_BUF, &allocate_dma_buf) != 0)
         return errno;
 
     return allocate_dma_buf.out;
+}
+
+std::variant<tenstorrent_allocate_dma_buf_out, int>
+AllocateDmaBuf(int dev_fd, std::uint32_t size, std::uint32_t index)
+{
+    return AllocateDmaBuf(dev_fd, size, index, 0);
 }
 
 std::variant<tenstorrent_allocate_dma_buf_out, int>
@@ -108,6 +115,17 @@ void VerifyBufferMapping(int dev_fd, const std::vector<tenstorrent_allocate_dma_
     }
 }
 
+void VerifyMultipleNocMappedBuffers(int dev_fd)
+{
+    auto buf0 = AllocateDmaBuf(dev_fd, page_size(), 0, TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA);
+    if (std::holds_alternative<int>(buf0))
+        THROW_TEST_FAILURE("NOC-mapped DMA buffer allocation failed.");
+
+    auto buf1 = AllocateDmaBuf(dev_fd, page_size(), 1, TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA);
+    if (std::holds_alternative<int>(buf1))
+        THROW_TEST_FAILURE("Second NOC-mapped DMA buffer allocation failed.");
+}
+
 // Allocate TENSTORRENT_MAX_DMA_BUFS tiny buffers.
 // Allocate two buffers both for the same buf_index.
 // Allocate for buf_index = TENSTORRENT_MAX_DMA_BUFS.
@@ -148,4 +166,10 @@ void TestDmaBuf(const EnumeratedDevice &dev)
     VerifyTooLargeIndexFails(dev_fd.get());
 
     VerifyBufferMapping(dev_fd.get(), buffers);
+}
+
+void TestNocDmaBuf(const EnumeratedDevice &dev)
+{
+    DevFd dev_fd(dev.path);
+    VerifyMultipleNocMappedBuffers(dev_fd.get());
 }

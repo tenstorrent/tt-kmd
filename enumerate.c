@@ -9,6 +9,8 @@
 #include <linux/version.h>
 #include <linux/pm.h>
 #include <linux/list.h>
+#include <linux/seq_file.h>
+#include <linux/debugfs.h>
 
 #include "enumerate.h"
 #include "interrupt.h"
@@ -17,8 +19,8 @@
 #include "module.h"
 #include "memory.h"
 #include "chardev_private.h"
-#include "telemetry.h"
 #include "wormhole.h"
+#include "tlb.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
 #define pci_enable_pcie_error_reporting(dev) do { } while (0)
@@ -35,6 +37,126 @@ struct device *devm_hwmon_device_register_with_info(struct device *,
 	const char *, void *, const struct hwmon_chip_info *, const struct
 	attribute_group **) { return NULL; }
 #endif
+
+static int mappings_seq_show(struct seq_file *s, void *v)
+{
+	struct tenstorrent_device *tt_dev = s->private;
+	struct chardev_private *priv;
+	struct pinned_page_range *pinning;
+	unsigned int tlb_id;
+	struct tlb_descriptor desc;
+	bool sensitive = capable(CAP_SYS_ADMIN);
+
+	seq_printf(s, "WARNING: This file is for diagnostic purposes only.\n"
+		      "Its format is not stable and may change in future driver versions.\n"
+		      "Do not write scripts that parse this file.\n\n");
+
+	seq_printf(s, "%-8s %-16s %-14s %s\n", "PID", "Comm", "Type", "Mapping Details");
+	seq_printf(s, "%-8s %-16s %-14s %s\n", "----", "----", "----", "---------------");
+
+	mutex_lock(&tt_dev->chardev_mutex);
+	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
+		struct bar_mapping *bar_mapping;
+		struct dmabuf *dmabuf;
+		unsigned int bkt;
+
+		// Open file descriptors.
+		seq_printf(s,
+			   "%-8d %-16s %-14s\n", priv->pid, priv->comm,
+			   "OPEN_FD");
+
+		if (!mutex_trylock(&priv->mutex)) {
+			seq_printf(s, "%-8s %-16s %-14s\n", "", "", "...locked, skipping details...");
+			continue;
+		}
+
+		if (!mutex_trylock(&priv->device->iatu_mutex)) {
+			seq_printf(s, "%-8s %-16s %-14s\n", "", "", "...IATU busy, skipping details...");
+			mutex_unlock(&priv->mutex);
+			continue;
+		}
+
+		// User pinnings, including iATU entries.
+		list_for_each_entry(pinning, &priv->pinnings, list) {
+			unsigned long long va_start = pinning->virtual_address;
+			unsigned long size_bytes = pinning->page_count * PAGE_SIZE;
+			unsigned long long iova_start = sensitive ? pinning->dma_mapping.sgl->dma_address : 0;
+
+			if (pinning->outbound_iatu_region >= 0) {
+				const struct tenstorrent_outbound_iatu_region *region;
+				region = &priv->device->outbound_iatus[pinning->outbound_iatu_region];
+
+				seq_printf(
+					s,
+					"%-8d %-16s %-14s VA: 0x%016llx -> IOVA: 0x%016llx -> NOC: 0x%llx (size=0x%lx)\n",
+					priv->pid, priv->comm, "PIN_PAGES+IATU", va_start, iova_start,
+					sensitive ? region->base : 0, size_bytes);
+			} else {
+				seq_printf(s, "%-8d %-16s %-14s VA: 0x%016llx -> IOVA: 0x%016llx (size=0x%lx)\n",
+					   priv->pid, priv->comm, "PIN_PAGES", va_start, iova_start, size_bytes);
+			}
+		}
+
+		// Driver-allocated DMA buffers, including iATU entries.
+		hash_for_each(priv->dmabufs, bkt, dmabuf, hash_chain) {
+			unsigned long long iova = sensitive ? dmabuf->phys : 0;
+			unsigned long size_bytes = dmabuf->size;
+
+			if (dmabuf->outbound_iatu_region >= 0) {
+				const struct tenstorrent_outbound_iatu_region *region;
+				region = &priv->device->outbound_iatus[dmabuf->outbound_iatu_region];
+
+				seq_printf(s,
+					   "%-8d %-16s %-14s ID: %-3u -> IOVA: 0x%016llx -> NOC: 0x%llx (size=0x%lx)\n",
+					   priv->pid, priv->comm, "DMA_BUF+IATU", dmabuf->index, iova,
+					   sensitive ? region->base : 0, size_bytes);
+			} else {
+				seq_printf(s, "%-8d %-16s %-14s ID: %-3u -> IOVA: 0x%016llx (size=0x%lx)\n", priv->pid,
+					   priv->comm, "DMA_BUF", dmabuf->index, iova, size_bytes);
+			}
+		}
+
+		// BAR mappings.
+		list_for_each_entry(bar_mapping, &priv->bar_mappings, list) {
+			seq_printf(s, "%-8d %-16s %-14s BAR%u %-2s (offset=0x%llx, size=0x%llx)\n", priv->pid,
+				   priv->comm, "BAR", bar_mapping->bar_index,
+				   bar_mapping->type == BAR_MAPPING_WC ? "WC" : "UC", bar_mapping->offset,
+				   bar_mapping->size);
+		}
+
+		// Individual inbound TLB window mappings.
+		for_each_set_bit(tlb_id, priv->tlbs, TENSTORRENT_MAX_INBOUND_TLBS) {
+			if (tt_dev->dev_class->describe_tlb &&
+			    tt_dev->dev_class->describe_tlb(tt_dev, tlb_id, &desc) == 0) {
+				seq_printf(s,
+					   "%-8d %-16s %-14s ID: %-3u -> BAR%d + 0x%lx (size=0x%lx) (refs: %d)\n",
+					   priv->pid, priv->comm, "TLB",
+					   tlb_id, desc.bar, desc.bar_offset,
+					   desc.size,
+					   atomic_read(&tt_dev->tlb_refs[tlb_id]));
+			}
+		}
+
+		mutex_unlock(&priv->device->iatu_mutex);
+		mutex_unlock(&priv->mutex);
+	}
+	mutex_unlock(&tt_dev->chardev_mutex);
+
+	return 0;
+}
+
+static int mappings_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, mappings_seq_show, inode->i_private);
+}
+
+static const struct file_operations mappings_fops = {
+	.owner   = THIS_MODULE,
+	.open    = mappings_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = single_release,
+};
 
 static int tenstorrent_reboot_notifier(struct notifier_block *nb,
 				       unsigned long action, void *data) {
@@ -135,6 +257,9 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	if (!tt_dev->needs_hw_init)
 		device_class->init_telemetry(tt_dev);
+
+	debugfs_create_file("mappings", 0444, tt_dev->debugfs_root, tt_dev, &mappings_fops);
+
 
 	return 0;
 }

@@ -5,6 +5,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/debugfs.h>
 
 #include "chardev.h"
 #include "enumerate.h"
@@ -20,6 +21,8 @@
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Tenstorrent AI kernel driver");
 MODULE_VERSION(TENSTORRENT_DRIVER_VERSION_STRING);
+
+struct dentry *tt_debugfs_root;
 
 static uint max_devices = 32;
 module_param(max_devices, uint, 0444);
@@ -55,6 +58,8 @@ static int __init ttdriver_init(void)
 
 	printk(KERN_INFO "Loading Tenstorrent AI driver module v%s.\n", TENSTORRENT_DRIVER_VERSION_STRING);
 
+	tt_debugfs_root = debugfs_create_dir("tenstorrent", NULL);
+
 	err = init_char_driver(max_devices);
 	if (err == 0)
 		err = tenstorrent_pci_register_driver();
@@ -68,6 +73,7 @@ static void __exit ttdriver_cleanup(void)
 
 	tenstorrent_pci_unregister_driver();
 	cleanup_char_driver();
+	debugfs_remove(tt_debugfs_root);
 }
 
 module_init(ttdriver_init);

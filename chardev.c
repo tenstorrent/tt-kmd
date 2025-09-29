@@ -14,6 +14,7 @@
 #include <linux/pci.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
+#include <linux/debugfs.h>
 
 #include "chardev_private.h"
 #include "device.h"
@@ -86,6 +87,7 @@ static dev_t devt_for_device(struct tenstorrent_device *tt_dev)
 int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 {
 	dev_t devt = devt_for_device(tt_dev);
+	char name[16];
 
 	device_initialize(&tt_dev->dev);
 	tt_dev->dev.devt = devt;
@@ -97,6 +99,9 @@ int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 	tt_dev->dev.id = tt_dev->ordinal;
 	dev_set_name(&tt_dev->dev, TENSTORRENT "/%d", tt_dev->ordinal);
 
+	snprintf(name, sizeof(name), "%d", tt_dev->ordinal);
+	tt_dev->debugfs_root = debugfs_create_dir(name, tt_debugfs_root);
+
 	INIT_LIST_HEAD(&tt_dev->open_fds_list);
 
 	cdev_init(&tt_dev->chardev, &chardev_fops);
@@ -105,6 +110,7 @@ int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 
 void tenstorrent_unregister_device(struct tenstorrent_device *tt_dev)
 {
+	debugfs_remove_recursive(tt_dev->debugfs_root);
 	cdev_device_del(&tt_dev->chardev, &tt_dev->dev);
 }
 
@@ -468,10 +474,14 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	hash_init(private_data->dmabufs);
 	INIT_LIST_HEAD(&private_data->pinnings);
 	INIT_LIST_HEAD(&private_data->peer_mappings);
+	INIT_LIST_HEAD(&private_data->bar_mappings);
 
 	kref_get(&tt_dev->kref);
 	private_data->device = tt_dev;
 	file->private_data = private_data;
+
+	private_data->pid = task_tgid_vnr(current);
+	get_task_comm(private_data->comm, current);
 
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_add(&private_data->open_fd, &tt_dev->open_fds_list);

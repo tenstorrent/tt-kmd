@@ -306,18 +306,6 @@ static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npage
 
 #define MMAP_SIZE_DMA_BUF (U64_C(1) << 32)
 
-struct pinned_page_range {
-	struct list_head list;
-
-	unsigned long page_count;
-	struct page **pages;	// vmalloc/vfree
-
-	struct sg_table dma_mapping;	// alloc_chained_sgt_for_pages / free_chained_sgt
-	u64 virtual_address;
-
-	int outbound_iatu_region;
-};
-
 static void teardown_outbound_iatu(struct chardev_private *priv, int iatu_region)
 {
 	struct tenstorrent_device *tt_dev = priv->device;
@@ -1051,12 +1039,54 @@ static struct dmabuf *vma_dmabuf_target(struct chardev_private *priv,
 		return NULL;
 }
 
-static int map_pci_bar(struct pci_dev *pdev, struct vm_area_struct *vma, unsigned int bar)
+static void bar_vma_close(struct vm_area_struct *vma)
 {
+	struct chardev_private *priv = vma->vm_file->private_data;
+	struct bar_mapping *mapping = vma->vm_private_data;
+
+	mutex_lock(&priv->mutex);
+	list_del(&mapping->list);
+	mutex_unlock(&priv->mutex);
+
+	kfree(mapping);
+}
+
+static const struct vm_operations_struct bar_vm_ops = {
+	.close = bar_vma_close,
+};
+
+static int map_pci_bar(struct chardev_private *priv, struct vm_area_struct *vma,
+		       unsigned int bar, enum bar_mapping_type type)
+{
+	struct pci_dev *pdev = priv->device->pdev;
 	resource_size_t bar_start = pci_resource_start(pdev, bar);
 	resource_size_t bar_len = pci_resource_len(pdev, bar);
+	struct bar_mapping *mapping;
+	int ret;
 
-	return vm_iomap_memory(vma, bar_start, bar_len);
+	mapping = kmalloc(sizeof(*mapping), GFP_KERNEL);
+	if (!mapping)
+		return -ENOMEM;
+
+	ret = vm_iomap_memory(vma, bar_start, bar_len);
+	if (ret) {
+		kfree(mapping);
+		return ret;
+	}
+
+	mapping->bar_index = bar;
+	mapping->offset = (u64)vma->vm_pgoff << PAGE_SHIFT;
+	mapping->size = vma->vm_end - vma->vm_start;
+	mapping->type = type;
+
+	mutex_lock(&priv->mutex);
+	list_add(&mapping->list, &priv->bar_mappings);
+	mutex_unlock(&priv->mutex);
+
+	vma->vm_ops = &bar_vm_ops;
+	vma->vm_private_data = mapping;
+
+	return 0;
 }
 
 static void tlb_vma_open(struct vm_area_struct *vma)
@@ -1201,27 +1231,27 @@ int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 
 	if (vma_target_range(vma, MMAP_OFFSET_RESOURCE0_UC, pci_resource_len(pdev, 0))) {
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
-		return map_pci_bar(pdev, vma, 0);
+		return map_pci_bar(priv, vma, 0, BAR_MAPPING_UC);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE0_WC, pci_resource_len(pdev, 0))) {
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-		return map_pci_bar(pdev, vma, 0);
+		return map_pci_bar(priv, vma, 0, BAR_MAPPING_WC);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE1_UC, pci_resource_len(pdev, 2))) {
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
-		return map_pci_bar(pdev, vma, 2);
+		return map_pci_bar(priv, vma, 2, BAR_MAPPING_UC);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE1_WC, pci_resource_len(pdev, 2))) {
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-		return map_pci_bar(pdev, vma, 2);
+		return map_pci_bar(priv, vma, 2, BAR_MAPPING_WC);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE2_UC, pci_resource_len(pdev, 4))) {
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
-		return map_pci_bar(pdev, vma, 4);
+		return map_pci_bar(priv, vma, 4, BAR_MAPPING_UC);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE2_WC, pci_resource_len(pdev, 4))) {
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-		return map_pci_bar(pdev, vma, 4);
+		return map_pci_bar(priv, vma, 4, BAR_MAPPING_WC);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_TLB_UC, MMAP_RESOURCE_SIZE)) {
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
@@ -1249,6 +1279,7 @@ void tenstorrent_memory_cleanup(struct chardev_private *priv)
 	struct dmabuf *dmabuf;
 	unsigned int i;
 	struct peer_resource_mapping *peer_mapping, *tmp_peer_mapping;
+	struct bar_mapping *bar_mapping, *tmp_bar_mapping;
 
 	mutex_lock(&priv->mutex);
 
@@ -1268,6 +1299,11 @@ void tenstorrent_memory_cleanup(struct chardev_private *priv)
 
 		list_del(&peer_mapping->list);
 		kfree(peer_mapping);
+	}
+
+	list_for_each_entry_safe(bar_mapping, tmp_bar_mapping, &priv->bar_mappings, list) {
+		list_del(&bar_mapping->list);
+		kfree(bar_mapping);
 	}
 
 	mutex_unlock(&priv->mutex);

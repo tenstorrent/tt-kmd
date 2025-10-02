@@ -7,7 +7,7 @@
 #include <linux/compiler.h>
 #include <linux/scatterlist.h>
 
-#define MAX_DMA_BUF_SIZE_LOG2 28
+#define MAX_DMA_BUF_SIZE_LOG2 30
 
 struct chardev_private;
 struct tenstorrent_query_mappings;

@@ -1012,7 +1012,7 @@ static void wormhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
-	.dma_address_bits = 32,
+	.dma_address_bits = 48,
 	.noc_dma_limit = (0xFFFE0000 - 1),
 	.noc_pcie_offset = 0x800000000ULL,
 	.tlb_kinds = NUM_TLB_KINDS,

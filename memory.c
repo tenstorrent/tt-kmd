@@ -505,7 +505,7 @@ long ioctl_allocate_dma_buf(struct chardev_private *priv,
 	}
 
 	if (in.flags & TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA) {
-		bool top_down = true;
+		bool top_down = false;
 		ret = setup_noc_dma(priv, top_down, in.requested_size, dma_handle, &out.noc_address);
 		if (ret < 0) {
 			dma_free_coherent(&priv->device->pdev->dev, in.requested_size, dma_buf_kernel_ptr, dma_handle);
@@ -1253,11 +1253,13 @@ int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 		return map_pci_bar(priv, vma, 0, BAR_MAPPING_WC);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE1_UC, pci_resource_len(pdev, 2))) {
-		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
+		// https://github.com/sifive/riscv-linux/pull/9/commits/3f75cc40d86980731deaf55088646228851f7415
+		// vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
 		return map_pci_bar(priv, vma, 2, BAR_MAPPING_UC);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE1_WC, pci_resource_len(pdev, 2))) {
-		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+		// https://github.com/sifive/riscv-linux/pull/9/commits/3f75cc40d86980731deaf55088646228851f7415
+		// vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 		return map_pci_bar(priv, vma, 2, BAR_MAPPING_WC);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE2_UC, pci_resource_len(pdev, 4))) {

@@ -1,4 +1,4 @@
-name: "Community Issue / PR Labeling Workflow"
+name: "Auto-label Community Issues"
 
 on:
   issues:
@@ -7,10 +7,12 @@ on:
     types: [opened]
 
 permissions:
+  contents: read 
   issues: write
   pull-requests: write
-
+  
 jobs:
-  call-central-workflow:
-    uses: tenstorrent/tt-github-actions/.github/workflows/on-community-issue.yml@main
-
+  community-labeling:
+    uses: tenstorrent/tt-github-actions/.github/workflows/issues-community-autotag.yml@main
+    secrets:
+      AUTOLABEL_COMMUNITY_ISSUES: ${{ secrets.AUTOLABEL_COMMUNITY_ISSUES }}

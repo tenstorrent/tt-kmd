@@ -339,9 +339,9 @@ jobs:
               "commit_template": "- #{{TITLE}} (#{{MERGE_SHA}}) by @#{{AUTHOR}}"
             }
 
-      - name: Find the deb & whl files
+      - name: Find the deb, rpm & whl files
         run: |
-          find ${GITHUB_WORKSPACE} -type f -iname \*.deb -o -iname \*.whl -exec ls -lah {} \;
+          find ${GITHUB_WORKSPACE} -type f -iname \*.deb -o -iname \*.rpm -o -iname \*.whl -exec ls -lah {} \;
           find /home/runner/work/${{ env.project_name }}/${{ env.project_name }}/ -exec ls -lah {} \;
 
       - name: Deb file renames so they don't overlap
@@ -349,6 +349,24 @@ jobs:
           for x in $( \
             find ${GITHUB_WORKSPACE} -type f -iname \*.deb | \
             grep -v "artifacts-ubuntu" \
+          )
+          do
+            want="$( \
+              echo "${x}" | \
+              xargs dirname | \
+              tr "/" "\n" | \
+              tail -n 1 \
+              )"
+            mv -v \
+              "${x}" \
+              "$( echo "${x}" | xargs dirname )/${want}"
+          done
+
+      - name: RPM file renames so they don't overlap
+        run: |
+          for x in $( \
+            find ${GITHUB_WORKSPACE} -type f -iname \*.rpm | \
+            grep -v "artifacts-fedora" \
           )
           do
             want="$( \
@@ -371,6 +389,8 @@ jobs:
             ${{ github.workspace }}/${{ env.project_name }}*/*.deb
             ${{ github.workspace }}/tenstorrent-dkms*/*.deb
             ${{ github.workspace }}/[!artifacts-]*/*.deb
+            ${{ github.workspace }}/tenstorrent-dkms*/*.rpm
+            ${{ github.workspace }}/[!artifacts-]*/*.rpm
           body: ${{ steps.build_changelog.outputs.changelog }}
           draft: false
           prerelease: false

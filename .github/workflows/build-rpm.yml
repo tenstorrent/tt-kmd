@@ -1,0 +1,196 @@
+name: Build RPM Packages 📦
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to build from'
+        default: ${{ github.ref }}
+        required: true
+        type: string
+      MAJOR:
+        required: false
+        type: string
+      MINOR:
+        required: false
+        type: string
+      PATCH:
+        required: false
+        type: string
+      NUMBER_OF_COMMITS_SINCE_TAG:
+        required: false
+        type: string
+
+jobs:
+  build-rpm:
+    name: Build ${{ matrix.os }} Package
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - fedora:41
+          - fedora:42
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.os }}
+    steps:
+      - run: |
+          echo "What started this ref: ${{ github.ref }}"
+          echo "What started this ref: ${{ github.ref_name }}"
+          echo "What started this sha: ${{ github.sha }}"
+          echo "Did we get a ref pass in? ${{ inputs.ref }}"
+      - name: Figure out branch name
+        id: ref_name
+        run: |
+          echo "ref_name=${{ github.ref_name }}"
+          echo "ref_name=${{ github.ref_name }}" >> $GITHUB_ENV
+          if [[ -n "${{ inputs.ref }}" ]]
+          then
+            echo "ref_name=${{ inputs.ref }}"
+            echo "ref_name=${{ inputs.ref }}" >> $GITHUB_ENV
+          fi
+      - name: Install build dependencies
+        run: |
+          dnf install -y \
+            rpm-build \
+            rpmdevtools \
+            dkms \
+            git \
+            gnupg2 \
+            kernel-devel \
+            tar \
+            gzip
+      - name: Import GPG key
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.PKG_SIGNING_KEY_DEB }}
+      - run: gpg --list-keys
+      - run: gpg --list-secret-keys
+      - uses: actions/checkout@v4
+        name: Checkout
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-tags: true
+          fetch-depth: 0
+      - name: Extract version from tag
+        uses: damienaicheh/extract-version-from-tag-action@v1.3.0
+      - run: git tag
+      - name: Figure out version
+        run: |
+          echo "MAJOR=$( echo "${MAJOR}" | sed 's/^ttkmd-//' )" >> $GITHUB_ENV
+          echo "MAJOR=$( echo "${MAJOR}" | sed 's/^ttkmd-//' )"
+
+          if [[ -n "${{ inputs.MAJOR }}" ]]
+          then
+            echo "MAJOR=${{ inputs.MAJOR }}" >> $GITHUB_ENV
+            echo "MAJOR=${{ inputs.MAJOR }}"
+          fi
+
+          if [[ -n "${{ inputs.MINOR }}" ]]
+          then
+            echo "MINOR=${{ inputs.MINOR }}" >> $GITHUB_ENV
+            echo "MINOR=${{ inputs.MINOR }}"
+          fi
+
+          if [[ -n "${{ inputs.PATCH }}" ]]
+          then
+            echo "PATCH=${{ inputs.PATCH }}" >> $GITHUB_ENV
+            echo "PATCH=${{ inputs.PATCH }}"
+          fi
+
+          if [[ -n "${{ inputs.NUMBER_OF_COMMITS_SINCE_TAG }}" ]]
+          then
+            echo "NUMBER_OF_COMMITS_SINCE_TAG=${{ inputs.NUMBER_OF_COMMITS_SINCE_TAG }}" >> $GITHUB_ENV
+            echo "NUMBER_OF_COMMITS_SINCE_TAG=${{ inputs.NUMBER_OF_COMMITS_SINCE_TAG }}"
+          fi
+
+          if [[ -n "${{ inputs.ref }}" ]]
+          then
+            echo "REF=${{ inputs.ref }}" >> $GITHUB_ENV
+            echo "REF=${{ inputs.ref }}"
+          else
+            echo "REF=${{ github.ref_name }}" >> $GITHUB_ENV
+            echo "REF=${{ github.ref_name }}"
+          fi
+      - name: Set up RPM build environment
+        run: |
+          mkdir -p ~/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          VERSION="${MAJOR}.${MINOR}.${PATCH}"
+
+          # Update version in spec file
+          sed -i "s/^Version:.*/Version:        ${VERSION}/" tenstorrent-dkms.spec
+
+          # Copy spec file to SPECS directory
+          cp tenstorrent-dkms.spec ~/rpmbuild/SPECS/
+
+          # Create source tarball
+          mkdir -p tenstorrent-${VERSION}
+
+          # Copy source files
+          cp -r contrib docs tools test tenstorrent-${VERSION}/
+          cp *.c *.h tenstorrent-${VERSION}/
+          cp AKMBUILD Makefile LICENSE LICENSE_understanding.txt README.md SUMMARY.md \
+             dkms.conf dkms-post-install modprobe.d-tenstorrent.conf \
+             udev-50-tenstorrent.rules tenstorrent-${VERSION}/
+
+          # Create tarball
+          tar czf ~/rpmbuild/SOURCES/tenstorrent-dkms-${VERSION}.tar.gz \
+            --transform "s,^tenstorrent-${VERSION},tenstorrent-${VERSION}," \
+            tenstorrent-${VERSION}
+
+          # Update dkms.conf version
+          sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"${VERSION}\"/" \
+            ~/rpmbuild/SOURCES/tenstorrent-dkms-${VERSION}.tar.gz
+      - name: Build RPM package
+        run: |
+          VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          rpmbuild -bb ~/rpmbuild/SPECS/tenstorrent-dkms.spec
+        continue-on-error: true
+      - name: Sign RPM package
+        run: |
+          VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          # Configure RPM signing
+          echo "%_signature gpg" >> ~/.rpmmacros
+          echo "%_gpg_name releases@tenstorrent.com" >> ~/.rpmmacros
+
+          # Sign the RPM
+          rpmsign --addsign ~/rpmbuild/RPMS/noarch/tenstorrent-dkms-*.rpm || true
+        continue-on-error: true
+      - name: Move RPM packages
+        run: mkdir -p artifacts && mv ~/rpmbuild/RPMS/noarch/*.rpm artifacts/ || true
+      - name: Generate changelog
+        run: |
+          VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          cat > artifacts/changelog <<EOF
+          * $(date '+%a %b %d %Y') Tenstorrent Releases <releases@tenstorrent.com> - ${VERSION}-1
+          - Automated build from ref: ${REF}
+          - Version: ${VERSION}
+          EOF
+      - name: Set environment variable for distro
+        id: distro_ident
+        run: |
+          # Extract distro identifier from matrix.os (e.g., "fedora:41" -> "fedora-41")
+          DISTRO_IDENT=$(echo "${{ matrix.os }}" | tr ':' '-')
+          echo "DISTRO_IDENT=${DISTRO_IDENT}" >> $GITHUB_ENV
+      - name: Set environment variable for rpm filename
+        id: rpm_filename
+        run: echo "RPM_FILENAME=$(basename artifacts/*.rpm)" >> $GITHUB_ENV
+      - name: Set environment variable for rpm filename with distro
+        id: rpm_filename_distro
+        run: echo RPM_FILENAME_DISTRO=$(basename artifacts/*.rpm | sed "s/.noarch/.noarch-${{ env.DISTRO_IDENT }}/" ) >> $GITHUB_ENV
+      - name: Upload RPM package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.RPM_FILENAME_DISTRO }}
+          path: artifacts/${{ env.RPM_FILENAME }}
+      - name: Upload Changelog
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-changelog-${{ env.DISTRO_IDENT }}
+          path: artifacts/changelog
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ env.DISTRO_IDENT }}.zip
+          path: artifacts/

@@ -356,6 +356,47 @@ static long ioctl_set_noc_cleanup(struct chardev_private *priv,
 	return 0;
 }
 
+static long ioctl_noc_write_byte(struct chardev_private *priv,
+			   struct tenstorrent_noc_write_byte __user *arg)
+{
+	u32 bytes_to_copy;
+
+	struct tenstorrent_noc_write_byte_in in;
+	struct tenstorrent_noc_write_byte_out out;
+	memset(&in, 0, sizeof(in));
+	memset(&out, 0, sizeof(out));
+
+	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
+		return -EFAULT;
+
+	priv->device->dev_class->noc_write8(priv->device, in.x, in.y, in.addr, in.write_value, in.noc);
+
+	return 0;
+}
+
+static long ioctl_noc_read_byte(struct chardev_private *priv,
+			   struct tenstorrent_noc_read_byte __user *arg)
+{
+	u32 bytes_to_copy;
+
+	struct tenstorrent_noc_read_byte_in in;
+	struct tenstorrent_noc_read_byte_out out;
+	memset(&in, 0, sizeof(in));
+	memset(&out, 0, sizeof(out));
+
+	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
+		return -EFAULT;
+
+	out.read_value = priv->device->dev_class->noc_read8(priv->device, in.x, in.y, in.addr, in.noc);
+
+	bytes_to_copy = 8;
+
+	if (copy_to_user(&arg->out, &out, bytes_to_copy) != 0)
+		return -EFAULT;
+
+	return 0;
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	long ret = -EINVAL;
@@ -423,7 +464,12 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		case TENSTORRENT_IOCTL_SET_NOC_CLEANUP:
 			ret = ioctl_set_noc_cleanup(priv, (struct tenstorrent_set_noc_cleanup __user *)arg);
 			break;
-
+		case TENSTORRENT_IOCTL_NOC_WRITE_BYTE:
+			ret = ioctl_noc_write_byte(priv, (struct tenstorrent_noc_write_byte __user *)arg);
+			break;
+		case TENSTORRENT_IOCTL_NOC_READ_BYTE:
+			ret = ioctl_noc_read_byte(priv, (struct tenstorrent_noc_read_byte __user *)arg);
+			break;
 		default:
 			ret = -EINVAL;
 			break;

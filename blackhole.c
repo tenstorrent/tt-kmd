@@ -229,6 +229,21 @@ static u8 __iomem *bh_configure_kernel_tlb(struct blackhole_device *bh, u32 x, u
 	return bh->kernel_tlb + offset;
 }
 
+static u8 noc_read8(struct blackhole_device *bh, u32 x, u32 y, u64 addr, int noc)
+{
+	u8 val;
+	u8 __iomem *tlb_window;
+
+	mutex_lock(&bh->kernel_tlb_mutex);
+
+	tlb_window = bh_configure_kernel_tlb(bh, x, y, addr, noc);
+	val = ioread8(tlb_window);
+
+	mutex_unlock(&bh->kernel_tlb_mutex);
+
+	return val;
+}
+
 static u32 noc_read32(struct blackhole_device *bh, u32 x, u32 y, u64 addr, int noc)
 {
 	u32 val;
@@ -242,6 +257,18 @@ static u32 noc_read32(struct blackhole_device *bh, u32 x, u32 y, u64 addr, int n
 	mutex_unlock(&bh->kernel_tlb_mutex);
 
 	return val;
+}
+
+static void noc_write8(struct blackhole_device *bh, u32 x, u32 y, u64 addr, u8 data, int noc)
+{
+	u8 __iomem *tlb_window;
+
+	mutex_lock(&bh->kernel_tlb_mutex);
+
+	tlb_window = bh_configure_kernel_tlb(bh, x, y, addr, noc);
+	iowrite8(data, tlb_window);
+
+	mutex_unlock(&bh->kernel_tlb_mutex);
 }
 
 static void noc_write32(struct blackhole_device *bh, u32 x, u32 y, u64 addr, u32 data, int noc)
@@ -1020,6 +1047,18 @@ static void blackhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 
 	noc_write32(bh, x, y, addr, data, noc);
 }
 
+static void blackhole_noc_write8(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, u8 data, int noc)
+{
+	struct blackhole_device *bh_dev = tt_dev_to_bh_dev(tt_dev);
+	noc_write8(bh_dev, x, y, addr, data, noc);
+}
+
+static u8 blackhole_noc_read8(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, int noc)
+{
+	struct blackhole_device *bh_dev = tt_dev_to_bh_dev(tt_dev);
+	return noc_read8(bh_dev, x, y, addr, noc);
+}
+
 struct tenstorrent_device_class blackhole_class = {
 	.name = "Blackhole",
 	.instance_size = sizeof(struct blackhole_device),
@@ -1041,4 +1080,6 @@ struct tenstorrent_device_class blackhole_class = {
 	.restore_reset_state = blackhole_restore_reset_state,
 	.configure_outbound_atu = blackhole_configure_outbound_atu,
 	.noc_write32 = blackhole_noc_write32,
+	.noc_write8 = blackhole_noc_write8,
+	.noc_read8 = blackhole_noc_read8,
 };

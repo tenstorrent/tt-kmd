@@ -26,6 +26,8 @@
 #define TENSTORRENT_IOCTL_FREE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 12)
 #define TENSTORRENT_IOCTL_CONFIGURE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 13)
 #define TENSTORRENT_IOCTL_SET_NOC_CLEANUP		_IO(TENSTORRENT_IOCTL_MAGIC, 14)
+#define TENSTORRENT_IOCTL_NOC_WRITE_BYTE 		_IO(TENSTORRENT_IOCTL_MAGIC, 15)
+#define TENSTORRENT_IOCTL_NOC_READ_BYTE 		_IO(TENSTORRENT_IOCTL_MAGIC, 16)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -323,6 +325,44 @@ struct tenstorrent_set_noc_cleanup {
 	__u32 reserved0;
 	__u64 addr;
 	__u64 data;
+};
+
+struct tenstorrent_noc_write_byte_in {
+	__u8 write_value;
+	__u64 addr;
+	__u16 x;
+	__u16 y;
+	__u8 noc;
+	__u8 reserved0[3];
+	__u32 reserved1[2];
+};
+
+struct tenstorrent_noc_write_byte_out {
+};
+
+struct tenstorrent_noc_write_byte {
+	struct tenstorrent_noc_write_byte_in in;
+	struct tenstorrent_noc_write_byte_out out;
+};
+
+struct tenstorrent_noc_read_byte_in {
+	__u64 addr;
+	__u16 x;
+	__u16 y;
+	__u8 noc;
+	__u8 reserved0[3];
+	__u32 reserved1[2];
+};
+
+struct tenstorrent_noc_read_byte_out {
+	__u8 read_value;
+	__u8 reserved[7];
+};
+
+
+struct tenstorrent_noc_read_byte {
+	struct tenstorrent_noc_read_byte_in in;
+	struct tenstorrent_noc_read_byte_out out;
 };
 
 #endif

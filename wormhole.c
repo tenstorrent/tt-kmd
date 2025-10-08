@@ -930,6 +930,20 @@ static u32 noc_read32(struct wormhole_device *wh, u32 x, u32 y, u64 addr, int no
 	return val;
 }
 
+static u8 noc_read8(struct wormhole_device *wh, u32 x, u32 y, u64 addr, int noc) {
+	u8 val;
+	u8 __iomem *tlb_window;
+
+	mutex_lock(&wh->kernel_tlb_mutex);
+
+	tlb_window = wh_configure_kernel_tlb(wh, x, y, addr, noc);
+	val = ioread8(tlb_window);
+
+	mutex_unlock(&wh->kernel_tlb_mutex);
+
+	return val;
+}
+
 static void noc_write32(struct wormhole_device *wh, u32 x, u32 y, u64 addr, u32 data, int noc) {
 	u8 __iomem *tlb_window;
 
@@ -937,6 +951,17 @@ static void noc_write32(struct wormhole_device *wh, u32 x, u32 y, u64 addr, u32 
 
 	tlb_window = wh_configure_kernel_tlb(wh, x, y, addr, noc);
 	iowrite32(data, tlb_window);
+
+	mutex_unlock(&wh->kernel_tlb_mutex);
+}
+
+static void noc_write8(struct wormhole_device *wh, u32 x, u32 y, u64 addr, u8 data, int noc) {
+	u8 __iomem *tlb_window;
+
+	mutex_lock(&wh->kernel_tlb_mutex);
+
+	tlb_window = wh_configure_kernel_tlb(wh, x, y, addr, noc);
+	iowrite8(data, tlb_window);
 
 	mutex_unlock(&wh->kernel_tlb_mutex);
 }
@@ -1009,6 +1034,18 @@ static void wormhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y
 	noc_write32(wh_dev, x, y, addr, data, noc);
 }
 
+static void wormhole_noc_write8(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, u8 data, int noc)
+{
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	noc_write8(wh_dev, x, y, addr, data, noc);
+}
+
+static u8 wormhole_noc_read8(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, int noc)
+{
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	return noc_read8(wh_dev, x, y, addr, noc);
+}
+
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
@@ -1031,4 +1068,6 @@ struct tenstorrent_device_class wormhole_class = {
 	.restore_reset_state = wormhole_restore_reset_state,
 	.configure_outbound_atu = wormhole_configure_outbound_atu,
 	.noc_write32 = wormhole_noc_write32,
+	.noc_write8 = wormhole_noc_write8,
+	.noc_read8 = wormhole_noc_read8,
 };

@@ -1279,7 +1279,6 @@ void tenstorrent_memory_cleanup(struct chardev_private *priv)
 	struct dmabuf *dmabuf;
 	unsigned int i;
 	struct peer_resource_mapping *peer_mapping, *tmp_peer_mapping;
-	struct bar_mapping *bar_mapping, *tmp_bar_mapping;
 
 	mutex_lock(&priv->mutex);
 
@@ -1299,11 +1298,6 @@ void tenstorrent_memory_cleanup(struct chardev_private *priv)
 
 		list_del(&peer_mapping->list);
 		kfree(peer_mapping);
-	}
-
-	list_for_each_entry_safe(bar_mapping, tmp_bar_mapping, &priv->bar_mappings, list) {
-		list_del(&bar_mapping->list);
-		kfree(bar_mapping);
 	}
 
 	mutex_unlock(&priv->mutex);

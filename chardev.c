@@ -24,6 +24,7 @@
 #include "memory.h"
 #include "module.h"
 #include "tlb.h"
+#include "compat.h"
 
 static dev_t tt_device_id;
 static struct class *tt_dev_class;
@@ -53,7 +54,7 @@ int init_char_driver(unsigned int max_devices)
 	if (res < 0)
 		goto alloc_chrdev_region_failed;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+#ifdef TT_CLASS_CREATE_NEW_API
 	tt_dev_class = class_create(TENSTORRENT);
 #else
 	tt_dev_class = class_create(THIS_MODULE, TENSTORRENT);

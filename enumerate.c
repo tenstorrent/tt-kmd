@@ -21,11 +21,9 @@
 #include "chardev_private.h"
 #include "wormhole.h"
 #include "tlb.h"
+#include "compat.h"
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
-#define pci_enable_pcie_error_reporting(dev) do { } while (0)
-#define pci_disable_pcie_error_reporting(dev) do { } while (0)
-#else
+#ifndef TT_NO_PCIE_AER
 #include <linux/aer.h>
 #endif
 

@@ -43,3 +43,17 @@ jobs:
       PATCH:  ${{ inputs.PATCH }}
       NUMBER_OF_COMMITS_SINCE_TAG:  ${{ inputs.NUMBER_OF_COMMITS_SINCE_TAG }}
     secrets: inherit
+
+  buildrhel:
+    needs:
+      - build_all_depends
+    name: Build RHEL / Rocky
+    uses: ./.github/workflows/build-rhel.yml
+    secrets: inherit
+  
+  buildfedora:
+    needs:
+      - build_all_depends
+    name: Build Fedora
+    uses: ./.github/workflows/build-fedora.yml
+    secrets: inherit

@@ -1,0 +1,49 @@
+name: Build Fedora
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  build-fedora:
+    name: Build on Fedora ${{ matrix.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [40, 41, 42]
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:${{ matrix.version }}
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf install -y make gcc kernel-devel elfutils-libelf-devel
+          
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Find kernel version
+        run: |
+          ls -la /usr/src/kernels/
+          KERNEL_VER=$(ls /usr/src/kernels/ | grep -v '^\.' | head -n 1)
+          echo "Found kernel version: ${KERNEL_VER}"
+          if [ -z "${KERNEL_VER}" ]; then
+            echo "ERROR: No kernel version found!"
+            exit 1
+          fi
+          echo "KERNEL_VER=${KERNEL_VER}" >> $GITHUB_ENV
+      
+      - name: Build kernel module
+        run: |
+          echo "Building against kernel: ${KERNEL_VER}"
+          make -C /usr/src/kernels/${KERNEL_VER} M=$(pwd) modules
+      
+      - name: Verify build
+        run: |
+          ls -lh tenstorrent.ko

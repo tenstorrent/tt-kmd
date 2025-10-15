@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+#DEBHELPER#
+
+# Try to load the module for the running kernel if it's installed
+if [ "$1" = "configure" ]; then
+    RUNNING_KERNEL=$(uname -r)
+    if [ -f /lib/modules/$RUNNING_KERNEL/updates/dkms/tenstorrent.ko ] || \
+       [ -f /lib/modules/$RUNNING_KERNEL/kernel/extra/tenstorrent.ko ]; then
+        modprobe tenstorrent 2>/dev/null || true
+    fi
+fi
+
+exit 0

@@ -45,8 +45,18 @@ install -m 644 *.h %{buildroot}/usr/src/tenstorrent-%{version}/
 %post
 # Add module to DKMS
 dkms add -m tenstorrent -v %{version} || :
-dkms build -m tenstorrent -v %{version} || :
-dkms install -m tenstorrent -v %{version} || :
+
+# Build and install for the running kernel first
+RUNNING_KERNEL=$(uname -r)
+if [ -d /usr/src/kernels/$RUNNING_KERNEL ] || [ -d /lib/modules/$RUNNING_KERNEL/build ]; then
+    dkms build -m tenstorrent -v %{version} -k $RUNNING_KERNEL || :
+    dkms install -m tenstorrent -v %{version} -k $RUNNING_KERNEL || :
+    # Try to load the module for the running kernel
+    modprobe tenstorrent 2>/dev/null || :
+fi
+
+# Build and install for all installed kernels (including the newest)
+dkms install -m tenstorrent -v %{version} --all || :
 
 %preun
 # Remove module from DKMS before uninstall

@@ -8,6 +8,7 @@
 #include <linux/mutex.h>
 #include <linux/hashtable.h>
 #include <linux/sched.h>
+#include <linux/refcount.h>
 
 #include "ioctl.h"
 
@@ -22,6 +23,7 @@ struct bar_mapping {
 	u64 size;
 	unsigned int bar_index;
 	enum bar_mapping_type type;
+	refcount_t refs;
 };
 
 #define DMABUF_HASHTABLE_BITS 4

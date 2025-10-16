@@ -35,6 +35,16 @@ jobs:
         sudo dkms add .
         sudo dkms install tenstorrent/$(tools/current-version)
 
+  build-akms:
+    runs-on: ubuntu-latest
+    container: alpine:3.22
+    steps:
+    - uses: actions/checkout@v4
+    - run: |
+        apk update
+        apk add akms
+        akms build -k 6.12.53-0-lts .
+
   build-make:
     strategy:
       matrix:

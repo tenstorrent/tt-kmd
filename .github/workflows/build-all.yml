@@ -43,3 +43,15 @@ jobs:
       PATCH:  ${{ inputs.PATCH }}
       NUMBER_OF_COMMITS_SINCE_TAG:  ${{ inputs.NUMBER_OF_COMMITS_SINCE_TAG }}
     secrets: inherit
+  buildalpine:
+    needs:
+      - build_all_depends
+    name: Build Alpine
+    uses: ./.github/workflows/build-alpine.yml
+    with:
+      ref: ${{ inputs.ref }}
+      MAJOR:  ${{ inputs.MAJOR }}
+      MINOR:  ${{ inputs.MINOR }}
+      PATCH:  ${{ inputs.PATCH }}
+      NUMBER_OF_COMMITS_SINCE_TAG:  ${{ inputs.NUMBER_OF_COMMITS_SINCE_TAG }}
+    secrets: inherit

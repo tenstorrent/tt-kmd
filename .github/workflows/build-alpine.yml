@@ -1,0 +1,48 @@
+name: Build Ubuntu Packages 📦
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to build from'
+        default: ${{ github.ref }}
+        required: true
+        type: string
+      MAJOR:
+        required: false
+        type: string
+      MINOR:
+        required: false
+        type: string
+      PATCH:
+        required: false
+        type: string
+      NUMBER_OF_COMMITS_SINCE_TAG:
+        required: false
+        type: string
+
+jobs:
+  build-akms:
+    name: Build AKMS Package
+    strategy:
+      fail-fast: false
+    runs-on: ubuntu-latest
+    container: alpine:3.22
+    steps:
+      - run: |
+          echo "What started this ref: ${{ github.ref }}"
+          echo "What started this ref: ${{ github.ref_name }}"
+          echo "What started this sha: ${{ github.sha }}"
+          echo "Did we get a ref pass in? ${{ inputs.ref }}"
+      - run: sudo apk update
+      - run: sudo apk add git akms
+      - uses: actions/checkout@v4
+        name: Checkout
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-tags: true
+          fetch-depth: 0
+      - name: Build with AKMS
+        run: |
+          akms build --verbose $GITHUB_WORKSPACE

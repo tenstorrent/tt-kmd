@@ -45,6 +45,7 @@ jobs:
     - run: |
         apk update
         apk add akms
+        echo "bubblewrap_opts=--share-net" >> /etc/akms.conf
         akms build --no-overlay -k 6.12.53-0-lts .
 
   build-make:

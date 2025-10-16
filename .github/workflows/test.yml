@@ -37,7 +37,9 @@ jobs:
 
   build-akms:
     runs-on: ubuntu-latest
-    container: alpine:3.22
+    container:
+      image: alpine:3.22
+      options: --privileged
     steps:
     - uses: actions/checkout@v4
     - run: |

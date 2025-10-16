@@ -68,7 +68,7 @@ jobs:
       - name: Import GPG key
         uses: crazy-max/ghaction-import-gpg@v6
         with:
-          gpg_private_key: ${{ secrets.PKG_SIGNING_KEY_DEB }}
+          gpg_private_key: ${{ secrets.PKG_SIGNING_KEY_RPM }}
       - run: gpg --list-keys
       - run: gpg --list-secret-keys
       - uses: actions/checkout@v4

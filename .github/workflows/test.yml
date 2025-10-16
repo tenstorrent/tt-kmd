@@ -44,7 +44,7 @@ jobs:
     - uses: actions/checkout@v4
     - run: |
         apk update
-        apk add akms
+        apk add akms linux-lts-dev=6.12.53-r0
         akms build -k 6.12.53-0-lts .
 
   build-make:

@@ -39,13 +39,13 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: alpine:3.22
-      options: --privileged
+      options: --cap-add=SYS_ADMIN
     steps:
     - uses: actions/checkout@v4
     - run: |
         apk update
-        apk add akms linux-lts-dev=6.12.53-r0
-        akms build -k 6.12.53-0-lts .
+        apk add akms
+        akms build --no-overlay -k 6.12.53-0-lts .
 
   build-make:
     strategy:

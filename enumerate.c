@@ -118,10 +118,10 @@ static int mappings_seq_show(struct seq_file *s, void *v)
 
 		// BAR mappings.
 		list_for_each_entry(bar_mapping, &priv->bar_mappings, list) {
-			seq_printf(s, "%-8d %-16s %-14s BAR%u %-2s (offset=0x%llx, size=0x%llx)\n", priv->pid,
+			seq_printf(s, "%-8d %-16s %-14s BAR%u %-2s (offset=0x%llx, size=0x%llx, refs=%d)\n", priv->pid,
 				   priv->comm, "BAR", bar_mapping->bar_index,
 				   bar_mapping->type == BAR_MAPPING_WC ? "WC" : "UC", bar_mapping->offset,
-				   bar_mapping->size);
+				   bar_mapping->size, refcount_read(&bar_mapping->refs));
 		}
 
 		// Individual inbound TLB window mappings.

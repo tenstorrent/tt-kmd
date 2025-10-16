@@ -1039,19 +1039,33 @@ static struct dmabuf *vma_dmabuf_target(struct chardev_private *priv,
 		return NULL;
 }
 
+static void bar_vma_open(struct vm_area_struct *vma)
+{
+	struct bar_mapping *mapping = vma->vm_private_data;
+
+	if (mapping)
+		refcount_inc(&mapping->refs);
+}
+
 static void bar_vma_close(struct vm_area_struct *vma)
 {
 	struct chardev_private *priv = vma->vm_file->private_data;
 	struct bar_mapping *mapping = vma->vm_private_data;
 
-	mutex_lock(&priv->mutex);
-	list_del(&mapping->list);
-	mutex_unlock(&priv->mutex);
+	if (!mapping)
+		return;
 
-	kfree(mapping);
+	if (refcount_dec_and_test(&mapping->refs)) {
+		mutex_lock(&priv->mutex);
+		list_del(&mapping->list);
+		mutex_unlock(&priv->mutex);
+
+		kfree(mapping);
+	}
 }
 
 static const struct vm_operations_struct bar_vm_ops = {
+	.open = bar_vma_open,
 	.close = bar_vma_close,
 };
 
@@ -1078,6 +1092,7 @@ static int map_pci_bar(struct chardev_private *priv, struct vm_area_struct *vma,
 	mapping->offset = (u64)vma->vm_pgoff << PAGE_SHIFT;
 	mapping->size = vma->vm_end - vma->vm_start;
 	mapping->type = type;
+	refcount_set(&mapping->refs, 1);
 
 	mutex_lock(&priv->mutex);
 	list_add(&mapping->list, &priv->bar_mappings);

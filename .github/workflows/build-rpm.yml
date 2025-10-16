@@ -51,6 +51,9 @@ jobs:
             echo "ref_name=${{ inputs.ref }}"
             echo "ref_name=${{ inputs.ref }}" >> $GITHUB_ENV
           fi
+      - name: Enable EPEL for EL distributions
+        if: startsWith(matrix.os, 'almalinux:') || startsWith(matrix.os, 'rockylinux:') || startsWith(matrix.os, 'oraclelinux:')
+        run: dnf install -y epel-release
       - name: Install build dependencies
         run: |
           dnf install -y \

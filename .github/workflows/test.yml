@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: alpine:3.22
-      options: --privileged --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+      options: --privileged --security-opt seccomp=unconfined --security-opt apparmor=unconfined --cap-add SYS_ADMIN --cap-add NET_ADMIN
     steps:
     - uses: actions/checkout@v4
     - run: |

@@ -80,7 +80,20 @@ static int mappings_seq_show(struct seq_file *s, void *v)
 		list_for_each_entry(pinning, &priv->pinnings, list) {
 			unsigned long long va_start = pinning->virtual_address;
 			unsigned long size_bytes = pinning->page_count * PAGE_SIZE;
-			unsigned long long iova_start = sensitive ? pinning->dma_mapping.sgl->dma_address : 0;
+			unsigned long long addr = 0;
+			const char *addr_label;
+
+			if (pinning->dma_mapping.sgl) {
+				// IOMMU path: show IOVA
+				addr_label = "IOVA";
+				if (sensitive)
+					addr = pinning->dma_mapping.sgl->dma_address;
+			} else {
+				// Non-IOMMU path: show physical address
+				addr_label = "PA";
+				if (sensitive && pinning->pages)
+					addr = page_to_phys(pinning->pages[0]);
+			}
 
 			if (pinning->outbound_iatu_region >= 0) {
 				const struct tenstorrent_outbound_iatu_region *region;
@@ -88,31 +101,32 @@ static int mappings_seq_show(struct seq_file *s, void *v)
 
 				seq_printf(
 					s,
-					"%-8d %-16s %-14s VA: 0x%016llx -> IOVA: 0x%016llx -> NOC: 0x%llx (size=0x%lx)\n",
-					priv->pid, priv->comm, "PIN_PAGES+IATU", va_start, iova_start,
+					"%-8d %-16s %-14s VA: 0x%016llx -> %s: 0x%016llx -> NOC: 0x%llx (size=0x%lx)\n",
+					priv->pid, priv->comm, "PIN_PAGES+IATU", va_start, addr_label, addr,
 					sensitive ? region->base : 0, size_bytes);
 			} else {
-				seq_printf(s, "%-8d %-16s %-14s VA: 0x%016llx -> IOVA: 0x%016llx (size=0x%lx)\n",
-					   priv->pid, priv->comm, "PIN_PAGES", va_start, iova_start, size_bytes);
+				seq_printf(s, "%-8d %-16s %-14s VA: 0x%016llx -> %s: 0x%016llx (size=0x%lx)\n",
+					   priv->pid, priv->comm, "PIN_PAGES", va_start, addr_label, addr, size_bytes);
 			}
 		}
 
 		// Driver-allocated DMA buffers, including iATU entries.
 		hash_for_each(priv->dmabufs, bkt, dmabuf, hash_chain) {
-			unsigned long long iova = sensitive ? dmabuf->phys : 0;
+			unsigned long long addr = sensitive ? dmabuf->phys : 0;
 			unsigned long size_bytes = dmabuf->size;
+			const char *addr_label = is_iommu_translated(&priv->device->pdev->dev) ? "IOVA" : "PA";
 
 			if (dmabuf->outbound_iatu_region >= 0) {
 				const struct tenstorrent_outbound_iatu_region *region;
 				region = &priv->device->outbound_iatus[dmabuf->outbound_iatu_region];
 
 				seq_printf(s,
-					   "%-8d %-16s %-14s ID: %-3u -> IOVA: 0x%016llx -> NOC: 0x%llx (size=0x%lx)\n",
-					   priv->pid, priv->comm, "DMA_BUF+IATU", dmabuf->index, iova,
+					   "%-8d %-16s %-14s ID: %-3u -> %s: 0x%016llx -> NOC: 0x%llx (size=0x%lx)\n",
+					   priv->pid, priv->comm, "DMA_BUF+IATU", dmabuf->index, addr_label, addr,
 					   sensitive ? region->base : 0, size_bytes);
 			} else {
-				seq_printf(s, "%-8d %-16s %-14s ID: %-3u -> IOVA: 0x%016llx (size=0x%lx)\n", priv->pid,
-					   priv->comm, "DMA_BUF", dmabuf->index, iova, size_bytes);
+				seq_printf(s, "%-8d %-16s %-14s ID: %-3u -> %s: 0x%016llx (size=0x%lx)\n", priv->pid,
+					   priv->comm, "DMA_BUF", dmabuf->index, addr_label, addr, size_bytes);
 			}
 		}
 
@@ -129,7 +143,7 @@ static int mappings_seq_show(struct seq_file *s, void *v)
 			if (tt_dev->dev_class->describe_tlb &&
 			    tt_dev->dev_class->describe_tlb(tt_dev, tlb_id, &desc) == 0) {
 				seq_printf(s,
-					   "%-8d %-16s %-14s ID: %-3u -> BAR%d + 0x%lx (size=0x%lx) (refs: %d)\n",
+					   "%-8d %-16s %-14s ID: %-3u -> BAR%d + 0x%lx (size=0x%lx, refs=%d)\n",
 					   priv->pid, priv->comm, "TLB",
 					   tlb_id, desc.bar, desc.bar_offset,
 					   desc.size,

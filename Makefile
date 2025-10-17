@@ -4,11 +4,14 @@
 obj-m += tenstorrent.o
 tenstorrent-y := module.o chardev.o enumerate.o interrupt.o wormhole.o blackhole.o pcie.o hwmon.o sg_helpers.o memory.o tlb.o
 
-KDIR := /lib/modules/$(shell uname -r)/build
-KMAKE := $(MAKE) -C $(KDIR) M=$(CURDIR)
+# Capture the module directory at the top level before kernel build system changes context
+MODULE_DIR := $(CURDIR)
 
-# Extract version from dkms.conf
-VERSION := $(shell tools/current-version)
+KDIR := /lib/modules/$(shell uname -r)/build
+KMAKE := $(MAKE) -C $(KDIR) M=$(MODULE_DIR)
+
+# Extract version from dkms.conf (use conditional to avoid errors in kernel build context)
+VERSION := $(shell [ -x $(MODULE_DIR)/tools/current-version ] && $(MODULE_DIR)/tools/current-version || echo "unknown")
 
 .PHONY: all modules modules_install clean help qemu-build archive akms dkms dkms-remove akms-remove show-version
 

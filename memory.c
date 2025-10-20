@@ -553,7 +553,7 @@ long ioctl_free_dma_buf(struct chardev_private *priv,
 }
 
 
-static bool is_iommu_translated(struct device *dev)
+bool is_iommu_translated(struct device *dev)
 {
 	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
 	return domain && domain->type != IOMMU_DOMAIN_IDENTITY;

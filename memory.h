@@ -51,6 +51,7 @@ long ioctl_configure_tlb(struct chardev_private *priv,
 
 int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma);
 void tenstorrent_memory_cleanup(struct chardev_private *priv);
+bool is_iommu_translated(struct device *dev);
 
 #define TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS 16
 struct tenstorrent_outbound_iatu_region {

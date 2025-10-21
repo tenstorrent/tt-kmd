@@ -10,6 +10,12 @@
 
 The driver registers device files named `/dev/tenstorrent/%d`, one for each enumerated device.
 
+### To install:
+
+Pre-built `.deb` packages for Debian and Ubuntu are available at [https://github.com/tenstorrent/tt-kmd/releases](https://github.com/tenstorrent/tt-kmd/releases)
+
+For other distributions, install from source (see below).
+
 ### To install from source:
 
 * You must have dkms installed.

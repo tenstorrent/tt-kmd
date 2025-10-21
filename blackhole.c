@@ -27,9 +27,14 @@
 #define TLB_4G_WINDOW_MASK (TLB_4G_WINDOW_SIZE - 1)
 
 #define TLB_REG_SIZE 12	// Same for 2M and 4G
+#define TLB_TOTAL_WINDOW_COUNT (TLB_2M_WINDOW_COUNT + TLB_4G_WINDOW_COUNT)
 
 #define TLB_REGS_START 0x1FC00000   // BAR0
 #define TLB_REGS_LEN 0x00001000     // Covers all TLB registers
+
+#define TLB_STRIDED_COUNT 32	// First 32 2M windows support non-rectangular multicast patterns
+#define TLB_STRIDED_REG_SIZE 4
+#define TLB_STRIDED_REGS_OFFSET (TLB_TOTAL_WINDOW_COUNT * TLB_REG_SIZE)
 
 #define KERNEL_TLB_INDEX (TLB_2M_WINDOW_COUNT - 1)	// Last 2M window is ours
 #define KERNEL_TLB_START (KERNEL_TLB_INDEX * TLB_2M_WINDOW_SIZE)
@@ -182,6 +187,13 @@ static int blackhole_configure_tlb_2M(struct blackhole_device *bh, int tlb,
 	iowrite32(reg.low32, regs + 0);
 	iowrite32(reg.mid32, regs + 4);
 	iowrite32(reg.high32, regs + 8);
+
+	// Strided TLB configuration is unsupported by the CONFIGURE_TLB API.
+	// Write zero to clear any strided configuration set by alternate means.
+	if (tlb < TLB_STRIDED_COUNT) {
+		u8 __iomem *strided_reg = bh->tlb_regs + TLB_STRIDED_REGS_OFFSET + (tlb * TLB_STRIDED_REG_SIZE);
+		iowrite32(0, strided_reg);
+	}
 
 	return 0;
 }
@@ -955,8 +967,7 @@ static int blackhole_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
 	if (tlb >= 0 && tlb < TLB_2M_WINDOW_COUNT)
 		return blackhole_configure_tlb_2M(bh, tlb, config);
 
-	if (tlb >= TLB_2M_WINDOW_COUNT &&
-	    tlb < TLB_2M_WINDOW_COUNT + TLB_4G_WINDOW_COUNT)
+	if (tlb >= TLB_2M_WINDOW_COUNT && tlb < TLB_TOTAL_WINDOW_COUNT)
 		return blackhole_configure_tlb_4G(bh, tlb, config);
 
 	return -EINVAL;
@@ -967,7 +978,7 @@ static int blackhole_describe_tlb(struct tenstorrent_device *tt_dev, int tlb,
 {
 	bool is_2M = tlb < TLB_2M_WINDOW_COUNT;
 
-	if (tlb < 0 || tlb >= TLB_2M_WINDOW_COUNT + TLB_4G_WINDOW_COUNT)
+	if (tlb < 0 || tlb >= TLB_TOTAL_WINDOW_COUNT)
 		return -EINVAL;
 
 	desc->bar = is_2M ? 0 : 4;

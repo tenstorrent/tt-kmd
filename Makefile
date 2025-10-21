@@ -13,7 +13,7 @@ KMAKE := $(MAKE) -C $(KDIR) M=$(MODULE_DIR)
 # Extract version from dkms.conf (use conditional to avoid errors in kernel build context)
 VERSION := $(shell [ -x $(MODULE_DIR)/tools/current-version ] && $(MODULE_DIR)/tools/current-version || echo "unknown")
 
-.PHONY: all modules modules_install clean help qemu-build archive akms dkms dkms-remove akms-remove show-version
+.PHONY: all modules modules_install clean help akms dkms dkms-remove akms-remove show-version
 
 all: modules
 
@@ -39,7 +39,12 @@ dkms:
 
 dkms-remove:
 	sudo modprobe -r tenstorrent
-	sudo dkms remove tenstorrent/$(VERSION) --all
+	@echo "Removing all installed tenstorrent DKMS modules..."
+	@for ver in $$(dkms status tenstorrent 2>/dev/null | sed -nE 's|^tenstorrent/([^,]+),.*|\1|p' | sort -u); do \
+		echo "Removing tenstorrent/$$ver..."; \
+		sudo dkms remove tenstorrent/$$ver --all || true; \
+	done
+	@echo "DKMS removal complete."
 
 akms:
 	doas akms install .
@@ -48,20 +53,3 @@ akms:
 akms-remove:
 	doas modprobe -r tenstorrent
 	doas akms remove tenstorrent
-
-# Helper for running the driver tests in a VM.
-# Supposed to be paired with https://github.com/TTDRosen/qemu-utils
-# make TT_QEMU_ARCH=x86_64
-qemu-build:
-	rsync --exclude=.git -r -e 'ssh -p 10022' ../tt-kmd dev@127.0.0.1:
-	ssh -p 10022 dev@127.0.0.1 "cd tt-kmd && make && (sudo rmmod tenstorrent.ko || true) && sudo insmod tenstorrent.ko && sudo dmesg"
-	ssh -p 10022 dev@127.0.0.1 "cd tt-kmd && make -C test && sudo ./test/ttkmd_test --skip-aer"
-
-ifeq ($(VER),HEAD)
-ARCHIVE_TAG_NAME=HEAD
-else
-ARCHIVE_TAG_NAME=ttdriver-$(VER)
-endif
-
-archive:
-	git archive --prefix=ttdriver/ -o ttdriver-$(VER).tar.gz $(ARCHIVE_TAG_NAME):$(shell git rev-parse --show-prefix)

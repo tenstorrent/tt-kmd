@@ -1,0 +1,43 @@
+name: 'hardware-test'
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  test-on-hardware:
+    name: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [
+          tt-ubuntu-2204-n150-stable,
+          tt-ubuntu-2204-n150-viommu-stable,
+          tt-ubuntu-2204-n300-stable,
+          tt-ubuntu-2204-n300-viommu-stable,
+          tt-ubuntu-2204-n300-llmbox-stable,
+          tt-ubuntu-2204-n300-llmbox-viommu-stable,
+          tt-ubuntu-2204-p150b-stable,
+          tt-ubuntu-2204-p150b-viommu-stable
+        ]
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - name: Fix ownership and hostname
+      run: |
+        echo "127.0.0.1 $(hostname)" | sudo tee -a /etc/hosts > /dev/null 2>&1
+        sudo chown -R $USER:$USER $GITHUB_WORKSPACE || true
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y build-essential linux-headers-$(uname -r) dkms
+
+    - name: Run hardware tests
+      run: |
+        sudo ./test/run-hardware-tests.sh
+

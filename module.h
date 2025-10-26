@@ -22,5 +22,6 @@ extern struct tenstorrent_device_class blackhole_class;
 extern const struct pci_device_id tenstorrent_ids[];
 
 extern struct dentry *tt_debugfs_root;
+extern struct proc_dir_entry *tt_procfs_root;
 
 #endif

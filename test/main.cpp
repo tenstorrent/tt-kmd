@@ -23,6 +23,7 @@ void TestMapPeerBar(const EnumeratedDevice &dev1, const EnumeratedDevice &dev2);
 void TestTlbs(const EnumeratedDevice &dev);
 void TestDeviceRelease(const EnumeratedDevice &dev);
 void TestMappingsDebugfs(const EnumeratedDevice &dev);
+void TestProcfsPids(const EnumeratedDevice &dev);
 
 int main(int argc, char *argv[])
 {
@@ -51,6 +52,7 @@ int main(int argc, char *argv[])
         TestIoctlZeroing(d);
         TestTlbs(d);
         TestMappingsDebugfs(d);
+        TestProcfsPids(d);
         TestDeviceRelease(d);
 
         at_least_one_device = true;

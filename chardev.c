@@ -15,6 +15,7 @@
 #include <linux/uaccess.h>
 #include <linux/version.h>
 #include <linux/debugfs.h>
+#include <linux/proc_fs.h>
 
 #include "chardev_private.h"
 #include "device.h"
@@ -101,6 +102,9 @@ int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 
 	snprintf(name, sizeof(name), "%d", tt_dev->ordinal);
 	tt_dev->debugfs_root = debugfs_create_dir(name, tt_debugfs_root);
+	tt_dev->procfs_root = proc_mkdir(name, tt_procfs_root);
+	if (tt_dev->procfs_root)
+		proc_create_single_data("pids", 0444, tt_dev->procfs_root, pids_proc_show, tt_dev);
 
 	INIT_LIST_HEAD(&tt_dev->open_fds_list);
 
@@ -111,6 +115,7 @@ int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 void tenstorrent_unregister_device(struct tenstorrent_device *tt_dev)
 {
 	debugfs_remove_recursive(tt_dev->debugfs_root);
+	proc_remove(tt_dev->procfs_root);
 	cdev_device_del(&tt_dev->chardev, &tt_dev->dev);
 }
 

@@ -8,6 +8,7 @@
 #include <linux/types.h>
 #include <linux/device.h>
 #include <linux/cdev.h>
+#include <linux/seq_file.h>
 
 #define TENSTORRENT "tenstorrent"
 
@@ -23,5 +24,8 @@ int tenstorrent_pci_register_driver(void);
 void tenstorrent_pci_unregister_driver(void);
 
 struct tenstorrent_device *tenstorrent_lookup_device(unsigned minor);
+
+// Procfs show function for pids
+int pids_proc_show(struct seq_file *s, void *v);
 
 #endif

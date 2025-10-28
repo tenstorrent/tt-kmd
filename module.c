@@ -61,11 +61,29 @@ static int __init ttdriver_init(void)
 	printk(KERN_INFO "Loading Tenstorrent AI driver module v%s.\n", TENSTORRENT_DRIVER_VERSION_STRING);
 
 	tt_debugfs_root = debugfs_create_dir("tenstorrent", NULL);
+
 	tt_procfs_root = proc_mkdir("driver/tenstorrent", NULL);
+	if (!tt_procfs_root) {
+		err = -ENOMEM;
+		goto fail_procfs;
+	}
 
 	err = init_char_driver(max_devices);
-	if (err == 0)
-		err = tenstorrent_pci_register_driver();
+	if (err != 0)
+		goto fail_char_driver;
+
+	err = tenstorrent_pci_register_driver();
+	if (err != 0)
+		goto fail_pci_register;
+
+	return 0;
+
+fail_pci_register:
+	cleanup_char_driver();
+fail_char_driver:
+	proc_remove(tt_procfs_root);
+fail_procfs:
+	debugfs_remove(tt_debugfs_root);
 
 	return err;
 }

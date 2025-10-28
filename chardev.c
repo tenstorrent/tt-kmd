@@ -101,7 +101,8 @@ int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 	dev_set_name(&tt_dev->dev, TENSTORRENT "/%d", tt_dev->ordinal);
 
 	snprintf(name, sizeof(name), "%d", tt_dev->ordinal);
-	tt_dev->debugfs_root = debugfs_create_dir(name, tt_debugfs_root);
+	if (tt_debugfs_root)
+		tt_dev->debugfs_root = debugfs_create_dir(name, tt_debugfs_root);
 	tt_dev->procfs_root = proc_mkdir(name, tt_procfs_root);
 	if (tt_dev->procfs_root)
 		proc_create_single_data("pids", 0444, tt_dev->procfs_root, pids_proc_show, tt_dev);

@@ -27,6 +27,7 @@ struct tenstorrent_device {
 	bool detached; // No longer valid for hardware access
 	bool needs_hw_init;
 	struct dentry *debugfs_root;
+	struct proc_dir_entry *procfs_root;
 
 	unsigned int ordinal;
 	bool dma_capable;

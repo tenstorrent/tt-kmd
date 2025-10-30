@@ -11,6 +11,7 @@
 #include <linux/list.h>
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
+#include <linux/proc_fs.h>
 
 #include "enumerate.h"
 #include "interrupt.h"
@@ -171,6 +172,19 @@ static const struct file_operations mappings_fops = {
 	.llseek  = seq_lseek,
 	.release = single_release,
 };
+
+int pids_proc_show(struct seq_file *s, void *v)
+{
+	struct tenstorrent_device *tt_dev = s->private;
+	struct chardev_private *priv;
+
+	mutex_lock(&tt_dev->chardev_mutex);
+	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd)
+		seq_printf(s, "%d\n", priv->pid);
+	mutex_unlock(&tt_dev->chardev_mutex);
+
+	return 0;
+}
 
 static int tenstorrent_reboot_notifier(struct notifier_block *nb,
 				       unsigned long action, void *data) {

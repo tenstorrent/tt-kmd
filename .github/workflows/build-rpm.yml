@@ -80,7 +80,9 @@ jobs:
       - name: Configure Git safe directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Extract version from tag
+        if: inputs.MAJOR == '' && inputs.MINOR == '' && inputs.PATCH == ''
         uses: damienaicheh/extract-version-from-tag-action@v1.3.0
+        continue-on-error: true
       - run: git tag
       - name: Figure out version
         run: |

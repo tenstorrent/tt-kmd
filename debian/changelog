@@ -1,3 +1,51 @@
+tt-kmd (2.5.0) jammy; urgency=medium
+
+  [ Joel Smith ]
+  * Remove Grayskull source files
+  * Rename complete_pcie_init function
+
+  [ Chris Friedt ]
+  * makefile: force installation to support downgrades
+
+  [ Joel Smith ]
+  * Fix incorrect return code for DMA alloc ioctl
+  * Implement tracking for PCI BAR memory mappings
+  * Add initial infrastructure for debugfs
+  * Add mappings attribute for resource visibility
+  * Add test case for debugfs mappings attribute
+
+  [ Jonathan Baker ]
+  * Updated to community issue labeling v2
+
+  [ Joel Smith ]
+  * Fix use-after-free during device removal
+  * Refcount bar_mapping structs
+  * Fix NULL deref in mappings debugfs, improve output
+
+  [ June Knauth (tenstorrent) ]
+  * Create v1 RPM build
+  * Include build RPM workflow in create release
+
+  [ June Knauth (tt) ]
+  * Mark repository as safe
+  * Always build for all kernel versions and hotload module
+  * Add AlmaLinux 10 RPM build
+  * Enable EPEL on EL-based distros
+  * Build kernel module for all installed kernels on Fedora
+  * Use RPM signing key in RPM build workflows
+
+  [ Joel Smith ]
+  * Fix tools/current-version build error
+  * blackhole: Zero strided TLB registers in configure path
+  * ci: Add hardware workflow with Tenstorrent runners
+  * Makefile: fix dkms-remove to handle all installed versions
+  * README: prioritize packages over source installation
+  * Add procfs file to list PIDs with open device fds
+  * Improve error handling in module init
+  * CI: Use explicit version string for releases
+
+ -- Tenstorrent Releases <releases@tenstorrent.com>  Thu, 30 Oct 2025 21:42:44 +0000
+
 tt-kmd (2.4.1) unstable; urgency=medium
 
   * Remove Secondary Bus Reset from driver-managed reset paths

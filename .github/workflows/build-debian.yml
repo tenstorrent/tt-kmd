@@ -18,6 +18,12 @@ on:
       PATCH:
         required: false
         type: string
+      PRERELEASE:
+        required: false
+        type: string
+      VERSION_FULL:
+        required: false
+        type: string
       NUMBER_OF_COMMITS_SINCE_TAG:
         required: false
         type: string
@@ -119,11 +125,21 @@ jobs:
           fi
       # Ok this needs to get up leveled somewhere so that it can be shared across Debian and Ubuntu obviously
       - run: ls -lah
+      - name: Build full version string
+        run: |
+          # Use VERSION_FULL if provided, otherwise construct from components
+          if [[ -n "${{ inputs.VERSION_FULL }}" ]]; then
+            echo "VERSION=${{ inputs.VERSION_FULL }}" >> $GITHUB_ENV
+          elif [[ -n "${{ inputs.PRERELEASE }}" ]]; then
+            echo "VERSION=${MAJOR}.${MINOR}.${PATCH}-${{ inputs.PRERELEASE }}" >> $GITHUB_ENV
+          else
+            echo "VERSION=${MAJOR}.${MINOR}.${PATCH}" >> $GITHUB_ENV
+          fi
       - run: |
           gbp dch \
             --debian-branch ${ref_name} \
             -R \
-            -N ${MAJOR}.${MINOR}.${PATCH} \
+            -N ${VERSION} \
             --spawn-editor=never
         env:
           EMAIL: releases@tenstorrent.com

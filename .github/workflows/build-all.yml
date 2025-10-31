@@ -17,6 +17,12 @@ on:
       PATCH:
         required: false
         type: string
+      PRERELEASE:
+        required: false
+        type: string
+      VERSION_FULL:
+        required: false
+        type: string
       NUMBER_OF_COMMITS_SINCE_TAG:
         required: false
         type: string
@@ -41,6 +47,8 @@ jobs:
       MAJOR:  ${{ inputs.MAJOR }}
       MINOR:  ${{ inputs.MINOR }}
       PATCH:  ${{ inputs.PATCH }}
+      PRERELEASE:  ${{ inputs.PRERELEASE }}
+      VERSION_FULL:  ${{ inputs.VERSION_FULL }}
       NUMBER_OF_COMMITS_SINCE_TAG:  ${{ inputs.NUMBER_OF_COMMITS_SINCE_TAG }}
     secrets: inherit
   buildrpm:
@@ -53,5 +61,7 @@ jobs:
       MAJOR:  ${{ inputs.MAJOR }}
       MINOR:  ${{ inputs.MINOR }}
       PATCH:  ${{ inputs.PATCH }}
+      PRERELEASE:  ${{ inputs.PRERELEASE }}
+      VERSION_FULL:  ${{ inputs.VERSION_FULL }}
       NUMBER_OF_COMMITS_SINCE_TAG:  ${{ inputs.NUMBER_OF_COMMITS_SINCE_TAG }}
     secrets: inherit

@@ -18,6 +18,12 @@ on:
       PATCH:
         required: false
         type: string
+      PRERELEASE:
+        required: false
+        type: string
+      VERSION_FULL:
+        required: false
+        type: string
       NUMBER_OF_COMMITS_SINCE_TAG:
         required: false
         type: string
@@ -121,10 +127,19 @@ jobs:
             echo "REF=${{ github.ref_name }}" >> $GITHUB_ENV
             echo "REF=${{ github.ref_name }}"
           fi
+      - name: Build full version string
+        run: |
+          # Use VERSION_FULL if provided, otherwise construct from components
+          if [[ -n "${{ inputs.VERSION_FULL }}" ]]; then
+            echo "VERSION=${{ inputs.VERSION_FULL }}" >> $GITHUB_ENV
+          elif [[ -n "${{ inputs.PRERELEASE }}" ]]; then
+            echo "VERSION=${MAJOR}.${MINOR}.${PATCH}-${{ inputs.PRERELEASE }}" >> $GITHUB_ENV
+          else
+            echo "VERSION=${MAJOR}.${MINOR}.${PATCH}" >> $GITHUB_ENV
+          fi
       - name: Set up RPM build environment
         run: |
           mkdir -p ~/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
-          VERSION="${MAJOR}.${MINOR}.${PATCH}"
 
           # Update version in spec file
           sed -i "s/^Version:.*/Version:        ${VERSION}/" tenstorrent-dkms.spec
@@ -152,12 +167,10 @@ jobs:
             ~/rpmbuild/SOURCES/tenstorrent-dkms-${VERSION}.tar.gz
       - name: Build RPM package
         run: |
-          VERSION="${MAJOR}.${MINOR}.${PATCH}"
           rpmbuild -bb ~/rpmbuild/SPECS/tenstorrent-dkms.spec
         continue-on-error: true
       - name: Sign RPM package
         run: |
-          VERSION="${MAJOR}.${MINOR}.${PATCH}"
           # Configure RPM signing
           echo "%_signature gpg" >> ~/.rpmmacros
           echo "%_gpg_name releases@tenstorrent.com" >> ~/.rpmmacros
@@ -169,7 +182,6 @@ jobs:
         run: mkdir -p artifacts && mv ~/rpmbuild/RPMS/noarch/*.rpm artifacts/ || true
       - name: Generate changelog
         run: |
-          VERSION="${MAJOR}.${MINOR}.${PATCH}"
           cat > artifacts/changelog <<EOF
           * $(date '+%a %b %d %Y') Tenstorrent Releases <releases@tenstorrent.com> - ${VERSION}-1
           - Automated build from ref: ${REF}

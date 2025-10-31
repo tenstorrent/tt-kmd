@@ -123,7 +123,7 @@ jobs:
           gbp dch \
             --debian-branch ${{ needs.create-temp-branch.outputs.temp_branch_ref }} \
             -R \
-            -N ${{ steps.version.outputs.major }}.${{ steps.version.outputs.minor }}.${{ steps.version.outputs.patch }} \
+            -N ${{ inputs.version_string }} \
             --spawn-editor=never
       - name: Commit all version changes
         run: |
@@ -152,6 +152,8 @@ jobs:
       MAJOR: ${{ needs.versionchange.outputs.version_major }}
       MINOR: ${{ needs.versionchange.outputs.version_minor }}
       PATCH: ${{ needs.versionchange.outputs.version_patch }}
+      PRERELEASE: ${{ needs.versionchange.outputs.version_prerelease }}
+      VERSION_FULL: ${{ needs.versionchange.outputs.package_version_new }}
       NUMBER_OF_COMMITS_SINCE_TAG: ${{ needs.versionchange.outputs.number_of_commits_since_tag }}
     secrets: inherit
 

@@ -6,7 +6,7 @@ include /usr/share/dpkg/default.mk
 export DH_VERBOSE = 1
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 
-VERSION ?= $(shell dpkg-parsechangelog | sed -rne 's/^Version: ([0-9.]+).*$$/\1/p')
+VERSION ?= $(shell dpkg-parsechangelog --show-field Version)
 
 %:
 	dh $@ --with dkms

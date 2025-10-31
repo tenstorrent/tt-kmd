@@ -54,6 +54,7 @@ struct tenstorrent_get_device_info_out {
 	__u16 bus_dev_fn;	// [0:2] function, [3:7] device, [8:15] bus
 	__u16 max_dma_buf_size_log2;	// Since 1.0
 	__u16 pci_domain;		// Since 1.23
+	__u16 reserved;
 };
 
 struct tenstorrent_get_device_info {
@@ -212,10 +213,12 @@ struct tenstorrent_lock_ctl_in {
 	__u32 output_size_bytes;
 	__u32 flags;
 	__u8  index;
+	__u8  reserved[3];
 };
 
 struct tenstorrent_lock_ctl_out {
 	__u8 value;
+	__u8 reserved[3];
 };
 
 struct tenstorrent_lock_ctl {
@@ -229,6 +232,7 @@ struct tenstorrent_map_peer_bar_in {
 	__u32 peer_bar_offset;
 	__u32 peer_bar_length;
 	__u32 flags;
+	__u32 reserved;
 };
 
 struct tenstorrent_map_peer_bar_out {
@@ -288,6 +292,7 @@ struct tenstorrent_noc_tlb_config {
 
 struct tenstorrent_configure_tlb_in {
 	__u32 id;
+	__u32 reserved;
 	struct tenstorrent_noc_tlb_config config;
 };
 

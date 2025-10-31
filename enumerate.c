@@ -201,6 +201,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	struct tenstorrent_device *tt_dev = NULL;
 	int ordinal;
 	const struct tenstorrent_device_class *device_class;
+	struct tenstorrent_power_state low_power = {0};
 
 	if (!id->driver_data) {
 		dev_warn(&dev->dev, "Unsupported device\n");
@@ -278,6 +279,11 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	tenstorrent_register_device(tt_dev);
 
+	// Set initial low power state for idle device. FW ignores unknown settings,
+	// so indicating validity for all flags is safe and forward-compatible.
+	low_power.validity = TT_POWER_VALIDITY(15, 0);
+	tt_dev->dev_class->set_power_state(tt_dev, &low_power);
+
 	if (device_class->reboot) {
 		tt_dev->reboot_notifier.notifier_call = tenstorrent_reboot_notifier;
 		register_reboot_notifier(&tt_dev->reboot_notifier);
@@ -287,7 +293,6 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 		device_class->init_telemetry(tt_dev);
 
 	debugfs_create_file("mappings", 0444, tt_dev->debugfs_root, tt_dev, &mappings_fops);
-
 
 	return 0;
 }

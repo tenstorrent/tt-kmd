@@ -1,0 +1,19 @@
+name: 'check-padding'
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check-padding:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install pahole
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y dwarves
+    - name: Check for implicit padding in ioctl.h structs
+      run: test/pahole_check.sh
+

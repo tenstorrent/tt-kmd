@@ -1,6 +1,28 @@
-#! /bin/bash
+#!/bin/bash
 
 # SPDX-FileCopyrightText: © 2024 Tenstorrent Inc.
 # SPDX-License-Identifier: GPL-2.0-only
 
-sed -nE "s/^[[:space:]]*PACKAGE_VERSION[[:space:]]*=[[:space:]]*\"([^\"]+)\"/\\1/p" dkms.conf
+set -euo pipefail
+
+# Determine project root
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+MODULE_H="${PROJECT_ROOT}/module.h"
+
+if [[ ! -f "${MODULE_H}" ]]; then
+    echo "Error: module.h not found at ${MODULE_H}" >&2
+    exit 1
+fi
+
+MAJOR=$(grep -E '^\s*#define\s+TENSTORRENT_DRIVER_VERSION_MAJOR\s+' "${MODULE_H}" | awk '{print $3}')
+MINOR=$(grep -E '^\s*#define\s+TENSTORRENT_DRIVER_VERSION_MINOR\s+' "${MODULE_H}" | awk '{print $3}')
+PATCH=$(grep -E '^\s*#define\s+TENSTORRENT_DRIVER_VERSION_PATCH\s+' "${MODULE_H}" | awk '{print $3}')
+SUFFIX=$(sed -nE 's/^#define\s+TENSTORRENT_DRIVER_VERSION_SUFFIX\s+"([^"]*)".*/\1/p' "${MODULE_H}")
+
+if [[ -z "${MAJOR}" || -z "${MINOR}" || -z "${PATCH}" ]]; then
+    echo "Error: Could not parse version from module.h" >&2
+    exit 1
+fi
+
+echo "${MAJOR}.${MINOR}.${PATCH}${SUFFIX}"

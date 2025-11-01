@@ -58,8 +58,6 @@ jobs:
       version_full: ${{ steps.version.outputs.full }}
       number_of_commits_since_tag: ${{ steps.num-commits-since-tag.outputs.num_commits_since_tag }}
     steps:
-      - name: Install dependencies
-        run: sudo apt update && sudo apt install -y git-buildpackage
       - uses: actions/checkout@v4
         with:
           fetch-tags: true
@@ -118,20 +116,12 @@ jobs:
           fi
           
           echo "Version files updated successfully"
-      - name: Generate Debian/Ubuntu changelog
-        run: |
-          gbp dch \
-            --debian-branch ${{ needs.create-temp-branch.outputs.temp_branch_ref }} \
-            -R \
-            -N ${{ steps.version.outputs.major }}.${{ steps.version.outputs.minor }}.${{ steps.version.outputs.patch }} \
-            --spawn-editor=never
       - name: Commit all version changes
         run: |
           git add \
             module.h \
             dkms.conf \
-            AKMBUILD \
-            debian/changelog
+            AKMBUILD
           git commit -m "TTKMD v${{ inputs.version_string }}"
           git push
       - name: Find New Git Hash
@@ -141,18 +131,27 @@ jobs:
           echo "${git_hash_env}"
           echo "${git_hash_env}" >> "$GITHUB_OUTPUT"
 
-  # Build packages for all distributions
-  build_all_depends:
+  # Build Debian/Ubuntu package
+  build-debian:
     needs:
       - create-temp-branch
       - versionchange
-    uses: ./.github/workflows/build-all.yml
+    uses: ./.github/workflows/build-debian.yml
+    with:
+      ref: ${{ needs.create-temp-branch.outputs.temp_branch_ref }}
+    secrets: inherit
+
+  # Build RPM packages
+  build-rpm:
+    needs:
+      - create-temp-branch
+      - versionchange
+    uses: ./.github/workflows/build-rpm.yml
     with:
       ref: ${{ needs.create-temp-branch.outputs.temp_branch_ref }}
       MAJOR: ${{ needs.versionchange.outputs.version_major }}
       MINOR: ${{ needs.versionchange.outputs.version_minor }}
       PATCH: ${{ needs.versionchange.outputs.version_patch }}
-      NUMBER_OF_COMMITS_SINCE_TAG: ${{ needs.versionchange.outputs.number_of_commits_since_tag }}
     secrets: inherit
 
   # Create and push the git tag for this release
@@ -160,7 +159,8 @@ jobs:
     name: Tag the Release
     needs:
       - versionchange
-      - build_all_depends
+      - build-debian
+      - build-rpm
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -187,7 +187,8 @@ jobs:
     needs:
       - create-temp-branch
       - versionchange
-      - build_all_depends
+      - build-debian
+      - build-rpm
       - tagrelease
     runs-on: ubuntu-latest
     permissions:
@@ -204,28 +205,9 @@ jobs:
       - name: Download Artifacts
         uses: actions/download-artifact@v4
 
-      - name: Find the deb, rpm & whl files
+      - name: Find the deb & rpm files
         run: |
-          find ${GITHUB_WORKSPACE} -type f -iname \*.deb -o -iname \*.rpm -o -iname \*.whl -exec ls -lah {} \;
-          find /home/runner/work/${{ env.project_name }}/${{ env.project_name }}/ -exec ls -lah {} \;
-
-      - name: Deb file renames so they don't overlap
-        run: |
-          for x in $( \
-            find ${GITHUB_WORKSPACE} -type f -iname \*.deb | \
-            grep -v "artifacts-ubuntu" \
-          )
-          do
-            want="$( \
-              echo "${x}" | \
-              xargs dirname | \
-              tr "/" "\n" | \
-              tail -n 1 \
-              )"
-            mv -v \
-              "${x}" \
-              "$( echo "${x}" | xargs dirname )/${want}"
-          done
+          find ${GITHUB_WORKSPACE} -type f \( -iname \*.deb -o -iname \*.rpm \) -exec ls -lah {} \;
 
       - name: RPM file renames so they don't overlap
         run: |
@@ -251,9 +233,7 @@ jobs:
         with:
           tag_name: ttkmd-${{ needs.versionchange.outputs.package_version_new }}
           files: |
-            ${{ github.workspace }}/${{ env.project_name }}*/*.deb
             ${{ github.workspace }}/tenstorrent-dkms*/*.deb
-            ${{ github.workspace }}/[!artifacts-]*/*.deb
             ${{ github.workspace }}/tenstorrent-dkms*/*.rpm
             ${{ github.workspace }}/[!artifacts-]*/*.rpm
           body: ""

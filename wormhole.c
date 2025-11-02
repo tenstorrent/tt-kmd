@@ -708,8 +708,8 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev)
 	INIT_DELAYED_WORK(&wh_dev->fw_ready_work, fw_ready_work_func);
 	wh_dev->telemetry_retries = 120;	// If telemetry is not ready, defer initialization for up to 2 minutes.
 
-	wh_dev->sysfs_attr_offsets = devm_kzalloc(dev, sizeof(u64) * ARRAY_SIZE(wh_sysfs_attributes), GFP_KERNEL);
-	tt_dev->telemetry_attrs = devm_kzalloc(dev, sizeof(struct attribute *) * ARRAY_SIZE(wh_sysfs_attributes), GFP_KERNEL);
+	wh_dev->sysfs_attr_offsets = devm_kcalloc(dev, ARRAY_SIZE(wh_sysfs_attributes), sizeof(u64), GFP_KERNEL);
+	tt_dev->telemetry_attrs = devm_kcalloc(dev, ARRAY_SIZE(wh_sysfs_attributes) + 1, sizeof(struct attribute *), GFP_KERNEL);
 
 	if (!wh_dev->sysfs_attr_offsets || !tt_dev->telemetry_attrs)
 		return false;

@@ -848,9 +848,9 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	struct device *dev = &tt_dev->pdev->dev;
 	int i;
 
-	bh->hwmon_attr_addrs = devm_kzalloc(dev, sizeof(u64) * ARRAY_SIZE(bh_hwmon_attrs), GFP_KERNEL);
-	bh->sysfs_attr_addrs = devm_kzalloc(dev, sizeof(u64) * ARRAY_SIZE(bh_sysfs_attributes), GFP_KERNEL);
-	tt_dev->telemetry_attrs = devm_kzalloc(dev, sizeof(struct attribute *) * ARRAY_SIZE(bh_sysfs_attributes), GFP_KERNEL);
+	bh->hwmon_attr_addrs = devm_kcalloc(dev, ARRAY_SIZE(bh_hwmon_attrs), sizeof(u64), GFP_KERNEL);
+	bh->sysfs_attr_addrs = devm_kcalloc(dev, ARRAY_SIZE(bh_sysfs_attributes), sizeof(u64), GFP_KERNEL);
+	tt_dev->telemetry_attrs = devm_kcalloc(dev, ARRAY_SIZE(bh_sysfs_attributes) + 1, sizeof(struct attribute *), GFP_KERNEL);
 
 	if (!bh->hwmon_attr_addrs || !bh->sysfs_attr_addrs || !tt_dev->telemetry_attrs)
 		return false;

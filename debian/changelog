@@ -1,6 +1,15 @@
 tt-kmd (2.5.0) jammy; urgency=medium
 
   [ Joel Smith ]
+  * ci: retry apt-get update until lock is released
+  * ci: Bump version to x.y.(z+1)-pre after release
+  * Fix NULL pointer dereference in telemetry init
+
+ -- Tenstorrent Releases <releases@tenstorrent.com>  Mon, 03 Nov 2025 20:41:53 +0000
+
+tt-kmd (2.5.0) jammy; urgency=medium
+
+  [ Joel Smith ]
   * Remove Grayskull source files
   * Rename complete_pcie_init function
 

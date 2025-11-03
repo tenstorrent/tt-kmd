@@ -260,11 +260,70 @@ jobs:
           draft: true
           prerelease: false
 
+  # Bump version for next development cycle
+  bump-version-for-dev:
+    name: Bump version for development
+    needs:
+      - create-temp-branch
+      - versionchange
+      - generate-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.create-temp-branch.outputs.temp_branch_ref }}
+          fetch-tags: true
+          fetch-depth: 0
+      - name: Configure Git
+        run: |
+          git config --global user.email "${EMAIL}"
+          git config --global user.name "${NAME}"
+      - name: Increment PATCH version and set -pre suffix
+        run: |
+          MAJOR="${{ needs.versionchange.outputs.version_major }}"
+          MINOR="${{ needs.versionchange.outputs.version_minor }}"
+          PATCH="${{ needs.versionchange.outputs.version_patch }}"
+          
+          # Increment patch version
+          NEXT_PATCH=$((PATCH + 1))
+          NEXT_VERSION="${MAJOR}.${MINOR}.${NEXT_PATCH}-pre"
+          
+          echo "Bumping version to: ${NEXT_VERSION} for development"
+          
+          # Update dkms.conf
+          sed -i "s/PACKAGE_VERSION=\".*\"/PACKAGE_VERSION=\"${NEXT_VERSION}\"/" dkms.conf
+          
+          # Update AKMBUILD
+          sed -i "s/modver=.*/modver=${NEXT_VERSION}/" AKMBUILD
+          
+          # Update module.h with version components
+          sed -i \
+            -e "s/#define TENSTORRENT_DRIVER_VERSION_MAJOR [0-9]\{1,\}/#define TENSTORRENT_DRIVER_VERSION_MAJOR ${MAJOR}/g" \
+            -e "s/#define TENSTORRENT_DRIVER_VERSION_MINOR [0-9]\{1,\}/#define TENSTORRENT_DRIVER_VERSION_MINOR ${MINOR}/g" \
+            -e "s/#define TENSTORRENT_DRIVER_VERSION_PATCH [0-9]\{1,\}/#define TENSTORRENT_DRIVER_VERSION_PATCH ${NEXT_PATCH}/g" \
+            -e 's/#define TENSTORRENT_DRIVER_VERSION_SUFFIX ".*"/#define TENSTORRENT_DRIVER_VERSION_SUFFIX "-pre"/g' \
+            module.h
+          
+          echo "Version files updated to ${NEXT_VERSION}"
+      - name: Commit version bump
+        run: |
+          MAJOR="${{ needs.versionchange.outputs.version_major }}"
+          MINOR="${{ needs.versionchange.outputs.version_minor }}"
+          PATCH="${{ needs.versionchange.outputs.version_patch }}"
+          NEXT_PATCH=$((PATCH + 1))
+          
+          git add module.h dkms.conf AKMBUILD
+          git commit -m "Bump version to ${MAJOR}.${MINOR}.${NEXT_PATCH}-pre for development"
+          git push
+
   # Merge the temporary branch back to main and clean up
   mergeback:
     needs:
       - create-temp-branch
       - generate-release
+      - bump-version-for-dev
     runs-on: ubuntu-latest
     permissions:
       contents: write

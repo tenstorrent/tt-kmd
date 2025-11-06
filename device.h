@@ -15,6 +15,8 @@
 #include "hwmon.h"
 #include "memory.h"
 
+#define MAX_TLB_KINDS 4
+
 struct tenstorrent_device_class;
 
 struct tenstorrent_device {
@@ -46,6 +48,7 @@ struct tenstorrent_device {
 
 	DECLARE_BITMAP(tlbs, TENSTORRENT_MAX_INBOUND_TLBS);
 	atomic_t tlb_refs[TENSTORRENT_MAX_INBOUND_TLBS];	// TLB mapping refecounts
+	u32 tlb_counts[MAX_TLB_KINDS];	// Per-device TLB counts (may differ from dev_class defaults)
 
 	struct mutex iatu_mutex;
 	struct tenstorrent_outbound_iatu_region outbound_iatus[TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS];
@@ -56,7 +59,6 @@ struct tenstorrent_device {
 
 struct tlb_descriptor;
 
-#define MAX_TLB_KINDS 4
 struct tenstorrent_device_class {
 	const char *name;
 	u32 instance_size;

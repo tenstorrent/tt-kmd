@@ -2,3 +2,6 @@ tools
 test
 ttkmd_*.tar
 modprobe.d-tenstorrent.conf
+.git*
+.cache
+*.deb

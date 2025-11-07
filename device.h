@@ -45,7 +45,6 @@ struct tenstorrent_device {
 	struct list_head open_fds_list;	// List of struct chardev_private, linked through open_fds field
 
 	DECLARE_BITMAP(tlbs, TENSTORRENT_MAX_INBOUND_TLBS);
-	atomic_t tlb_refs[TENSTORRENT_MAX_INBOUND_TLBS];	// TLB mapping refecounts
 
 	struct mutex iatu_mutex;
 	struct tenstorrent_outbound_iatu_region outbound_iatus[TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS];

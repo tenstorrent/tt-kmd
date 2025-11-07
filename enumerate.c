@@ -57,7 +57,7 @@ static int mappings_seq_show(struct seq_file *s, void *v)
 
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
-		struct bar_mapping *bar_mapping;
+		struct tenstorrent_mmap_vma *mmap_vma;
 		struct dmabuf *dmabuf;
 		unsigned int bkt;
 
@@ -132,11 +132,20 @@ static int mappings_seq_show(struct seq_file *s, void *v)
 		}
 
 		// BAR mappings.
-		list_for_each_entry(bar_mapping, &priv->bar_mappings, list) {
-			seq_printf(s, "%-8d %-16s %-14s BAR%u %-2s (offset=0x%llx, size=0x%llx, refs=%d)\n", priv->pid,
-				   priv->comm, "BAR", bar_mapping->bar_index,
-				   bar_mapping->type == BAR_MAPPING_WC ? "WC" : "UC", bar_mapping->offset,
-				   bar_mapping->size, refcount_read(&bar_mapping->refs));
+		if (!mutex_trylock(&priv->vma_lock)) {
+			seq_printf(s, "%-8s %-16s %-14s\n", "", "", "...VMA list busy, skipping...");
+		} else {
+			list_for_each_entry(mmap_vma, &priv->vma_list, list) {
+				if (mmap_vma->type == TT_VMA_BAR) {
+					seq_printf(s, "%-8d %-16s %-14s BAR%u %-2s (offset=0x%llx, size=0x%llx)\n",
+						   priv->pid, priv->comm, "BAR",
+						   mmap_vma->bar.bar_index,
+						   mmap_vma->bar.map_type == BAR_MAPPING_WC ? "WC" : "UC",
+						   mmap_vma->bar.offset,
+						   mmap_vma->bar.size);
+				}
+			}
+			mutex_unlock(&priv->vma_lock);
 		}
 
 		// Individual inbound TLB window mappings.
@@ -144,11 +153,9 @@ static int mappings_seq_show(struct seq_file *s, void *v)
 			if (tt_dev->dev_class->describe_tlb &&
 			    tt_dev->dev_class->describe_tlb(tt_dev, tlb_id, &desc) == 0) {
 				seq_printf(s,
-					   "%-8d %-16s %-14s ID: %-3u -> BAR%d + 0x%lx (size=0x%lx, refs=%d)\n",
+					   "%-8d %-16s %-14s ID: %-3u -> BAR%d + 0x%lx (size=0x%lx)\n",
 					   priv->pid, priv->comm, "TLB",
-					   tlb_id, desc.bar, desc.bar_offset,
-					   desc.size,
-					   atomic_read(&tt_dev->tlb_refs[tlb_id]));
+					   tlb_id, desc.bar, desc.bar_offset, desc.size);
 			}
 		}
 

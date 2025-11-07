@@ -26,6 +26,7 @@
 #define TENSTORRENT_IOCTL_FREE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 12)
 #define TENSTORRENT_IOCTL_CONFIGURE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 13)
 #define TENSTORRENT_IOCTL_SET_NOC_CLEANUP		_IO(TENSTORRENT_IOCTL_MAGIC, 14)
+#define TENSTORRENT_IOCTL_DEV				_IO(TENSTORRENT_IOCTL_MAGIC, 15)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -334,6 +335,29 @@ struct tenstorrent_set_noc_cleanup {
 	__u32 reserved0;
 	__u64 addr;
 	__u64 data;
+};
+
+// tenstorrent_dev.flags
+#define TENSTORRENT_DEV_SIGNAL_ALL_PIDS 1
+#define TENSTORRENT_DEV_RT_SIGNAL_ALL_PIDS 2
+
+/**
+ * TENSTORRENT_IOCTL_DEV - Development/experimental ioctl
+ *
+ * Used for prototyping and testing new functionality.
+ *
+ * @argsz: Must be sizeof(struct tenstorrent_dev).
+ * @flags: Action to perform.
+ * @signal: Signal number to send (for SIGNAL_ALL_PIDS, RT_SIGNAL_ALL_PIDS).
+ * @param: For RT_SIGNAL_ALL_PIDS, the sival_int payload to send.
+ */
+struct tenstorrent_dev {
+	__u32 argsz;
+	__u32 flags;
+	__u32 signal;
+	__u32 reserved0;
+	__u64 param;
+	__u64 reserved1[2];
 };
 
 

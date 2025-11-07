@@ -16,6 +16,7 @@
 #include <linux/version.h>
 #include <linux/debugfs.h>
 #include <linux/proc_fs.h>
+#include <linux/delay.h>
 
 #include "chardev_private.h"
 #include "device.h"
@@ -184,6 +185,34 @@ static long ioctl_get_driver_info(struct chardev_private *priv,
 	return 0;
 }
 
+// Send a signal to all processes with open FDs, except the current process.
+// Returns number of processes signaled.
+static int signal_all_open_fds(struct tenstorrent_device *tt_dev, int signal, bool exclude_current)
+{
+	struct chardev_private *iter_priv;
+	struct pid *pid_struct;
+	pid_t current_pid = exclude_current ? task_tgid_vnr(current) : -1;
+	int count = 0;
+
+	mutex_lock(&tt_dev->chardev_mutex);
+	list_for_each_entry(iter_priv, &tt_dev->open_fds_list, open_fd) {
+		// Skip the process that initiated the reset
+		if (exclude_current && iter_priv->pid == current_pid)
+			continue;
+
+		pid_struct = find_get_pid(iter_priv->pid);
+		pr_info("Sending signal %d to PID %d\n", signal, iter_priv->pid);
+		if (pid_struct) {
+			kill_pid(pid_struct, signal, 1);
+			put_pid(pid_struct);
+			count++;
+		}
+	}
+	mutex_unlock(&tt_dev->chardev_mutex);
+
+	return count;
+}
+
 static long ioctl_reset_device(struct chardev_private *priv,
 			       struct tenstorrent_reset_device __user *arg)
 {
@@ -214,13 +243,38 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		ok = set_reset_marker(pdev);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
+		int stopped_count;
+		
+		// SIGSTOP to all processes with open FDs except the caller.
+		stopped_count = signal_all_open_fds(priv->device, SIGSTOP, true);
+		if (stopped_count > 0) {
+			msleep(100);
+			pr_info("Stopped %d processes before reset\n", stopped_count);
+		}
+		
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
+		int stopped_count;
+		
+		// SIGSTOP to all processes with open FDs except the caller.
+		stopped_count = signal_all_open_fds(priv->device, SIGSTOP, true);
+		if (stopped_count > 0) {
+			msleep(100);
+			pr_info("Stopped %d processes before reset\n", stopped_count);
+		}
+		
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {
 		ok = is_reset_marker_zero(pdev);
+
+		// SIGCONT to all processes with open FDs except the caller.
+		if (ok) {
+			int resumed = signal_all_open_fds(priv->device, SIGCONT, true);
+			if (resumed > 0)
+				pr_info("Resumed %d processes after reset\n", resumed);
+		}
 
 		// In the hotplug case, needs_hw_init is false and there is nothing to
 		// do here. Otherwise this was an in-place reset, so re-initialize now.
@@ -362,6 +416,92 @@ static long ioctl_set_noc_cleanup(struct chardev_private *priv,
 	return 0;
 }
 
+static long ioctl_dev(struct chardev_private *priv,
+		      struct tenstorrent_dev __user *arg)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_dev data = {0};
+	struct chardev_private *iter_priv;
+	struct pid *pid_struct;
+	pid_t current_pid = task_tgid_vnr(current);
+	int count = 0;
+
+	if (copy_from_user(&data, arg, sizeof(data)) != 0)
+		return -EFAULT;
+
+	if (data.argsz != sizeof(data))
+		return -EINVAL;
+
+	switch (data.flags) {
+	case TENSTORRENT_DEV_SIGNAL_ALL_PIDS:
+		if (data.signal == 0 || data.signal >= _NSIG)
+			return -EINVAL;
+
+		mutex_lock(&tt_dev->chardev_mutex);
+		list_for_each_entry(iter_priv, &tt_dev->open_fds_list, open_fd) {
+			// Skip the process that initiated this ioctl
+			if (iter_priv->pid == current_pid)
+				continue;
+
+			pid_struct = find_get_pid(iter_priv->pid);
+			if (pid_struct) {
+				kill_pid(pid_struct, data.signal, 1);
+				put_pid(pid_struct);
+				count++;
+			}
+		}
+		mutex_unlock(&tt_dev->chardev_mutex);
+
+		pr_info("Sent signal %d to %d processes (excluded caller PID %d)\n",
+			data.signal, count, current_pid);
+		break;
+
+	case TENSTORRENT_DEV_RT_SIGNAL_ALL_PIDS:
+		if (data.signal == 0 || data.signal >= _NSIG)
+			return -EINVAL;
+
+		mutex_lock(&tt_dev->chardev_mutex);
+		list_for_each_entry(iter_priv, &tt_dev->open_fds_list, open_fd) {
+			struct kernel_siginfo info;
+			struct task_struct *task;
+			
+			// Skip the process that initiated this ioctl
+			if (iter_priv->pid == current_pid)
+				continue;
+
+			pid_struct = find_get_pid(iter_priv->pid);
+			if (pid_struct) {
+				// Get task_struct from pid
+				rcu_read_lock();
+				task = pid_task(pid_struct, PIDTYPE_PID);
+				if (task) {
+					// Prepare siginfo for real-time signal
+					clear_siginfo(&info);
+					info.si_signo = data.signal;
+					info.si_errno = 0;
+					info.si_code = SI_QUEUE;  // Sent by sigqueue()
+					info.si_int = (int)data.param;  // Payload
+
+					send_sig_info(data.signal, &info, task);
+					count++;
+				}
+				rcu_read_unlock();
+				put_pid(pid_struct);
+			}
+		}
+		mutex_unlock(&tt_dev->chardev_mutex);
+
+		pr_info("Sent RT signal %d (payload=%lld) to %d processes (excluded caller PID %d)\n",
+			data.signal, data.param, count, current_pid);
+		break;
+
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	long ret = -EINVAL;
@@ -428,6 +568,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_SET_NOC_CLEANUP:
 			ret = ioctl_set_noc_cleanup(priv, (struct tenstorrent_set_noc_cleanup __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_DEV:
+			ret = ioctl_dev(priv, (struct tenstorrent_dev __user *)arg);
 			break;
 
 		default:

@@ -26,6 +26,12 @@ struct bar_mapping {
 	struct vm_area_struct *vma;
 };
 
+struct tlb_mapping {
+	struct list_head list;
+	int id;
+	struct vm_area_struct *vma;
+};
+
 #define DMABUF_HASHTABLE_BITS 4
 struct dmabuf {
 	struct hlist_node hash_chain;
@@ -46,6 +52,7 @@ struct chardev_private {
 	struct list_head pinnings;	// struct pinned_page_range.list
 	struct list_head peer_mappings; // struct peer_resource_mapping.list
 	struct list_head bar_mappings;	// struct bar_mapping.list
+	struct list_head tlb_mappings;	// struct tlb_mapping.list
 
 	pid_t pid;
 	char comm[TASK_COMM_LEN];

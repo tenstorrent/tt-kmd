@@ -572,6 +572,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	INIT_LIST_HEAD(&private_data->pinnings);
 	INIT_LIST_HEAD(&private_data->peer_mappings);
 	INIT_LIST_HEAD(&private_data->bar_mappings);
+	INIT_LIST_HEAD(&private_data->tlb_mappings);
 
 	kref_get(&tt_dev->kref);
 	private_data->device = tt_dev;

@@ -1146,8 +1146,14 @@ static int map_pci_bar(struct chardev_private *priv, struct vm_area_struct *vma,
 static void tlb_vma_open(struct vm_area_struct *vma)
 {
 	struct chardev_private *priv;
+	struct tlb_mapping *old_mapping;
+	struct tlb_mapping *new_mapping;
 	struct tenstorrent_device *tt_dev;
 	unsigned int id;
+
+	old_mapping = vma->vm_private_data;
+	if (!old_mapping)
+		return;
 
 	if (!vma->vm_file)
 		return;
@@ -1156,12 +1162,27 @@ static void tlb_vma_open(struct vm_area_struct *vma)
 	if (!priv)
 		return;
 
-	tt_dev = priv->device;
-	id = (int)((uintptr_t)vma->vm_private_data);
-
-	if (id >= TENSTORRENT_MAX_INBOUND_TLBS)
+	id = old_mapping->id;
+	if (id < 0 || id >= TENSTORRENT_MAX_INBOUND_TLBS)
 		return;
 
+	new_mapping = kzalloc(sizeof(*new_mapping), GFP_KERNEL);
+	if (!new_mapping) {
+		pr_err("Failed to allocate tlb_mapping on fork()\n");
+		zap_vma_ptes(vma, vma->vm_start, vma->vm_end - vma->vm_start);
+		vma->vm_private_data = NULL;
+		return;
+	}
+
+	new_mapping->id = old_mapping->id;
+	new_mapping->vma = vma;
+	vma->vm_private_data = new_mapping;
+
+	mutex_lock(&priv->mutex);
+	list_add(&new_mapping->list, &priv->tlb_mappings);
+	mutex_unlock(&priv->mutex);
+
+	tt_dev = priv->device;
 	atomic_inc(&tt_dev->tlb_refs[id]);
 }
 
@@ -1169,7 +1190,8 @@ static void tlb_vma_close(struct vm_area_struct *vma)
 {
 	struct chardev_private *priv;
 	struct tenstorrent_device *tt_dev;
-	unsigned int id;
+	struct tlb_mapping *mapping;
+	int id;
 
 	if (!vma->vm_file)
 		return;
@@ -1179,13 +1201,22 @@ static void tlb_vma_close(struct vm_area_struct *vma)
 		return;
 
 	tt_dev = priv->device;
-	id = (int)((uintptr_t)vma->vm_private_data);
+	mapping = vma->vm_private_data;
+	if (!mapping)
+		return;
 
-	if (id >= TENSTORRENT_MAX_INBOUND_TLBS)
+	id = mapping->id;
+	if (id < 0 || id >= TENSTORRENT_MAX_INBOUND_TLBS)
 		return;
 
 	if (atomic_dec_if_positive(&tt_dev->tlb_refs[id]) < 0)
-		pr_err("vma_close: negative refcount\n");	// Should never happen
+		pr_err("tlb_vma_close: negative refcount\n");	// Should never happen
+
+	mutex_lock(&priv->mutex);
+	list_del(&mapping->list);
+	mutex_unlock(&priv->mutex);
+
+	kfree(mapping);
 }
 
 static int tlb_vma_may_split(struct vm_area_struct *vma, unsigned long address)
@@ -1208,6 +1239,7 @@ static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *v
 {
 	struct tenstorrent_device *tt_dev = priv->device;
 	struct tlb_descriptor tlb_desc = {0};
+	struct tlb_mapping *mapping;
 	unsigned long size = vma->vm_end - vma->vm_start;
 	unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
 	unsigned long pfn;
@@ -1250,22 +1282,35 @@ static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *v
 	mutex_lock(&priv->mutex);
 
 	if (!test_bit(id, priv->tlbs)) {
+		// TLB is not owned by this fd, bail out.
 		ret = -EPERM;
+		goto unlock;
+	}
+
+	mapping = kzalloc(sizeof(*mapping), GFP_KERNEL);
+	if (!mapping) {
+		ret = -ENOMEM;
 		goto unlock;
 	}
 
 	bar_start = pci_resource_start(tt_dev->pdev, tlb_desc.bar);
 	pfn = (bar_start + tlb_desc.bar_offset) >> PAGE_SHIFT;
 
-	vma->vm_ops = &tlb_vm_ops;
-	vma->vm_private_data = (void*)(uintptr_t)id;
-
 	if (io_remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot)) {
+		kfree(mapping);
 		ret = -EAGAIN;
 		goto unlock;
 	}
 
-	tlb_vma_open(vma);
+	vma->vm_ops = &tlb_vm_ops;
+	vma->vm_private_data = mapping;
+
+	atomic_inc(&tt_dev->tlb_refs[id]);
+
+	// Track the mapping.
+	mapping->id = id;
+	mapping->vma = vma;
+	list_add(&mapping->list, &priv->tlb_mappings);
 
 unlock:
 	mutex_unlock(&priv->mutex);

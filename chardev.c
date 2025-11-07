@@ -191,6 +191,7 @@ static long ioctl_get_driver_info(struct chardev_private *priv,
 static long ioctl_reset_device(struct chardev_private *priv,
 			       struct tenstorrent_reset_device __user *arg)
 {
+	struct tenstorrent_device *tt_dev = priv->device;
 	struct pci_dev *pdev = priv->device->pdev;
 	bool ok;
 	u32 bytes_to_copy;
@@ -211,20 +212,25 @@ static long ioctl_reset_device(struct chardev_private *priv,
 			ok = false;
 		}
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK) {
+		tenstorrent_vma_zap(tt_dev);
 		ok = pcie_hot_reset_and_restore_state(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_CONFIG_WRITE) {
 		atomic_long_inc(&priv->device->reset_gen);
+		tenstorrent_vma_zap(tt_dev);
 		ok = pcie_timer_interrupt(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_USER_RESET) {
 		atomic_long_inc(&priv->device->reset_gen);
+		tenstorrent_vma_zap(tt_dev);
 		ok = set_reset_marker(pdev);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
 		atomic_long_inc(&priv->device->reset_gen);
+		tenstorrent_vma_zap(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
 		atomic_long_inc(&priv->device->reset_gen);
+		tenstorrent_vma_zap(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {
@@ -572,8 +578,31 @@ out:
 static int tt_cdev_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct chardev_private *priv = file->private_data;
+	struct tenstorrent_device *tt_dev = priv->device;
+	int ret;
 
-	return tenstorrent_mmap(priv, vma);
+	// Use trylock to avoid ABBA deadlock: mmap_lock is held by the kernel, and
+	// tenstorrent_vma_zap() needs mmap_lock while holding reset_rwsem. If reset
+	// is in progress, this fd will be stale after reset anyway.
+	if (!down_read_trylock(&tt_dev->reset_rwsem))
+		return -ENODEV;
+
+	if (tt_dev->detached) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	// File descriptor opened before reset is permanently invalid.
+	if (atomic_long_read(&tt_dev->reset_gen) != priv->open_reset_gen) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	ret = tenstorrent_mmap(priv, vma);
+
+out:
+	up_read(&tt_dev->reset_rwsem);
+	return ret;
 }
 
 static struct tenstorrent_device *inode_to_tt_dev(struct inode *inode)
@@ -612,7 +641,8 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	hash_init(private_data->dmabufs);
 	INIT_LIST_HEAD(&private_data->pinnings);
 	INIT_LIST_HEAD(&private_data->peer_mappings);
-	INIT_LIST_HEAD(&private_data->bar_mappings);
+	INIT_LIST_HEAD(&private_data->vma_list);
+	mutex_init(&private_data->vma_lock);
 
 	kref_get(&tt_dev->kref);
 	private_data->device = tt_dev;

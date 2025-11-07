@@ -12,6 +12,7 @@
 #include <linux/iommu.h>
 #include <linux/file.h>
 #include <linux/vmalloc.h>
+#include <linux/sched/mm.h>
 
 #include "chardev_private.h"
 #include "device.h"
@@ -952,6 +953,7 @@ long ioctl_allocate_tlb(struct chardev_private *priv,
 long ioctl_free_tlb(struct chardev_private *priv, struct tenstorrent_free_tlb __user *arg) {
 	struct tenstorrent_device *tt_dev = priv->device;
 	struct tenstorrent_free_tlb_in in = {0};
+	struct tenstorrent_mmap_vma *mmap_vma;
 	int ret;
 
 	if (copy_from_user(&in, &arg->in, sizeof(in)))
@@ -967,10 +969,16 @@ long ioctl_free_tlb(struct chardev_private *priv, struct tenstorrent_free_tlb __
 		goto unlock;
 	}
 
-	if (atomic_read(&tt_dev->tlb_refs[in.id]) > 0) {
-		ret = -EBUSY;
-		goto unlock;
+	mutex_lock(&priv->vma_lock);
+	list_for_each_entry(mmap_vma, &priv->vma_list, list) {
+		if (mmap_vma->type == TT_VMA_TLB && mmap_vma->tlb.id == in.id) {
+			// Found a VMA using this TLB.
+			mutex_unlock(&priv->vma_lock);
+			ret = -EBUSY;
+			goto unlock;
+		}
 	}
+	mutex_unlock(&priv->vma_lock);
 
 	clear_bit(in.id, priv->tlbs);
 	ret = tenstorrent_device_free_tlb(tt_dev, in.id);
@@ -1039,115 +1047,113 @@ static struct dmabuf *vma_dmabuf_target(struct chardev_private *priv,
 		return NULL;
 }
 
-static void bar_vma_open(struct vm_area_struct *vma)
+static void tenstorrent_vma_open(struct vm_area_struct *vma)
 {
-	struct bar_mapping *mapping = vma->vm_private_data;
+	struct chardev_private *priv;
+	struct tenstorrent_mmap_vma *old_mmap_vma;
+	struct tenstorrent_mmap_vma *new_mmap_vma;
 
-	if (mapping)
-		refcount_inc(&mapping->refs);
-}
-
-static void bar_vma_close(struct vm_area_struct *vma)
-{
-	struct chardev_private *priv = vma->vm_file->private_data;
-	struct bar_mapping *mapping = vma->vm_private_data;
-
-	if (!mapping)
+	old_mmap_vma = vma->vm_private_data;
+	if (!old_mmap_vma)
 		return;
 
-	if (refcount_dec_and_test(&mapping->refs)) {
-		mutex_lock(&priv->mutex);
-		list_del(&mapping->list);
-		mutex_unlock(&priv->mutex);
+	if (!vma->vm_file)
+		return;
 
-		kfree(mapping);
+	priv = vma->vm_file->private_data;
+	if (!priv)
+		return;
+
+	new_mmap_vma = kzalloc(sizeof(*new_mmap_vma), GFP_KERNEL);
+	if (!new_mmap_vma) {
+		pr_err_ratelimited("Failed to allocate mmap_vma on fork()\n");
+		zap_vma_ptes(vma, vma->vm_start, vma->vm_end - vma->vm_start);
+		vma->vm_private_data = NULL;
+		return;
 	}
+
+	new_mmap_vma->vma = vma;
+	new_mmap_vma->type = old_mmap_vma->type;
+	new_mmap_vma->cache_mode = old_mmap_vma->cache_mode;
+
+	if (old_mmap_vma->type == TT_VMA_BAR) {
+		new_mmap_vma->bar = old_mmap_vma->bar;
+	} else { // TT_VMA_TLB
+		new_mmap_vma->tlb = old_mmap_vma->tlb;
+	}
+
+	mutex_lock(&priv->vma_lock);
+	list_add(&new_mmap_vma->list, &priv->vma_list);
+	mutex_unlock(&priv->vma_lock);
+
+	vma->vm_private_data = new_mmap_vma;
 }
 
-static const struct vm_operations_struct bar_vm_ops = {
-	.open = bar_vma_open,
-	.close = bar_vma_close,
+static void tenstorrent_vma_close(struct vm_area_struct *vma)
+{
+	struct chardev_private *priv;
+	struct tenstorrent_mmap_vma *mmap_vma;
+
+	if (!vma->vm_file)
+		return;
+
+	priv = vma->vm_file->private_data;
+	if (!priv)
+		return;
+
+	mmap_vma = vma->vm_private_data;
+	if (!mmap_vma)
+		return;
+
+	// Safe even if tenstorrent_vma_zap() already called list_del_init().
+	mutex_lock(&priv->vma_lock);
+	list_del(&mmap_vma->list);
+	mutex_unlock(&priv->vma_lock);
+
+	kfree(mmap_vma);
+}
+
+static const struct vm_operations_struct bar_vma_ops = {
+	.open = tenstorrent_vma_open,
+	.close = tenstorrent_vma_close,
 };
 
 static int map_pci_bar(struct chardev_private *priv, struct vm_area_struct *vma,
-		       unsigned int bar, enum bar_mapping_type type)
+		       unsigned int bar, enum bar_mapping_type cache_mode)
 {
 	struct pci_dev *pdev = priv->device->pdev;
 	resource_size_t bar_start = pci_resource_start(pdev, bar);
 	resource_size_t bar_len = pci_resource_len(pdev, bar);
-	struct bar_mapping *mapping;
+	struct tenstorrent_mmap_vma *mmap_vma;
 	int ret;
 
-	mapping = kmalloc(sizeof(*mapping), GFP_KERNEL);
-	if (!mapping)
+	mmap_vma = kzalloc(sizeof(*mmap_vma), GFP_KERNEL);
+	if (!mmap_vma)
 		return -ENOMEM;
 
 	ret = vm_iomap_memory(vma, bar_start, bar_len);
 	if (ret) {
-		kfree(mapping);
+		kfree(mmap_vma);
 		return ret;
 	}
 
-	mapping->bar_index = bar;
-	mapping->offset = (u64)vma->vm_pgoff << PAGE_SHIFT;
-	mapping->size = vma->vm_end - vma->vm_start;
-	mapping->type = type;
-	refcount_set(&mapping->refs, 1);
+	mmap_vma->vma = vma;
+	mmap_vma->type = TT_VMA_BAR;
+	mmap_vma->cache_mode = cache_mode;
+	mmap_vma->bar.bar_index = bar;
+	mmap_vma->bar.offset = (u64)vma->vm_pgoff << PAGE_SHIFT;
+	mmap_vma->bar.size = vma->vm_end - vma->vm_start;
 
-	mutex_lock(&priv->mutex);
-	list_add(&mapping->list, &priv->bar_mappings);
-	mutex_unlock(&priv->mutex);
+	mutex_lock(&priv->vma_lock);
+	list_add(&mmap_vma->list, &priv->vma_list);
+	mutex_unlock(&priv->vma_lock);
 
-	vma->vm_ops = &bar_vm_ops;
-	vma->vm_private_data = mapping;
+	vma->vm_ops = &bar_vma_ops;
+	vma->vm_private_data = mmap_vma;
 
 	return 0;
 }
 
-static void tlb_vma_open(struct vm_area_struct *vma)
-{
-	struct chardev_private *priv;
-	struct tenstorrent_device *tt_dev;
-	unsigned int id;
-
-	if (!vma->vm_file)
-		return;
-
-	priv = vma->vm_file->private_data;
-	if (!priv)
-		return;
-
-	tt_dev = priv->device;
-	id = (int)((uintptr_t)vma->vm_private_data);
-
-	if (id >= TENSTORRENT_MAX_INBOUND_TLBS)
-		return;
-
-	atomic_inc(&tt_dev->tlb_refs[id]);
-}
-
-static void tlb_vma_close(struct vm_area_struct *vma)
-{
-	struct chardev_private *priv;
-	struct tenstorrent_device *tt_dev;
-	unsigned int id;
-
-	if (!vma->vm_file)
-		return;
-
-	priv = vma->vm_file->private_data;
-	if (!priv)
-		return;
-
-	tt_dev = priv->device;
-	id = (int)((uintptr_t)vma->vm_private_data);
-
-	if (id >= TENSTORRENT_MAX_INBOUND_TLBS)
-		return;
-
-	if (atomic_dec_if_positive(&tt_dev->tlb_refs[id]) < 0)
-		pr_err("vma_close: negative refcount\n");	// Should never happen
-}
 
 static int tlb_vma_may_split(struct vm_area_struct *vma, unsigned long address)
 {
@@ -1156,8 +1162,8 @@ static int tlb_vma_may_split(struct vm_area_struct *vma, unsigned long address)
 }
 
 static const struct vm_operations_struct tlb_vm_ops = {
-	.open = tlb_vma_open,
-	.close = tlb_vma_close,
+	.open = tenstorrent_vma_open,
+	.close = tenstorrent_vma_close,
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
 	.may_split = tlb_vma_may_split,
 #else
@@ -1165,10 +1171,12 @@ static const struct vm_operations_struct tlb_vm_ops = {
 #endif
 };
 
-static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *vma)
+static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *vma,
+			  enum bar_mapping_type cache_mode)
 {
 	struct tenstorrent_device *tt_dev = priv->device;
 	struct tlb_descriptor tlb_desc = {0};
+	struct tenstorrent_mmap_vma *mmap_vma;
 	unsigned long size = vma->vm_end - vma->vm_start;
 	unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
 	unsigned long pfn;
@@ -1215,23 +1223,39 @@ static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *v
 		goto unlock;
 	}
 
+
 	if (tlb_desc.bar_offset + size > pci_resource_len(tt_dev->pdev, tlb_desc.bar)) {
 		ret = -ENXIO;
+		goto unlock;
+	}
+
+	mmap_vma = kzalloc(sizeof(*mmap_vma), GFP_KERNEL);
+	if (!mmap_vma) {
+		ret = -ENOMEM;
 		goto unlock;
 	}
 
 	bar_start = pci_resource_start(tt_dev->pdev, tlb_desc.bar);
 	pfn = (bar_start + tlb_desc.bar_offset) >> PAGE_SHIFT;
 
-	vma->vm_ops = &tlb_vm_ops;
-	vma->vm_private_data = (void*)(uintptr_t)id;
-
 	if (io_remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot)) {
+		kfree(mmap_vma);
 		ret = -EAGAIN;
 		goto unlock;
 	}
 
-	tlb_vma_open(vma);
+	vma->vm_ops = &tlb_vm_ops;
+	vma->vm_private_data = mmap_vma;
+
+	// Track the mapping.
+	mmap_vma->vma = vma;
+	mmap_vma->type = TT_VMA_TLB;
+	mmap_vma->cache_mode = cache_mode;
+	mmap_vma->tlb.id = id;
+
+	mutex_lock(&priv->vma_lock);
+	list_add(&mmap_vma->list, &priv->vma_list);
+	mutex_unlock(&priv->vma_lock);
 
 unlock:
 	mutex_unlock(&priv->mutex);
@@ -1275,11 +1299,11 @@ int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_TLB_UC, MMAP_RESOURCE_SIZE)) {
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
-		return map_tlb_window(priv, vma);
+		return map_tlb_window(priv, vma, BAR_MAPPING_UC);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_TLB_WC, MMAP_RESOURCE_SIZE)) {
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-		return map_tlb_window(priv, vma);
+		return map_tlb_window(priv, vma, BAR_MAPPING_WC);
 
 	} else {
 		struct dmabuf *dmabuf = vma_dmabuf_target(priv, vma);
@@ -1321,4 +1345,77 @@ void tenstorrent_memory_cleanup(struct chardev_private *priv)
 	}
 
 	mutex_unlock(&priv->mutex);
+}
+
+// Compatibility for kernels < 5.8 (mmap_sem vs mmap_lock)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+#define mmap_read_lock(mm)       down_read(&(mm)->mmap_sem)
+#define mmap_read_unlock(mm)     up_read(&(mm)->mmap_sem)
+#endif
+// Zap all TLB and BAR mappings for this device, to prevent userspace from
+// accessing device memory after the device has been reset.
+void tenstorrent_vma_zap(struct tenstorrent_device *tt_dev)
+{
+	struct chardev_private *priv;
+
+	mutex_lock(&tt_dev->chardev_mutex);
+	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
+		// Lock ordering: mmap_lock must be acquired before vma_lock. This is
+		// established by the kernel calling our vma_open, vma_close callbacks
+		// with mmap_lock held (fork and munmap, respectively). If we violate
+		// this (lock vma_lock, then mmap_lock), we risk deadlock: A (munmap)
+		// holds mmap_lock, wants vma_lock; B (reset) holds vma_lock, wants
+		// mmap_lock. Pattern from VFIO's vfio_pci_zap_and_vma_lock() prior to
+		// aac6db75a9fc2c7a6f73e152df8f15101dda38e6.
+		while (1) {
+			struct tenstorrent_mmap_vma *mmap_vma, *tmp;
+			struct mm_struct *mm = NULL;
+
+			mutex_lock(&priv->vma_lock);
+
+			// Find a valid mm_struct. Skip VMAs whose mm is being destroyed.
+			while (!list_empty(&priv->vma_list)) {
+				mmap_vma = list_first_entry(&priv->vma_list, struct tenstorrent_mmap_vma, list);
+				mm = mmap_vma->vma->vm_mm;
+
+				if (mmget_not_zero(mm))
+					break;	// We have a valid mm_struct.
+
+				// Process exiting - kernel will call the VMA close callback.
+				// Detach from list; vma_close will free the structure.
+				list_del_init(&mmap_vma->list);
+				mm = NULL;
+			}
+
+			if (!mm) {
+				// No more VMAs to zap for this fd.
+				mutex_unlock(&priv->vma_lock);
+				break;
+			}
+
+			// We have a valid mm with a reference. Drop vma_lock before
+			// acquiring mmap_lock to maintain lock ordering.
+			mutex_unlock(&priv->vma_lock);
+			mmap_read_lock(mm);
+			mutex_lock(&priv->vma_lock);
+
+			// Zap all VMAs belonging to this mm_struct.
+			list_for_each_entry_safe(mmap_vma, tmp, &priv->vma_list, list) {
+				struct vm_area_struct *vma = mmap_vma->vma;
+
+				if (vma->vm_mm != mm)
+					continue;	// Skip VMAs from other processes.
+
+				// Detach from list but keep structure alive for vma_close.
+				list_del_init(&mmap_vma->list);
+
+				zap_vma_ptes(vma, vma->vm_start, vma->vm_end - vma->vm_start);
+			}
+
+			mutex_unlock(&priv->vma_lock);
+			mmap_read_unlock(mm);
+			mmput(mm);
+		}
+	}
+	mutex_unlock(&tt_dev->chardev_mutex);
 }

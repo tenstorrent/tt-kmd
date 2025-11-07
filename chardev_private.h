@@ -23,7 +23,7 @@ struct bar_mapping {
 	u64 size;
 	unsigned int bar_index;
 	enum bar_mapping_type type;
-	refcount_t refs;
+	struct vm_area_struct *vma;
 };
 
 #define DMABUF_HASHTABLE_BITS 4

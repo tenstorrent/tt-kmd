@@ -1041,27 +1041,66 @@ static struct dmabuf *vma_dmabuf_target(struct chardev_private *priv,
 
 static void bar_vma_open(struct vm_area_struct *vma)
 {
-	struct bar_mapping *mapping = vma->vm_private_data;
+	struct chardev_private *priv;
+	struct bar_mapping *old_mapping;
+	struct bar_mapping *new_mapping;
 
-	if (mapping)
-		refcount_inc(&mapping->refs);
+	old_mapping = vma->vm_private_data;
+	if (!old_mapping)
+		return;
+
+	if (!vma->vm_file)
+		return;
+
+	priv = vma->vm_file->private_data;
+	if (!priv)
+		return;
+
+	new_mapping = kzalloc(sizeof(*new_mapping), GFP_KERNEL);
+	if (!new_mapping) {
+		pr_err("Failed to allocate bar_mapping on fork()\n");
+		zap_vma_ptes(vma, vma->vm_start, vma->vm_end - vma->vm_start);
+		vma->vm_private_data = NULL;
+		return;
+	}
+
+	// Copy all fields except list linkage.
+	new_mapping->bar_index = old_mapping->bar_index;
+	new_mapping->offset = old_mapping->offset;
+	new_mapping->size = old_mapping->size;
+	new_mapping->type = old_mapping->type;
+
+	// Track the VMA.
+	new_mapping->vma = vma;
+
+	mutex_lock(&priv->mutex);
+	list_add(&new_mapping->list, &priv->bar_mappings);
+	mutex_unlock(&priv->mutex);
+
+	vma->vm_private_data = new_mapping;
 }
 
 static void bar_vma_close(struct vm_area_struct *vma)
 {
-	struct chardev_private *priv = vma->vm_file->private_data;
-	struct bar_mapping *mapping = vma->vm_private_data;
+	struct chardev_private *priv;
+	struct bar_mapping *mapping;
 
+	if (!vma->vm_file)
+		return;
+
+	priv = vma->vm_file->private_data;
+	if (!priv)
+		return;
+
+	mapping = vma->vm_private_data;
 	if (!mapping)
 		return;
 
-	if (refcount_dec_and_test(&mapping->refs)) {
-		mutex_lock(&priv->mutex);
-		list_del(&mapping->list);
-		mutex_unlock(&priv->mutex);
+	mutex_lock(&priv->mutex);
+	list_del(&mapping->list);
+	mutex_unlock(&priv->mutex);
 
-		kfree(mapping);
-	}
+	kfree(mapping);
 }
 
 static const struct vm_operations_struct bar_vm_ops = {
@@ -1092,7 +1131,7 @@ static int map_pci_bar(struct chardev_private *priv, struct vm_area_struct *vma,
 	mapping->offset = (u64)vma->vm_pgoff << PAGE_SHIFT;
 	mapping->size = vma->vm_end - vma->vm_start;
 	mapping->type = type;
-	refcount_set(&mapping->refs, 1);
+	mapping->vma = vma;
 
 	mutex_lock(&priv->mutex);
 	list_add(&mapping->list, &priv->bar_mappings);

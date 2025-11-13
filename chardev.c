@@ -362,6 +362,93 @@ static long ioctl_set_noc_cleanup(struct chardev_private *priv,
 	return 0;
 }
 
+static int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_dev)
+{
+	struct tenstorrent_power_state power_state = { 0 };
+	struct chardev_private *priv;
+	u8 max_settings_count = 0;
+
+	mutex_lock(&tt_dev->chardev_mutex);
+
+	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
+		u8 flags_count;
+		u8 settings_count;
+		u16 unspecified_flags_mask;
+		u16 effective_flags;
+		int i;
+
+		mutex_lock(&priv->mutex);
+
+		// Extract validity counts from the packed validity field.
+		// Bits 0-3: number of valid flags (0-15)
+		// Bits 4-7: number of valid settings (0-14)
+		flags_count = (priv->power_state.validity >> 0) & 0xF;
+		settings_count = (priv->power_state.validity >> 4) & 0xF;
+		max_settings_count = max(max_settings_count, settings_count);
+
+		// Create a mask of flags the FD didn't specify (bits past flags_count).
+		// These unspecified flags default to ON for backward compatibility.
+		// Bit 15 is reserved per firmware spec, so mask to bits 0-14 (0x7FFF).
+		if (flags_count == 0) {
+			unspecified_flags_mask = 0x7FFF;  // All flags unspecified.
+		} else {
+			unspecified_flags_mask = ~((1U << flags_count) - 1) & 0x7FFF;
+		}
+
+		// Apply the aggregation formula: OR this FD's explicit power_flags
+		// with the unspecified flags (defaulted to ON). This ensures older
+		// clients that don't know about newer power flags won't turn them off.
+		effective_flags = priv->power_state.power_flags | unspecified_flags_mask;
+
+		// OR this FD's effective flags into the aggregate.
+		power_state.power_flags |= effective_flags;
+
+		// Aggregate power_settings: for each setting index, take the maximum
+		// value across all FDs that have marked that setting as valid.
+		settings_count = min_t(u8, settings_count, ARRAY_SIZE(power_state.power_settings));
+		for (i = 0; i < settings_count; i++) {
+			power_state.power_settings[i] = max(power_state.power_settings[i], priv->power_state.power_settings[i]);
+		}
+
+		mutex_unlock(&priv->mutex);
+	}
+
+	// Always send maximum validity (15 flags, max_settings_count settings) to
+	// firmware. This ensures FW applies all bits of the aggregated power_flags,
+	// regardless of what validity individual FDs specified.
+	power_state.validity = TT_POWER_VALIDITY(15, max_settings_count);
+
+	mutex_unlock(&tt_dev->chardev_mutex);
+
+	return tt_dev->dev_class->set_power_state(tt_dev, &power_state);
+}
+
+static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorrent_power_state __user *arg)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_power_state data = {0};
+
+	if (copy_from_user(&data, arg, sizeof(data)) != 0)
+		return -EFAULT;
+
+	if (data.argsz != sizeof(data))
+		return -EINVAL;
+
+	if (data.flags != 0 || data.reserved0 != 0)
+		return -EINVAL;
+
+	// validity encodes power_flags count in bits 0-3 (max 0xF=15) and
+	// power_settings count in bits 4-7 (max 0xE=14), see ioctl.h for detail.
+	if (data.validity > TT_POWER_VALIDITY(15, 14))
+		return -EINVAL;
+
+	mutex_lock(&priv->mutex);
+	priv->power_state = data;
+	mutex_unlock(&priv->mutex);
+
+	return tenstorrent_set_aggregated_power_state(tt_dev);
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	long ret = -EINVAL;
@@ -428,6 +515,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_SET_NOC_CLEANUP:
 			ret = ioctl_set_noc_cleanup(priv, (struct tenstorrent_set_noc_cleanup __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_SET_POWER_STATE:
+			ret = ioctl_set_power_state(priv, (struct tenstorrent_power_state __user *)arg);
 			break;
 
 		default:

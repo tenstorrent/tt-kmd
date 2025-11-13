@@ -70,6 +70,7 @@
 #define ARC_MSG_TYPE_ASIC_STATE3 0xA3
 #define ARC_MSG_TYPE_SET_WDT_TIMEOUT 0xC1
 #define ARC_MSG_TYPE_TRIGGER_RESET 0x56
+#define ARC_MSG_TYPE_POWER_SETTING 0x21
 #define ARC_MSG_TYPE_TEST 0x90
 #define ARC_BOOT_STATUS RESET_SCRATCH(2)
 #define ARC_BOOT_STATUS_READY_FOR_MSG 0x1
@@ -1031,6 +1032,23 @@ static void blackhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 
 	noc_write32(bh, x, y, addr, data, noc);
 }
 
+static int blackhole_set_power_state(struct tenstorrent_device *tt_dev, struct tenstorrent_power_state *power_state)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	struct arc_msg msg = {0};
+	bool ok;
+
+	msg.header = ARC_MSG_TYPE_POWER_SETTING | (power_state->validity << 8) | (power_state->power_flags << 16);
+	BUILD_BUG_ON(sizeof(power_state->power_settings) != sizeof(msg.payload));
+	memcpy(msg.payload, power_state->power_settings, sizeof(msg.payload));
+
+	ok = send_arc_message(bh, &msg);
+	if (!ok)
+		return -EINVAL;
+
+	return 0;
+}
+
 struct tenstorrent_device_class blackhole_class = {
 	.name = "Blackhole",
 	.instance_size = sizeof(struct blackhole_device),
@@ -1052,4 +1070,5 @@ struct tenstorrent_device_class blackhole_class = {
 	.restore_reset_state = blackhole_restore_reset_state,
 	.configure_outbound_atu = blackhole_configure_outbound_atu,
 	.noc_write32 = blackhole_noc_write32,
+	.set_power_state = blackhole_set_power_state,
 };

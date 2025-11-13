@@ -26,6 +26,7 @@
 #define TENSTORRENT_IOCTL_FREE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 12)
 #define TENSTORRENT_IOCTL_CONFIGURE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 13)
 #define TENSTORRENT_IOCTL_SET_NOC_CLEANUP		_IO(TENSTORRENT_IOCTL_MAGIC, 14)
+#define TENSTORRENT_IOCTL_SET_POWER_STATE		_IO(TENSTORRENT_IOCTL_MAGIC, 15)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -336,5 +337,42 @@ struct tenstorrent_set_noc_cleanup {
 	__u64 data;
 };
 
+/**
+ * TENSTORRENT_IOCTL_SET_POWER_STATE - Set the power state of the device
+ *
+ * The driver tracks the requested power state for each open file descriptor.
+ * On any state change (ioctl call or file descriptor close), the driver will
+ * aggregate the states from all active file descriptors and send the
+ * consolidated state to the firmware.
+ *
+ * Aggregation logic:
+ * - For the power flags bitfield: the final state will be a bitwise OR of all
+ *   requested states, ensuring a setting is enabled if any client requests it.
+ * - For the power settings array: the final value for each setting will be the
+ *   maximum value requested across all clients.
+ *
+ * @argsz: Must be sizeof(struct tenstorrent_power_state).
+ * @flags: Reserved for future use, must be 0.
+ * @reserved0: Must be 0.
+ * @validity: Defines which flags in power_flags and which entries in power_settings
+ *            are valid. This is a bitfield where bits 0-3 specify the number
+ *            of valid flags (0-15), and bits 4-7 specify the number of valid
+ *            settings (0-14). Use TT_POWER_VALIDITY() to construct this value.
+ * @power_flags: Bitmask for on/off power features. Use TT_POWER_FLAG_* defines.
+ * @power_settings: Array for numeric power settings.
+ */
+struct tenstorrent_power_state {
+	__u32 argsz;
+	__u32 flags;
+	__u8 reserved0;
+	__u8 validity;
+#define TT_POWER_VALIDITY_FLAGS(n)      (((n) & 0xF) << 0)
+#define TT_POWER_VALIDITY_SETTINGS(n)   (((n) & 0xF) << 4)
+#define TT_POWER_VALIDITY(flags, settings) (TT_POWER_VALIDITY_FLAGS(flags) | TT_POWER_VALIDITY_SETTINGS(settings))
+	__u16 power_flags;
+#define TT_POWER_FLAG_MAX_AI_CLK        (1U << 0) /* 1=Max AI Clock, 0=Min AI Clock */
+#define TT_POWER_FLAG_MRISC_PHY_WAKEUP  (1U << 1) /* 1=PHY Wakeup,   0=PHY Powerdown */
+	__u16 power_settings[14];
+};
 
 #endif

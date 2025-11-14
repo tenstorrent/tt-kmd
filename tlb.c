@@ -19,7 +19,7 @@ int tenstorrent_device_allocate_tlb(struct tenstorrent_device *tt_dev,
 		return -EINVAL;
 
 	for (kind = 0; kind < dev_class->tlb_kinds; ++kind) {
-		long tlb_count = dev_class->tlb_counts[kind];
+		long tlb_count = tt_dev->tlb_counts[kind];
 		long tlb_size = dev_class->tlb_sizes[kind];
 
 		if (size == tlb_size) {
@@ -63,7 +63,7 @@ int tenstorrent_device_free_tlb(struct tenstorrent_device *tt_dev,
 		return -EINVAL;
 
 	for (i = 0; i < dev_class->tlb_kinds; ++i)
-		total_tlbs += dev_class->tlb_counts[i];
+		total_tlbs += tt_dev->tlb_counts[i];
 
 	if (id >= total_tlbs)
 		return -EINVAL;

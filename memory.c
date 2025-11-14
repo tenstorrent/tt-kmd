@@ -1186,7 +1186,7 @@ static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *v
 		return -EINVAL;
 
 	for (i = 0; i < tt_dev->dev_class->tlb_kinds; ++i)
-		total_tlbs += tt_dev->dev_class->tlb_counts[i];
+		total_tlbs += tt_dev->tlb_counts[i];
 
 	if (bar4)
 		offset -= BAR0_SIZE;

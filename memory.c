@@ -1401,3 +1401,29 @@ void tenstorrent_memory_cleanup(struct chardev_private *priv)
 
 	mutex_unlock(&priv->mutex);
 }
+
+// Zap all TLB and BAR mappings for this device, to prevent userspace from
+// accessing device memory after the device has been reset.
+void tenstorrent_vma_zap(struct tenstorrent_device *tt_dev)
+{
+	struct chardev_private *priv;
+
+	mutex_lock(&tt_dev->chardev_mutex);
+	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
+		struct tlb_mapping *tlb_mapping;
+		struct bar_mapping *bar_mapping;
+
+		mutex_lock(&priv->mutex);
+		list_for_each_entry(tlb_mapping, &priv->tlb_mappings, list) {
+			struct vm_area_struct *vma = tlb_mapping->vma;
+			zap_vma_ptes(vma, vma->vm_start, vma->vm_end - vma->vm_start);
+		}
+
+		list_for_each_entry(bar_mapping, &priv->bar_mappings, list) {
+			struct vm_area_struct *vma = bar_mapping->vma;
+			zap_vma_ptes(vma, vma->vm_start, vma->vm_end - vma->vm_start);
+		}
+		mutex_unlock(&priv->mutex);
+	}
+	mutex_unlock(&tt_dev->chardev_mutex);
+}

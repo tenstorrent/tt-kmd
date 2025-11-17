@@ -3,12 +3,14 @@
 
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <memory>
 #include <random>
+#include <vector>
 
 #include "ioctl.h"
 
@@ -65,6 +67,23 @@ void fill_with_random_data(std::vector<uint32_t> &data)
     std::generate(data.begin(), data.end(), [&]{ return RNG(); });
 }
 
+uint64_t get_bar4_size(const EnumeratedDevice &dev)
+{
+    std::string sysfs_dir = sysfs_dir_for_bdf(dev.location);
+    std::string resource4_path = sysfs_dir + "/resource4";
+
+    struct stat st;
+    if (stat(resource4_path.c_str(), &st) != 0)
+        THROW_TEST_FAILURE("Failed to stat resource4 file");
+
+    return static_cast<uint64_t>(st.st_size);
+}
+
+size_t blackhole_get_num_4g_windows(const EnumeratedDevice &dev)
+{
+    return get_bar4_size(dev) / FOUR_GIG;
+}
+
 template <size_t WINDOW_SIZE>
 void VerifyNodeId(int fd, const xy_t &tile, uint64_t noc_reg_base)
 {
@@ -75,7 +94,6 @@ void VerifyNodeId(int fd, const xy_t &tile, uint64_t noc_reg_base)
     if (x != tile.x || y != tile.y)
         THROW_TEST_FAILURE("Node id mismatch");
 }
-
 
 // Wormhole has 156x 1M, 10x 2M, and 20x 16M windows; all but the last 16M
 // window should be available for allocation on an unused device.
@@ -272,12 +290,14 @@ void VerifyBadConfRejectedWormhole(const EnumeratedDevice &dev)
     }
 }
 
-// Blackhole has 202x 2M and 8x 4G windows; all but the last 2M window should be
-// available for allocation on an unused device.
+// Blackhole has 202x 2M and up to 8x 4G windows. On an unused device, all 2M
+// windows except the last should be available for allocation. The number of 4G
+// windows depends on BAR4 size.
 void VerifyTlbQuantitiesBlackhole(const EnumeratedDevice &dev)
 {
     DevFd dev_fd(dev.path);
     std::vector<uint32_t> ids;
+    size_t num_4g_windows = blackhole_get_num_4g_windows(dev);
 
     for (size_t i = 0; i < 201; ++i) {
         struct tenstorrent_allocate_tlb tlb{};
@@ -298,7 +318,7 @@ void VerifyTlbQuantitiesBlackhole(const EnumeratedDevice &dev)
             THROW_TEST_FAILURE("Allocated TLB in off-limits region");
     }
 
-    for (size_t i = 0; i < 8; ++i) {
+    for (size_t i = 0; i < num_4g_windows; ++i) {
         struct tenstorrent_allocate_tlb tlb{};
         tlb.in.size = FOUR_GIG;
 
@@ -320,9 +340,13 @@ void VerifyTlbQuantitiesBlackhole(const EnumeratedDevice &dev)
 void VerifyTlbSizesBlackhole(const EnumeratedDevice &dev)
 {
     DevFd dev_fd(dev.path);
-    std::array<size_t, 2> sizes = {TWO_MEG, FOUR_GIG};
+    bool has_4g_windows = blackhole_get_num_4g_windows(dev) > 0;
+    std::vector<size_t> sizes = {TWO_MEG};
 
-    for (size_t size : sizes) {
+    if (has_4g_windows)
+        sizes.push_back(FOUR_GIG);
+
+    for (auto size : sizes) {
         struct tenstorrent_allocate_tlb tlb{};
         tlb.in.size = size;
 
@@ -336,9 +360,9 @@ void VerifyTensixNodeIdsBlackhole(const EnumeratedDevice &dev)
     static constexpr uint32_t BH_GRID_X = 17;
     static constexpr uint32_t BH_GRID_Y = 12;
     static constexpr uint64_t NOC_NODE_ID_LOGICAL = 0xffb20148ULL;
-
     DevFd dev_fd(dev.path);
     int fd = dev_fd.get();
+    bool has_4g_windows = blackhole_get_num_4g_windows(dev) > 0;
 
     auto is_tensix = [](uint32_t x, uint32_t y) -> bool {
         return (y >= 2 && y <= 11) &&   // Valid y range
@@ -352,25 +376,34 @@ void VerifyTensixNodeIdsBlackhole(const EnumeratedDevice &dev)
             if (!is_tensix(x, y))
                 continue;
 
-            {
-                TlbWindow2M tlb(fd, x, y, NOC_NODE_ID_LOGICAL);
-                uint32_t node_id = tlb.read32(0);
-                uint32_t node_id_x = (node_id >> 0x0) & 0x3f;
-                uint32_t node_id_y = (node_id >> 0x6) & 0x3f;
+            TlbWindow2M tlb(fd, x, y, NOC_NODE_ID_LOGICAL);
+            uint32_t node_id = tlb.read32(0);
+            uint32_t node_id_x = (node_id >> 0x0) & 0x3f;
+            uint32_t node_id_y = (node_id >> 0x6) & 0x3f;
 
-                if (node_id_x != x || node_id_y != y)
-                    THROW_TEST_FAILURE("Node id mismatch");
-            }
+            if (node_id_x != x || node_id_y != y)
+                THROW_TEST_FAILURE("Node id mismatch");
 
-            {
-                TlbWindow4G tlb(fd, x, y, NOC_NODE_ID_LOGICAL);
-                uint32_t node_id = tlb.read32(0);
-                uint32_t node_id_x = (node_id >> 0x0) & 0x3f;
-                uint32_t node_id_y = (node_id >> 0x6) & 0x3f;
+        }
+    }
 
-                if (node_id_x != x || node_id_y != y)
-                    THROW_TEST_FAILURE("Node id mismatch");
-            }
+    if (!has_4g_windows)
+        return;
+
+    for (uint32_t x = 0; x < BH_GRID_X; ++x) {
+        for (uint32_t y = 0; y < BH_GRID_Y; ++y) {
+
+            if (!is_tensix(x, y))
+                continue;
+
+            TlbWindow4G tlb(fd, x, y, NOC_NODE_ID_LOGICAL);
+            uint32_t node_id = tlb.read32(0);
+            uint32_t node_id_x = (node_id >> 0x0) & 0x3f;
+            uint32_t node_id_y = (node_id >> 0x6) & 0x3f;
+
+            if (node_id_x != x || node_id_y != y)
+                THROW_TEST_FAILURE("Node id mismatch");
+
         }
     }
 }
@@ -382,24 +415,29 @@ void VerifyTlbAccessBlackhole(const EnumeratedDevice &dev)
     DevFd dev_fd(dev.path);
     int fd = dev_fd.get();
     bool is_translated = is_blackhole_noc_translation_enabled(dev);
+    bool has_4g_windows = blackhole_get_num_4g_windows(dev) > 0;
 
     if (is_translated) {
         constexpr xy_t PCI = { 19, 24 };
 
         VerifyNodeId<TWO_MEG>(fd, PCI, PCI_NOC_NODE_ID_LOGICAL);
-        VerifyNodeId<FOUR_GIG>(fd, PCI, PCI_NOC_NODE_ID_LOGICAL);
+        if (has_4g_windows)
+            VerifyNodeId<FOUR_GIG>(fd, PCI, PCI_NOC_NODE_ID_LOGICAL);
     } else {
         constexpr xy_t PCI = { 2, 0 };
 
         VerifyNodeId<TWO_MEG>(fd, PCI, PCI_NOC_NODE_ID_LOGICAL);
-        VerifyNodeId<FOUR_GIG>(fd, PCI, PCI_NOC_NODE_ID_LOGICAL);
+
+        if (has_4g_windows)
+            VerifyNodeId<FOUR_GIG>(fd, PCI, PCI_NOC_NODE_ID_LOGICAL);
     }
 
     // ARC shows up at (x=8, y=0) regardless of whether translation is enabled.
     constexpr xy_t ARC = { 8, 0 };
     constexpr uint64_t ARC_NOC_NODE_ID = 0x0000000080050044ULL;
     VerifyNodeId<TWO_MEG>(fd, ARC, ARC_NOC_NODE_ID);
-    VerifyNodeId<FOUR_GIG>(fd, ARC, ARC_NOC_NODE_ID);
+    if (has_4g_windows)
+        VerifyNodeId<FOUR_GIG>(fd, ARC, ARC_NOC_NODE_ID);
 }
 
 void VerifyManyWindowsBlackhole(const EnumeratedDevice &dev)
@@ -438,10 +476,14 @@ void VerifyManyWindowsBlackhole(const EnumeratedDevice &dev)
 
 void VerifyBadConfiRejectedBlackhole(const EnumeratedDevice &dev)
 {
-    static constexpr std::array<size_t, 2> sizes = { TWO_MEG, FOUR_GIG };
+    std::vector<size_t> sizes = { TWO_MEG };
+    bool has_4g_windows = blackhole_get_num_4g_windows(dev) > 0;
 
     DevFd dev_fd(dev.path);
     int fd = dev_fd.get();
+
+    if (has_4g_windows)
+        sizes.push_back(FOUR_GIG);
 
     std::vector<uint32_t> tlb_ids;
     for (size_t size : sizes) {

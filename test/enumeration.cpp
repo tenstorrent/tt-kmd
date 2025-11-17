@@ -47,11 +47,11 @@ std::map<dev_t, std::string> EnumerateDriverDevices(void)
     {
         struct stat statbuf;
 
-        if (stat(dev_name.c_str(), &statbuf) == -1)
+        if (lstat(dev_name.c_str(), &statbuf) == -1)
             throw_system_error("Could not stat " + dev_name);
 
-        if ((statbuf.st_mode & S_IFMT) != S_IFCHR)
-            THROW_TEST_FAILURE("Expected " + dev_name + " to be a char dev, but it's not.");
+        if (!S_ISCHR(statbuf.st_mode))
+            continue;
 
         if (!IsTenstorrentDeviceNode(statbuf.st_rdev))
             THROW_TEST_FAILURE(dev_name + " is not connected to the Tenstorrent driver.");

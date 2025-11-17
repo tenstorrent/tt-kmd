@@ -928,6 +928,9 @@ static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
 
 		if (r || IS_ERR(hwmon_device))
 			return false;
+
+		// Notify udev that telemetry attributes are now available.
+		kobject_uevent(&tt_dev->dev.kobj, KOBJ_CHANGE);
 	}
 
 	return true;

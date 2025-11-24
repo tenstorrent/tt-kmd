@@ -21,7 +21,7 @@
 #define TLB_2M_WINDOW_SIZE (1 << TLB_2M_SHIFT)
 #define TLB_2M_WINDOW_MASK (TLB_2M_WINDOW_SIZE - 1)
 
-#define TLB_4G_WINDOW_COUNT 8
+#define TLB_4G_WINDOW_COUNT 8	// NB: Not all are guaranteed to be exposed in BAR4; see blackhole_init().
 #define TLB_4G_SHIFT 32
 #define TLB_4G_WINDOW_SIZE (1UL << TLB_4G_SHIFT)
 #define TLB_4G_WINDOW_MASK (TLB_4G_WINDOW_SIZE - 1)
@@ -847,7 +847,11 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	struct device *dev = &tt_dev->pdev->dev;
+	resource_size_t bar4_len = pci_resource_len(tt_dev->pdev, 4);
 	int i;
+
+	// Limit 4G window count to what's available; partial windows not supported.
+	tt_dev->tlb_counts[1] = bar4_len / TLB_4G_WINDOW_SIZE;
 
 	bh->hwmon_attr_addrs = devm_kcalloc(dev, ARRAY_SIZE(bh_hwmon_attrs), sizeof(u64), GFP_KERNEL);
 	bh->sysfs_attr_addrs = devm_kcalloc(dev, ARRAY_SIZE(bh_sysfs_attributes), sizeof(u64), GFP_KERNEL);

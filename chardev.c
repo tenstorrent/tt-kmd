@@ -26,6 +26,8 @@
 #include "module.h"
 #include "tlb.h"
 
+#define TT_POWER_FLAG_ALL 0x7FFF
+
 static dev_t tt_device_id;
 static struct class *tt_dev_class;
 static unsigned int tt_max_devices;
@@ -362,11 +364,12 @@ static long ioctl_set_noc_cleanup(struct chardev_private *priv,
 	return 0;
 }
 
-static int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_dev)
+int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_dev)
 {
 	struct tenstorrent_power_state power_state = { 0 };
 	struct chardev_private *priv;
 	u8 max_settings_count = 0;
+	int ret;
 
 	mutex_lock(&tt_dev->chardev_mutex);
 
@@ -389,11 +392,7 @@ static int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_
 		// Create a mask of flags the FD didn't specify (bits past flags_count).
 		// These unspecified flags default to ON for backward compatibility.
 		// Bit 15 is reserved per firmware spec, so mask to bits 0-14 (0x7FFF).
-		if (flags_count == 0) {
-			unspecified_flags_mask = 0x7FFF;  // All flags unspecified.
-		} else {
-			unspecified_flags_mask = ~((1U << flags_count) - 1) & 0x7FFF;
-		}
+		unspecified_flags_mask = ~((1U << flags_count) - 1) & TT_POWER_FLAG_ALL;
 
 		// Apply the aggregation formula: OR this FD's explicit power_flags
 		// with the unspecified flags (defaulted to ON). This ensures older
@@ -406,9 +405,8 @@ static int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_
 		// Aggregate power_settings: for each setting index, take the maximum
 		// value across all FDs that have marked that setting as valid.
 		settings_count = min_t(u8, settings_count, ARRAY_SIZE(power_state.power_settings));
-		for (i = 0; i < settings_count; i++) {
+		for (i = 0; i < settings_count; i++)
 			power_state.power_settings[i] = max(power_state.power_settings[i], priv->power_state.power_settings[i]);
-		}
 
 		mutex_unlock(&priv->mutex);
 	}
@@ -418,9 +416,10 @@ static int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_
 	// regardless of what validity individual FDs specified.
 	power_state.validity = TT_POWER_VALIDITY(15, max_settings_count);
 
+	ret = tt_dev->dev_class->set_power_state(tt_dev, &power_state);
 	mutex_unlock(&tt_dev->chardev_mutex);
 
-	return tt_dev->dev_class->set_power_state(tt_dev, &power_state);
+	return ret;
 }
 
 static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorrent_power_state __user *arg)
@@ -561,6 +560,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 {
 	struct tenstorrent_device *tt_dev = inode_to_tt_dev(inode);
 	struct chardev_private *private_data;
+	bool power_aware = file->f_flags & O_APPEND;
 
 	private_data = kzalloc(sizeof(*private_data), GFP_KERNEL);
 	if (private_data == NULL)
@@ -580,11 +580,23 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	private_data->pid = task_tgid_vnr(current);
 	get_task_comm(private_data->comm, current);
 
+	// Legacy client: default to AICLK=Low, everything else enabled.
+	// Else, client is expected to explicitly request power states via ioctl.
+	private_data->power_state.validity = TT_POWER_VALIDITY(15, 0);
+	if (!power_aware)
+		private_data->power_state.power_flags = TT_POWER_FLAG_ALL & ~TT_POWER_FLAG_MAX_AI_CLK;
+
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_add(&private_data->open_fd, &tt_dev->open_fds_list);
 	mutex_unlock(&tt_dev->chardev_mutex);
 
 	increment_cdev_open_count(tt_dev);
+
+	if (!power_aware && !tt_dev->detached && !tt_dev->needs_hw_init) {
+		int ret = tenstorrent_set_aggregated_power_state(tt_dev);
+		if (ret < 0)
+			dev_warn(&tt_dev->dev, "Failed to set initial power state: %d\n", ret);
+	}
 
 	return 0;
 }
@@ -594,8 +606,10 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	struct chardev_private *priv = file->private_data;
 	struct tenstorrent_device *tt_dev = priv->device;
 	unsigned int bitpos;
+	bool power_down = !tt_dev->detached && power_policy && !tt_dev->needs_hw_init;
+	bool cleanup_noc = !tt_dev->detached && priv->noc_cleanup.enabled;
 
-	if (!tt_dev->detached && priv->noc_cleanup.enabled) {
+	if (cleanup_noc)
 		tt_dev->dev_class->noc_write32(
 			tt_dev,
 			priv->noc_cleanup.x,
@@ -603,7 +617,6 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 			priv->noc_cleanup.addr,
 			priv->noc_cleanup.data & 0xFFFFFFFF,
 			priv->noc_cleanup.noc);
-	}
 
 	decrement_cdev_open_count(tt_dev);
 
@@ -620,12 +633,14 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	for_each_set_bit(bitpos, priv->tlbs, TENSTORRENT_MAX_INBOUND_TLBS)
 		tenstorrent_device_free_tlb(tt_dev, bitpos);
 
-	tenstorrent_device_put(tt_dev);
-
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_del(&priv->open_fd);
 	mutex_unlock(&tt_dev->chardev_mutex);
 
+	if (power_down)
+		tenstorrent_set_aggregated_power_state(tt_dev);
+
+	tenstorrent_device_put(tt_dev);
 	kfree(file->private_data);
 	file->private_data = NULL;
 	return 0;

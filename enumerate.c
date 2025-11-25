@@ -4,7 +4,7 @@
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
-#include <linux/idr.h>
+#include <linux/xarray.h>
 #include <linux/mutex.h>
 #include <linux/version.h>
 #include <linux/pm.h>
@@ -30,8 +30,7 @@
 #include <linux/aer.h>
 #endif
 
-static DEFINE_IDR(tenstorrent_dev_idr);
-static DEFINE_MUTEX(tenstorrent_dev_idr_mutex);
+static DEFINE_XARRAY_ALLOC(tenstorrent_dev_xa);
 
 #if !IS_ENABLED(CONFIG_HWMON)
 struct device *devm_hwmon_device_register_with_info(struct device *,
@@ -199,7 +198,8 @@ static int tenstorrent_reboot_notifier(struct notifier_block *nb,
 static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	struct tenstorrent_device *tt_dev = NULL;
-	int ordinal;
+	u32 ordinal;
+	int err;
 	const struct tenstorrent_device_class *device_class;
 
 	if (!id->driver_data) {
@@ -226,14 +226,11 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	if (tt_dev == NULL)
 		return -ENOMEM;
 
-	mutex_lock(&tenstorrent_dev_idr_mutex);
-	ordinal = idr_alloc(&tenstorrent_dev_idr, tt_dev, 0, 0, GFP_KERNEL);
-	mutex_unlock(&tenstorrent_dev_idr_mutex);
-
-	if (ordinal < 0) {
+	err = xa_alloc(&tenstorrent_dev_xa, &ordinal, tt_dev, xa_limit_31b, GFP_KERNEL);
+	if (err) {
 		kfree(tt_dev);
 		pci_disable_device(dev);
-		return ordinal;
+		return err;
 	}
 
 	// The refcount created here persists until remove.
@@ -332,9 +329,7 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	pci_set_drvdata(dev, NULL);
 
 	// If this is postponed, a subsequent probe is forced to use a different ordinal.
-	mutex_lock(&tenstorrent_dev_idr_mutex);
-	idr_remove(&tenstorrent_dev_idr, tt_dev->ordinal);
-	mutex_unlock(&tenstorrent_dev_idr_mutex);
+	xa_erase(&tenstorrent_dev_xa, tt_dev->ordinal);
 
 	tenstorrent_device_put(tt_dev);
 }
@@ -398,15 +393,4 @@ int tenstorrent_pci_register_driver(void)
 void tenstorrent_pci_unregister_driver(void)
 {
 	pci_unregister_driver(&tenstorrent_pci_driver);
-}
-
-struct tenstorrent_device *tenstorrent_lookup_device(unsigned minor)
-{
-	struct tenstorrent_device *dev;
-
-	mutex_lock(&tenstorrent_dev_idr_mutex);
-	dev = idr_find(&tenstorrent_dev_idr, minor);
-	mutex_unlock(&tenstorrent_dev_idr_mutex);
-
-	return dev;
 }

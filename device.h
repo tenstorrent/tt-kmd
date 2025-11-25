@@ -10,6 +10,7 @@
 #include <linux/cdev.h>
 #include <linux/reboot.h>
 #include <linux/kref.h>
+#include <linux/rwsem.h>
 
 #include "ioctl.h"
 #include "hwmon.h"
@@ -28,6 +29,8 @@ struct tenstorrent_device {
 	const struct tenstorrent_device_class *dev_class;
 	bool detached; // No longer valid for hardware access
 	bool needs_hw_init;
+	atomic_long_t reset_gen; // Generation counter, incremented on reset
+	struct rw_semaphore reset_rwsem;
 	struct dentry *debugfs_root;
 	struct proc_dir_entry *procfs_root;
 

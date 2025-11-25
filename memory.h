@@ -10,6 +10,7 @@
 #define MAX_DMA_BUF_SIZE_LOG2 28
 
 struct chardev_private;
+struct tenstorrent_device;
 struct tenstorrent_query_mappings;
 struct tenstorrent_allocate_dma_buf;
 struct tenstorrent_free_dma_buf;
@@ -51,6 +52,7 @@ long ioctl_configure_tlb(struct chardev_private *priv,
 
 int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma);
 void tenstorrent_memory_cleanup(struct chardev_private *priv);
+void tenstorrent_vma_zap(struct tenstorrent_device *tt_dev);
 bool is_iommu_translated(struct device *dev);
 
 #define TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS 16

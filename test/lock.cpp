@@ -1,8 +1,12 @@
 // SPDX-FileCopyrightText: © 2024 Tenstorrent Inc.
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
+#include <mutex>
+#include <thread>
 
 #include <sys/ioctl.h>
 
@@ -59,6 +63,18 @@ uint8_t query_lock(DevFd &dev, uint8_t index)
         THROW_TEST_FAILURE("LOCK_CTL query ioctl failed");
 
     return ctl.out.value;
+}
+
+// Blocks until lock is acquired.
+void acquire_lock_blocking(DevFd &dev, uint8_t index)
+{
+    tenstorrent_lock_ctl ctl{};
+    ctl.in.output_size_bytes = sizeof(ctl.out);
+    ctl.in.flags = TENSTORRENT_LOCK_CTL_ACQUIRE_BLOCKING;
+    ctl.in.index = index;
+
+    if (ioctl(dev.get(), TENSTORRENT_IOCTL_LOCK_CTL, &ctl) != 0)
+        THROW_TEST_FAILURE("LOCK_CTL blocking acquire ioctl failed");
 }
 
 void VerifyLockSemantics(const EnumeratedDevice &dev)
@@ -198,6 +214,127 @@ void VerifyAllLocks(const EnumeratedDevice &dev)
     }
 }
 
+void VerifyBlockingLock(const EnumeratedDevice &dev)
+{
+    DevFd fd0(dev.path);
+    DevFd fd1(dev.path);
+
+    // fd0 holds the lock.
+    if (!acquire_lock(fd0, 0))
+        THROW_TEST_FAILURE("fd0 should acquire lock 0");
+
+    std::atomic<bool> thread_acquired{false};
+    std::atomic<bool> thread_started{false};
+
+    // Thread blocks waiting for the lock.
+    std::thread blocker([&]() {
+        thread_started = true;
+        acquire_lock_blocking(fd1, 0);
+        thread_acquired = true;
+    });
+
+    // Wait for thread to start and enter the blocking call.
+    while (!thread_started)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // Thread should still be blocked.
+    if (thread_acquired)
+        THROW_TEST_FAILURE("Thread acquired lock while it should be blocked");
+
+    // Release wakes the blocked thread.
+    if (!release_lock(fd0, 0))
+        THROW_TEST_FAILURE("fd0 should release lock 0");
+
+    blocker.join();
+
+    if (!thread_acquired)
+        THROW_TEST_FAILURE("Thread should have acquired lock after release");
+
+    // fd1 now holds the lock.
+    uint8_t state = query_lock(fd1, 0);
+    if (state != (LOCK_LOCAL | LOCK_GLOBAL))
+        THROW_TEST_FAILURE("fd1 should hold lock after blocking acquire");
+
+    if (!release_lock(fd1, 0))
+        THROW_TEST_FAILURE("fd1 should release lock 0");
+}
+
+// C++ Lockable implementation for use with std::unique_lock.
+class DeviceLock
+{
+public:
+    DeviceLock(DevFd &dev, uint8_t index) : dev_(dev), index_(index) {}
+
+    void lock() { acquire_lock_blocking(dev_, index_); }
+    bool try_lock() { return acquire_lock(dev_, index_); }
+
+    // unlock() shouldn't throw per BasicLockable, but for test code a clear
+    // failure beats silent misbehavior.
+    void unlock()
+    {
+        if (!release_lock(dev_, index_))
+            THROW_TEST_FAILURE("DeviceLock::unlock() failed");
+    }
+
+private:
+    DevFd &dev_;
+    uint8_t index_;
+};
+
+void VerifyLockable(const EnumeratedDevice &dev)
+{
+    DevFd fd0(dev.path);
+    DevFd fd1(dev.path);
+    DeviceLock lock0(fd0, 0);
+    DeviceLock lock1(fd1, 0);
+
+    // std::unique_lock with try_lock.
+    {
+        std::unique_lock<DeviceLock> guard(lock0);
+
+        uint8_t state = query_lock(fd0, 0);
+        if (state != (LOCK_LOCAL | LOCK_GLOBAL))
+            THROW_TEST_FAILURE("unique_lock should hold lock");
+
+        // try_lock fails from another fd.
+        std::unique_lock<DeviceLock> guard2(lock1, std::try_to_lock);
+        if (guard2.owns_lock())
+            THROW_TEST_FAILURE("try_lock should fail when lock is held");
+    }
+
+    // Lock released after scope exit.
+    uint8_t state = query_lock(fd0, 0);
+    if (state != 0)
+        THROW_TEST_FAILURE("Lock should be free after unique_lock destructor");
+
+    // Blocking acquisition from another thread via std::unique_lock.
+    std::atomic<bool> thread_acquired{false};
+    {
+        std::unique_lock<DeviceLock> guard(lock0);
+
+        std::thread blocker([&]() {
+            std::unique_lock<DeviceLock> guard2(lock1);
+            thread_acquired = true;
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (thread_acquired)
+            THROW_TEST_FAILURE("Thread should be blocked");
+
+        guard.unlock();
+        blocker.join();
+    }
+
+    if (!thread_acquired)
+        THROW_TEST_FAILURE("Thread should have acquired lock");
+
+    // Thread's unique_lock already released when thread exited.
+    state = query_lock(fd0, 0);
+    if (state != 0)
+        THROW_TEST_FAILURE("Lock should be free after thread exit");
+}
+
 } // namespace
 
 void TestLock(const EnumeratedDevice &dev)
@@ -205,4 +342,6 @@ void TestLock(const EnumeratedDevice &dev)
     VerifyLockSemantics(dev);
     VerifyLockBounds(dev);
     VerifyAllLocks(dev);
+    VerifyBlockingLock(dev);
+    VerifyLockable(dev);
 }

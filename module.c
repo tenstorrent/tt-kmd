@@ -42,6 +42,10 @@ unsigned char auto_reset_timeout = 10;
 module_param(auto_reset_timeout, byte, 0444);
 MODULE_PARM_DESC(auto_reset_timeout, "Timeout duration in seconds for M3 auto reset to occur.");
 
+bool power_policy = true;
+module_param(power_policy, bool, 0644);
+MODULE_PARM_DESC(power_policy, "Enable power policy: low power at probe, re-aggregate on close (default=on).");
+
 const struct pci_device_id tenstorrent_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_TENSTORRENT, PCI_DEVICE_ID_GRAYSKULL),
 	  .driver_data=(kernel_ulong_t)NULL}, // Deprecated

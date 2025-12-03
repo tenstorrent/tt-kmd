@@ -289,6 +289,10 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	debugfs_create_file("mappings", 0444, tt_dev->debugfs_root, tt_dev, &mappings_fops);
 
+	// Set initial low-power state via aggregation logic.
+	if (power_policy)
+		tenstorrent_set_aggregated_power_state(tt_dev);
+
 	return 0;
 }
 

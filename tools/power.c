@@ -43,8 +43,10 @@ struct tenstorrent_power_state {
 #define TT_POWER_VALIDITY_SETTINGS(n)   (((n) & 0xF) << 4)
 #define TT_POWER_VALIDITY(flags, settings) (TT_POWER_VALIDITY_FLAGS(flags) | TT_POWER_VALIDITY_SETTINGS(settings))
 	__u16 power_flags;
-#define TT_POWER_FLAG_MAX_AI_CLK        (1U << 0) /* 1=Max AI Clock, 0=Min AI Clock */
-#define TT_POWER_FLAG_MRISC_PHY_WAKEUP  (1U << 1) /* 1=PHY Wakeup,   0=PHY Powerdown */
+#define TT_POWER_FLAG_MAX_AI_CLK        (1U << 0) /* 1=Max AI Clock,  0=Min AI Clock */
+#define TT_POWER_FLAG_MRISC_PHY_WAKEUP  (1U << 1) /* 1=PHY Wakeup,    0=PHY Powerdown */
+#define TT_POWER_FLAG_TENSIX_ENABLE     (1U << 2) /* 1=Enable Tensix, 0=Clock Gate Tensix */
+#define TT_POWER_FLAG_L2CPU_ENABLE      (1U << 3) /* 1=Enable L2CPU,  0=Clock Gate L2CPU */
 	__u16 power_settings[14];
 };
 
@@ -176,7 +178,9 @@ void print_usage(const char *exec_name) {
     fprintf(stderr, "FLAG BITS:\n");
     fprintf(stderr, "  Bit 0 = TT_POWER_FLAG_MAX_AI_CLK       (AI Clock: 1=Max,    0=Min)\n");
     fprintf(stderr, "  Bit 1 = TT_POWER_FLAG_MRISC_PHY_WAKEUP (GDDR PHY: 1=Wakeup, 0=Powerdown)\n");
-    fprintf(stderr, "  Bits 2-14: Reserved for future use (TBD)\n\n");
+    fprintf(stderr, "  Bit 2 = TT_POWER_FLAG_TENSIX_ENABLE    (Tensix:   1=Enable, 0=Clock Gate)\n");
+    fprintf(stderr, "  Bit 3 = TT_POWER_FLAG_L2CPU_ENABLE     (L2CPU:    1=Enable, 0=Clock Gate)\n");
+    fprintf(stderr, "  Bits 4-14: Reserved for future use (TBD)\n\n");
 
     fprintf(stderr, "SETTING VALUES:\n");
     fprintf(stderr, "  Values 0-13: Reserved for future use (TBD)\n\n");
@@ -258,15 +262,21 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    // Open device
-    int fd = open(dev_path, O_RDWR);
+    // Open device. O_APPEND indicates that we are power-aware and want to set
+    // the power state explicitly.
+    int fd = open(dev_path, O_RDWR | O_APPEND);
     if (fd < 0) {
         FATAL("Could not open device %s: %s", dev_path, strerror(errno));
     }
 
-    // Set power state
+    // Set power state.
     set_power_state(fd, power_flags, num_flags, 
                     has_settings ? power_settings : NULL, num_settings);
+
+    // Our contribution to the power state will be removed on close, so wait
+    // for user input to continue.
+    printf("Press Enter to continue...");
+    getchar();
 
     close(fd);
     return 0;

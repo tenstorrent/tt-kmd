@@ -206,9 +206,28 @@ struct tenstorrent_pin_pages {
 };
 
 // tenstorrent_lock_ctl_in.flags
-#define TENSTORRENT_LOCK_CTL_ACQUIRE 0
-#define TENSTORRENT_LOCK_CTL_RELEASE 1
-#define TENSTORRENT_LOCK_CTL_TEST 2
+#define TENSTORRENT_LOCK_CTL_ACQUIRE 0		// out.value: 1 = acquired, 0 = held by another
+#define TENSTORRENT_LOCK_CTL_RELEASE 1		// out.value: 1 = released, 0 = not held by us
+#define TENSTORRENT_LOCK_CTL_TEST 2		// out.value: bit 0 = held by us, bit 1 = held by any
+#define TENSTORRENT_LOCK_CTL_ACQUIRE_BLOCKING 3	// blocks until acquired, out.value: 1
+
+// Conventional lock indices for ERISC cores
+#define TENSTORRENT_LOCK_INDEX_ETH00 0
+#define TENSTORRENT_LOCK_INDEX_ETH01 1
+#define TENSTORRENT_LOCK_INDEX_ETH02 2
+#define TENSTORRENT_LOCK_INDEX_ETH03 3
+#define TENSTORRENT_LOCK_INDEX_ETH04 4
+#define TENSTORRENT_LOCK_INDEX_ETH05 5
+#define TENSTORRENT_LOCK_INDEX_ETH06 6
+#define TENSTORRENT_LOCK_INDEX_ETH07 7
+#define TENSTORRENT_LOCK_INDEX_ETH08 8
+#define TENSTORRENT_LOCK_INDEX_ETH09 9
+#define TENSTORRENT_LOCK_INDEX_ETH10 10
+#define TENSTORRENT_LOCK_INDEX_ETH11 11
+#define TENSTORRENT_LOCK_INDEX_ETH12 12
+#define TENSTORRENT_LOCK_INDEX_ETH13 13
+#define TENSTORRENT_LOCK_INDEX_ETH14 14
+#define TENSTORRENT_LOCK_INDEX_ETH15 15
 
 struct tenstorrent_lock_ctl_in {
 	__u32 output_size_bytes;

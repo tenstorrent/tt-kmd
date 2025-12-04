@@ -580,7 +580,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	struct page **pages;
 	int pages_pinned;
 	struct pinned_page_range *pinning;
-	struct sg_table dma_mapping = {0};
+	struct sg_table dma_mapping = {};
 	long ret;
 	u32 bytes_to_copy;
 	u64 noc_address = 0;

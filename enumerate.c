@@ -237,9 +237,12 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	kref_init(&tt_dev->kref);
 
 	tt_dev->detached = false;
+	tt_dev->needs_hw_init = true;
 	tt_dev->dev_class = device_class;
 	tt_dev->pdev = pci_dev_get(dev);
 	tt_dev->ordinal = ordinal;
+	atomic_long_set(&tt_dev->reset_gen, 0);
+	init_rwsem(&tt_dev->reset_rwsem);
 
 	// Initialize per-device TLB counts from device class defaults.
 	// Device-specific init may adjust these.

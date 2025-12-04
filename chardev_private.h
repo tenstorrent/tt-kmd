@@ -58,6 +58,8 @@ struct chardev_private {
 
 	struct tenstorrent_set_noc_cleanup noc_cleanup; // NOC write on release action
 	struct tenstorrent_power_state power_state; // Power state for this fd
+
+	long open_reset_gen; // Reset generation at open time
 };
 
 struct chardev_private *get_tenstorrent_priv(struct file *f);

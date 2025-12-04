@@ -211,14 +211,18 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK) {
 		ok = pcie_hot_reset_and_restore_state(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_CONFIG_WRITE) {
+		atomic_long_inc(&priv->device->reset_gen);
 		ok = pcie_timer_interrupt(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_USER_RESET) {
+		atomic_long_inc(&priv->device->reset_gen);
 		ok = set_reset_marker(pdev);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
+		atomic_long_inc(&priv->device->reset_gen);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
+		atomic_long_inc(&priv->device->reset_gen);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {
@@ -226,9 +230,9 @@ static long ioctl_reset_device(struct chardev_private *priv,
 
 		// In the hotplug case, needs_hw_init is false and there is nothing to
 		// do here. Otherwise this was an in-place reset, so re-initialize now.
-		if (ok && priv->device->needs_hw_init) {
+		if (priv->device->needs_hw_init) {
 			priv->device->needs_hw_init = false;
-			if (safe_pci_restore_state(pdev)) {
+			if (ok && safe_pci_restore_state(pdev)) {
 				priv->device->dev_class->restore_reset_state(priv->device);
 				ok = priv->device->dev_class->init_hardware(priv->device);
 			} else {
@@ -380,6 +384,10 @@ int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_dev)
 		u16 effective_flags;
 		int i;
 
+		// Skip fds that have a different reset generation than the device.
+		if (atomic_long_read(&tt_dev->reset_gen) != priv->open_reset_gen)
+			continue;
+
 		mutex_lock(&priv->mutex);
 
 		// Extract validity counts from the packed validity field.
@@ -450,11 +458,38 @@ static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorre
 
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
-	long ret = -EINVAL;
 	struct chardev_private *priv = f->private_data;
+	struct tenstorrent_device *tt_dev = priv->device;
+	long ret = -EINVAL;
+	bool is_reset_ioctl = (cmd == TENSTORRENT_IOCTL_RESET_DEVICE);
 
-	if (priv->device->detached)
-		return -ENODEV;
+	if (is_reset_ioctl)
+		down_write(&tt_dev->reset_rwsem);	// Exclusive
+	else
+		down_read(&tt_dev->reset_rwsem);	// Shared
+
+	// File descriptor from a removed/hotplugged device is permanently invalid.
+	if (priv->device->detached) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	// File descriptor opened before the reset is permanently invalid.
+	if (atomic_long_read(&priv->device->reset_gen) != priv->open_reset_gen) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	// During reset window, only allow info queries and reset operations.
+	if (priv->device->needs_hw_init) {
+		bool allowed = (cmd == TENSTORRENT_IOCTL_GET_DEVICE_INFO ||
+				cmd == TENSTORRENT_IOCTL_GET_DRIVER_INFO ||
+				cmd == TENSTORRENT_IOCTL_RESET_DEVICE);
+		if (!allowed) {
+			ret = -ENODEV;
+			goto out;
+		}
+	}
 
 	switch (cmd) {
 		case TENSTORRENT_IOCTL_GET_DEVICE_INFO:
@@ -525,6 +560,12 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			break;
 	}
 
+out:
+	if (is_reset_ioctl)
+		up_write(&tt_dev->reset_rwsem);
+	else
+		up_read(&tt_dev->reset_rwsem);
+
 	return ret;
 }
 
@@ -575,6 +616,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 
 	kref_get(&tt_dev->kref);
 	private_data->device = tt_dev;
+	private_data->open_reset_gen = atomic_long_read(&tt_dev->reset_gen);
 	file->private_data = private_data;
 
 	private_data->pid = task_tgid_vnr(current);

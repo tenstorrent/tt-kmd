@@ -46,6 +46,11 @@ bool power_policy = true;
 module_param(power_policy, bool, 0444);
 MODULE_PARM_DESC(power_policy, "Enable power policy: low power at probe, re-aggregate on close (default=on).");
 
+bool allow_galaxy_mrisc_toggle = false;
+module_param(allow_galaxy_mrisc_toggle, bool, 0644);
+MODULE_PARM_DESC(allow_galaxy_mrisc_toggle,
+	"Allow MRISC PHY power state toggling on galaxy-blackhole systems (default: false)");
+
 const struct pci_device_id tenstorrent_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_TENSTORRENT, PCI_DEVICE_ID_GRAYSKULL),
 	  .driver_data=(kernel_ulong_t)NULL}, // Deprecated

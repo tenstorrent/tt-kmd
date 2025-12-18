@@ -20,6 +20,7 @@ struct blackhole_device {
 	u64 *sysfs_attr_addrs;
 
 	u8 saved_mps;
+	bool is_galaxy;	// True for galaxy-blackhole systems (card_type 0x47)
 };
 
 #define tt_dev_to_bh_dev(ttdev) \

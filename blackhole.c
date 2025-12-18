@@ -99,6 +99,9 @@
 #define SZ_1T 0x10000000000ULL
 #endif
 
+// Card type for galaxy-blackhole systems (from board_id_hi telemetry)
+#define CARD_TYPE_GALAXY 0x47
+
 #define WRITE_IATU_REG(wh_dev, direction, region, reg, value) \
 	write_iatu_reg(wh_dev, IATU_##direction, region, \
 		       IATU_##reg##_##direction, (value))
@@ -416,10 +419,10 @@ static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute 
 static umode_t sysfs_telemetry_is_visible(struct kobject *kobj, struct attribute *attr, int n);
 
 static struct tenstorrent_sysfs_attr bh_sysfs_attributes[] = {
-	{ TELEMETRY_AICLK, __ATTR(tt_aiclk,  S_IRUGO, sysfs_show_u32_dec, NULL) },
-	{ TELEMETRY_AXICLK, __ATTR(tt_axiclk, S_IRUGO, sysfs_show_u32_dec, NULL) },
-	{ TELEMETRY_ARCCLK, __ATTR(tt_arcclk, S_IRUGO, sysfs_show_u32_dec, NULL) },
-	{ TELEMETRY_BOARD_ID, __ATTR(tt_serial, S_IRUGO, sysfs_show_u64_hex, NULL) },
+	{ TELEMETRY_AICLK, __ATTR(tt_aiclk,  S_IRUGO, sysfs_show_u32_dec, NULL) },      // 0
+	{ TELEMETRY_AXICLK, __ATTR(tt_axiclk, S_IRUGO, sysfs_show_u32_dec, NULL) },     // 1
+	{ TELEMETRY_ARCCLK, __ATTR(tt_arcclk, S_IRUGO, sysfs_show_u32_dec, NULL) },     // 2
+	{ TELEMETRY_BOARD_ID, __ATTR(tt_serial, S_IRUGO, sysfs_show_u64_hex, NULL) },   // 3 = BH_SYSFS_BOARD_ID_INDEX
 	{ TELEMETRY_BOARD_ID, __ATTR(tt_card_type, S_IRUGO, sysfs_show_card_type, NULL) },
 	{ TELEMETRY_FLASH_BUNDLE_VERSION, __ATTR(tt_fw_bundle_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
 	{ TELEMETRY_BM_APP_FW_VERSION, __ATTR(tt_m3app_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
@@ -914,6 +917,27 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 	return true;
 }
 
+// Index of BOARD_ID in bh_sysfs_attributes (used for galaxy detection)
+#define BH_SYSFS_BOARD_ID_INDEX 3
+
+// Detect if this is a galaxy-blackhole system by reading card_type from telemetry.
+// Must be called after telemetry_probe() has populated sysfs_attr_addrs.
+static bool blackhole_detect_galaxy(struct blackhole_device *bh)
+{
+	u64 board_id_addr = bh->sysfs_attr_addrs[BH_SYSFS_BOARD_ID_INDEX];
+	u32 board_id_hi;
+	u16 card_type;
+
+	if (board_id_addr == 0)
+		return false;
+
+	if (csm_read32(bh, board_id_addr, &board_id_hi) != 0)
+		return false;
+
+	card_type = (board_id_hi >> 4) & 0xFFFF;
+	return card_type == CARD_TYPE_GALAXY;
+}
+
 static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
@@ -927,6 +951,9 @@ static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
 	if (!r) {
 		struct device *dev = &tt_dev->pdev->dev;
 		struct device *hwmon_device;
+
+		bh->is_galaxy = blackhole_detect_galaxy(bh);
+
 		r = devm_device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
 		hwmon_device = devm_hwmon_device_register_with_info(dev, "blackhole", bh, &bh_hwmon_chip_info, NULL);
 
@@ -1043,9 +1070,15 @@ static int blackhole_set_power_state(struct tenstorrent_device *tt_dev, struct t
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	struct arc_msg msg = {0};
+	u16 power_flags = power_state->power_flags;
 	bool ok;
 
-	msg.header = ARC_MSG_TYPE_POWER_SETTING | (power_state->validity << 8) | (power_state->power_flags << 16);
+	// Galaxy: Force MRISC PHY to stay awake to avoid system breakage, unless
+	// module param explicitly allows toggling (for testing).
+	if (bh->is_galaxy && !allow_galaxy_mrisc_toggle)
+		power_flags |= TT_POWER_FLAG_MRISC_PHY_WAKEUP;
+
+	msg.header = ARC_MSG_TYPE_POWER_SETTING | (power_state->validity << 8) | (power_flags << 16);
 	BUILD_BUG_ON(sizeof(power_state->power_settings) != sizeof(msg.payload));
 	memcpy(msg.payload, power_state->power_settings, sizeof(msg.payload));
 

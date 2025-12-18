@@ -619,7 +619,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	private_data->open_reset_gen = atomic_long_read(&tt_dev->reset_gen);
 	file->private_data = private_data;
 
-	private_data->pid = task_tgid_vnr(current);
+	private_data->pid = task_tgid_nr(current);
 	get_task_comm(private_data->comm, current);
 
 	// Legacy client: default to AICLK=Low, everything else enabled.

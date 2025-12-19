@@ -59,11 +59,12 @@ static int mappings_seq_show(struct seq_file *s, void *v)
 		struct bar_mapping *bar_mapping;
 		struct dmabuf *dmabuf;
 		unsigned int bkt;
+		pid_t pid;
+
+		pid = pid_vnr(priv->pid);
 
 		// Open file descriptors.
-		seq_printf(s,
-			   "%-8d %-16s %-14s\n", priv->pid, priv->comm,
-			   "OPEN_FD");
+		seq_printf(s, "%-8d %-16s %-14s\n", pid, priv->comm, "OPEN_FD");
 
 		if (!mutex_trylock(&priv->mutex)) {
 			seq_printf(s, "%-8s %-16s %-14s\n", "", "", "...locked, skipping details...");
@@ -102,11 +103,11 @@ static int mappings_seq_show(struct seq_file *s, void *v)
 				seq_printf(
 					s,
 					"%-8d %-16s %-14s VA: 0x%016llx -> %s: 0x%016llx -> NOC: 0x%llx (size=0x%lx)\n",
-					priv->pid, priv->comm, "PIN_PAGES+IATU", va_start, addr_label, addr,
+					pid, priv->comm, "PIN_PAGES+IATU", va_start, addr_label, addr,
 					sensitive ? region->base : 0, size_bytes);
 			} else {
-				seq_printf(s, "%-8d %-16s %-14s VA: 0x%016llx -> %s: 0x%016llx (size=0x%lx)\n",
-					   priv->pid, priv->comm, "PIN_PAGES", va_start, addr_label, addr, size_bytes);
+				seq_printf(s, "%-8d %-16s %-14s VA: 0x%016llx -> %s: 0x%016llx (size=0x%lx)\n", pid,
+					   priv->comm, "PIN_PAGES", va_start, addr_label, addr, size_bytes);
 			}
 		}
 
@@ -122,17 +123,17 @@ static int mappings_seq_show(struct seq_file *s, void *v)
 
 				seq_printf(s,
 					   "%-8d %-16s %-14s ID: %-3u -> %s: 0x%016llx -> NOC: 0x%llx (size=0x%lx)\n",
-					   priv->pid, priv->comm, "DMA_BUF+IATU", dmabuf->index, addr_label, addr,
+					   pid, priv->comm, "DMA_BUF+IATU", dmabuf->index, addr_label, addr,
 					   sensitive ? region->base : 0, size_bytes);
 			} else {
-				seq_printf(s, "%-8d %-16s %-14s ID: %-3u -> %s: 0x%016llx (size=0x%lx)\n", priv->pid,
+				seq_printf(s, "%-8d %-16s %-14s ID: %-3u -> %s: 0x%016llx (size=0x%lx)\n", pid,
 					   priv->comm, "DMA_BUF", dmabuf->index, addr_label, addr, size_bytes);
 			}
 		}
 
 		// BAR mappings.
 		list_for_each_entry(bar_mapping, &priv->bar_mappings, list) {
-			seq_printf(s, "%-8d %-16s %-14s BAR%u %-2s (offset=0x%llx, size=0x%llx, refs=%d)\n", priv->pid,
+			seq_printf(s, "%-8d %-16s %-14s BAR%u %-2s (offset=0x%llx, size=0x%llx, refs=%d)\n", pid,
 				   priv->comm, "BAR", bar_mapping->bar_index,
 				   bar_mapping->type == BAR_MAPPING_WC ? "WC" : "UC", bar_mapping->offset,
 				   bar_mapping->size, refcount_read(&bar_mapping->refs));
@@ -142,11 +143,8 @@ static int mappings_seq_show(struct seq_file *s, void *v)
 		for_each_set_bit(tlb_id, priv->tlbs, TENSTORRENT_MAX_INBOUND_TLBS) {
 			if (tt_dev->dev_class->describe_tlb &&
 			    tt_dev->dev_class->describe_tlb(tt_dev, tlb_id, &desc) == 0) {
-				seq_printf(s,
-					   "%-8d %-16s %-14s ID: %-3u -> BAR%d + 0x%lx (size=0x%lx, refs=%d)\n",
-					   priv->pid, priv->comm, "TLB",
-					   tlb_id, desc.bar, desc.bar_offset,
-					   desc.size,
+				seq_printf(s, "%-8d %-16s %-14s ID: %-3u -> BAR%d + 0x%lx (size=0x%lx, refs=%d)\n", pid,
+					   priv->comm, "TLB", tlb_id, desc.bar, desc.bar_offset, desc.size,
 					   atomic_read(&tt_dev->tlb_refs[tlb_id]));
 			}
 		}
@@ -179,7 +177,7 @@ int pids_proc_show(struct seq_file *s, void *v)
 
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd)
-		seq_printf(s, "%d\n", priv->pid);
+		seq_printf(s, "%d\n", pid_vnr(priv->pid));
 	mutex_unlock(&tt_dev->chardev_mutex);
 
 	return 0;

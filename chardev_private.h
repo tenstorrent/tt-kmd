@@ -47,7 +47,7 @@ struct chardev_private {
 	struct list_head peer_mappings; // struct peer_resource_mapping.list
 	struct list_head bar_mappings;	// struct bar_mapping.list
 
-	pid_t pid;
+	struct pid *pid;
 	char comm[TASK_COMM_LEN];
 
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);

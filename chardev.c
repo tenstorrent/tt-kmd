@@ -619,7 +619,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	private_data->open_reset_gen = atomic_long_read(&tt_dev->reset_gen);
 	file->private_data = private_data;
 
-	private_data->pid = task_tgid_vnr(current);
+	private_data->pid = get_pid(task_pid(current->group_leader));
 	get_task_comm(private_data->comm, current);
 
 	// Legacy client: default to AICLK=Low, everything else enabled.
@@ -683,6 +683,7 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 		tenstorrent_set_aggregated_power_state(tt_dev);
 
 	tenstorrent_device_put(tt_dev);
+	put_pid(priv->pid);
 	kfree(file->private_data);
 	file->private_data = NULL;
 	return 0;

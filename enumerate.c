@@ -370,13 +370,13 @@ static int tenstorrent_resume(struct device *dev) {
 	struct pci_dev *pdev = to_pci_dev(dev);
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(pdev);
 
-	int ret = tt_dev->dev_class->init_hardware(tt_dev);
+	bool ok = tt_dev->dev_class->init_hardware(tt_dev);
 
 	// Suspend invalidates the saved state.
-	if (ret == 0)
+	if (ok)
 		pci_save_state(pdev);
 
-	return ret;
+	return ok ? 0 : -EIO;
 }
 
 static SIMPLE_DEV_PM_OPS(tenstorrent_pm_ops, tenstorrent_suspend, tenstorrent_resume);

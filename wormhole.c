@@ -8,6 +8,8 @@
 #include <linux/sysfs.h>
 #include <linux/delay.h>
 #include <linux/pci.h>
+#include <linux/pm_runtime.h>
+#include <linux/cleanup.h>
 
 #include "wormhole.h"
 #include "pcie.h"
@@ -17,6 +19,8 @@
 #include "telemetry.h"
 #include "pcie.h"
 #include "enumerate.h"
+
+DEFINE_GUARD(pm_runtime_put, struct device *, pm_runtime_mark_last_busy(_T), pm_runtime_put_autosuspend(_T))
 
 #define TLB_1M_WINDOW_COUNT 156
 #define TLB_1M_SHIFT 20
@@ -330,6 +334,12 @@ static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *a
 	unsigned i = data - wh_sysfs_attributes;
 	u64 offset = wh->sysfs_attr_offsets[i];
 	u32 value = 0;
+	int ret;
+
+	ret = pm_runtime_resume_and_get(&tt_dev->pdev->dev);
+	if (ret < 0)
+		return ret;
+	guard(pm_runtime_put)(&tt_dev->pdev->dev);
 
 	value = ioread32(wh->bar4_mapping + offset);
 	return snprintf(buf, PAGE_SIZE, "%u\n", value);
@@ -343,6 +353,12 @@ static ssize_t sysfs_show_u64_hex(struct device *dev, struct device_attribute *a
 	unsigned i = data - wh_sysfs_attributes;
 	u64 offset = wh->sysfs_attr_offsets[i];
 	u32 hi, lo;
+	int ret;
+
+	ret = pm_runtime_resume_and_get(&tt_dev->pdev->dev);
+	if (ret < 0)
+		return ret;
+	guard(pm_runtime_put)(&tt_dev->pdev->dev);
 
 	hi = ioread32(wh->bar4_mapping + offset);
 	lo = ioread32(wh->bar4_mapping + offset + 4);
@@ -358,6 +374,12 @@ static ssize_t sysfs_show_u32_ver(struct device *dev, struct device_attribute *a
 	u64 offset = wh->sysfs_attr_offsets[i];
 	u32 value = 0;
 	u32 major, minor, patch, ver;
+	int ret;
+
+	ret = pm_runtime_resume_and_get(&tt_dev->pdev->dev);
+	if (ret < 0)
+		return ret;
+	guard(pm_runtime_put)(&tt_dev->pdev->dev);
 
 	value = ioread32(wh->bar4_mapping + offset);
 
@@ -387,6 +409,12 @@ static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute 
 	u32 value;
 	u16 card_type;
 	char *card_name;
+	int ret;
+
+	ret = pm_runtime_resume_and_get(&tt_dev->pdev->dev);
+	if (ret < 0)
+		return ret;
+	guard(pm_runtime_put)(&tt_dev->pdev->dev);
 
 	value = ioread32(wh->bar4_mapping + offset);
 	card_type = (value >> 4) & 0xFFFF;
@@ -423,7 +451,15 @@ static ssize_t wh_show_pcie_single_counter(struct device *dev, char *buf, u32 co
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 	u8 __iomem *noc2axi = wh_dev->bar4_mapping + NIU_COUNTERS_START;
 	u64 addr = (4 * counter_offset) + (noc * NIU_NOC1_OFFSET);
-	u32 value = ioread32(noc2axi + addr);
+	u32 value;
+	int ret;
+
+	ret = pm_runtime_resume_and_get(&tt_dev->pdev->dev);
+	if (ret < 0)
+		return ret;
+	guard(pm_runtime_put)(&tt_dev->pdev->dev);
+
+	value = ioread32(noc2axi + addr);
 	return scnprintf(buf, PAGE_SIZE, "%u\n", value);
 }
 

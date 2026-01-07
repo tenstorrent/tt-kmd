@@ -16,6 +16,7 @@
 #include <linux/version.h>
 #include <linux/debugfs.h>
 #include <linux/proc_fs.h>
+#include <linux/pm_runtime.h>
 
 #include "chardev_private.h"
 #include "device.h"
@@ -602,10 +603,17 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	struct tenstorrent_device *tt_dev = inode_to_tt_dev(inode);
 	struct chardev_private *private_data;
 	bool power_aware = file->f_flags & O_APPEND;
+	int ret;
 
 	private_data = kzalloc(sizeof(*private_data), GFP_KERNEL);
 	if (private_data == NULL)
 		return -ENOMEM;
+
+	ret = pm_runtime_resume_and_get(&tt_dev->pdev->dev);
+	if (ret < 0) {
+		kfree(private_data);
+		return ret;
+	}
 
 	mutex_init(&private_data->mutex);
 
@@ -635,7 +643,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	increment_cdev_open_count(tt_dev);
 
 	if (!power_aware && !tt_dev->detached && !tt_dev->needs_hw_init) {
-		int ret = tenstorrent_set_aggregated_power_state(tt_dev);
+		ret = tenstorrent_set_aggregated_power_state(tt_dev);
 		if (ret < 0)
 			dev_warn(&tt_dev->dev, "Failed to set initial power state: %d\n", ret);
 	}
@@ -682,9 +690,14 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	if (power_down)
 		tenstorrent_set_aggregated_power_state(tt_dev);
 
+	// Release our PM reference. Device may auto-suspend after the delay.
+	pm_runtime_mark_last_busy(&tt_dev->pdev->dev);
+	pm_runtime_put_autosuspend(&tt_dev->pdev->dev);
+
 	tenstorrent_device_put(tt_dev);
 	kfree(file->private_data);
 	file->private_data = NULL;
+
 	return 0;
 }
 

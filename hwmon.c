@@ -4,9 +4,14 @@
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/stat.h>
+#include <linux/pm_runtime.h>
+#include <linux/cleanup.h>
 #include <asm/io.h>
 
 #include "hwmon.h"
+#include "device.h"
+
+DEFINE_GUARD(pm_runtime_put, struct device *, pm_runtime_mark_last_busy(_T), pm_runtime_put_autosuspend(_T))
 
 static umode_t tt_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type, u32 attr, int channel) {
 	const struct tt_hwmon_context *ctx = drvdata;
@@ -30,7 +35,14 @@ static umode_t tt_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types 
 
 static int tt_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long *val) {
 	const struct tt_hwmon_context *ctx = dev_get_drvdata(dev);
+	struct tenstorrent_device *tt_dev = container_of(ctx, struct tenstorrent_device, hwmon_context);
 	const struct tt_hwmon_attr *attribute = ctx->attributes;
+	int ret;
+
+	ret = pm_runtime_resume_and_get(&tt_dev->pdev->dev);
+	if (ret < 0)
+		return ret;
+	guard(pm_runtime_put)(&tt_dev->pdev->dev);
 
 	while (attribute->reg_offset != TT_HWMON_ATTR_END) {
 		if (attribute->type == type && attribute->attr == attr) {

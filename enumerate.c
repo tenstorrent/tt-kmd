@@ -8,6 +8,7 @@
 #include <linux/mutex.h>
 #include <linux/version.h>
 #include <linux/pm.h>
+#include <linux/pm_runtime.h>
 #include <linux/list.h>
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
@@ -296,6 +297,13 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	if (power_policy)
 		tenstorrent_set_aggregated_power_state(tt_dev);
 
+	// Enable runtime PM. Device will auto-suspend after 5 seconds of idleness.
+	// PCI core disables this by default, so put_noidle + allow turn it on.
+	pm_runtime_set_autosuspend_delay(&dev->dev, 5000);
+	pm_runtime_use_autosuspend(&dev->dev);
+	pm_runtime_put_noidle(&dev->dev);
+	pm_runtime_allow(&dev->dev);
+
 	return 0;
 }
 
@@ -304,6 +312,10 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(dev);
 	struct chardev_private *priv, *tmp;
 	u16 vendor_id;
+
+	// Disable runtime PM and ensure device is awake for teardown.
+	pm_runtime_forbid(&dev->dev);
+	pm_runtime_get_sync(&dev->dev);
 
 	if (tt_dev->dev_class == &wormhole_class) {
 		struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
@@ -337,6 +349,10 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 
 	// If this is postponed, a subsequent probe is forced to use a different ordinal.
 	xa_erase(&tenstorrent_dev_xa, tt_dev->ordinal);
+
+	// Balance the get_sync/forbid from start of remove.
+	pm_runtime_put_sync(&dev->dev);
+	pm_runtime_allow(&dev->dev);
 
 	tenstorrent_device_put(tt_dev);
 }
@@ -379,7 +395,35 @@ static int tenstorrent_resume(struct device *dev) {
 	return ok ? 0 : -EIO;
 }
 
-static SIMPLE_DEV_PM_OPS(tenstorrent_pm_ops, tenstorrent_suspend, tenstorrent_resume);
+static int tenstorrent_runtime_suspend(struct device *dev)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+	struct tenstorrent_device *tt_dev = pci_get_drvdata(pdev);
+
+	tt_dev->dev_class->cleanup_hardware(tt_dev);
+
+	return 0;
+}
+
+static int tenstorrent_runtime_resume(struct device *dev)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+	struct tenstorrent_device *tt_dev = pci_get_drvdata(pdev);
+
+	if (!tt_dev->dev_class->init_hardware(tt_dev))
+		return -EIO;
+
+	pci_save_state(pdev);
+
+	return 0;
+}
+
+static const struct dev_pm_ops tenstorrent_pm_ops = {
+	.suspend = tenstorrent_suspend,
+	.resume = tenstorrent_resume,
+	.runtime_suspend = tenstorrent_runtime_suspend,
+	.runtime_resume = tenstorrent_runtime_resume,
+};
 
 extern const struct pci_device_id tenstorrent_ids[];
 static struct pci_driver tenstorrent_pci_driver = {

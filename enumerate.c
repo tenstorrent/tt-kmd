@@ -272,8 +272,13 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	tt_dev->interrupt_enabled = tenstorrent_enable_interrupts(tt_dev);
 
-	if (device_class->init_device(tt_dev))
-		tt_dev->needs_hw_init = !device_class->init_hardware(tt_dev);
+	if (!device_class->init_device(tt_dev)) {
+		dev_err(&dev->dev, "Device initialization failed\n");
+		err = -EIO;
+		goto fail_init_device;
+	}
+
+	tt_dev->needs_hw_init = !device_class->init_hardware(tt_dev);
 
 	pci_save_state(dev);
 	device_class->save_reset_state(tt_dev);
@@ -295,6 +300,16 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 		tenstorrent_set_aggregated_power_state(tt_dev);
 
 	return 0;
+
+fail_init_device:
+	tenstorrent_disable_interrupts(tt_dev);
+	pci_disable_pcie_error_reporting(dev);
+	pci_set_drvdata(dev, NULL);
+	pci_dev_put(dev);
+	xa_erase(&tenstorrent_dev_xa, ordinal);
+	kfree(tt_dev);
+	pci_disable_device(dev);
+	return err;
 }
 
 static void tenstorrent_pci_remove(struct pci_dev *dev)

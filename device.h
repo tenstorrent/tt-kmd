@@ -11,6 +11,7 @@
 #include <linux/reboot.h>
 #include <linux/kref.h>
 #include <linux/rwsem.h>
+#include <linux/wait.h>
 
 #include "ioctl.h"
 #include "hwmon.h"
@@ -44,6 +45,7 @@ struct tenstorrent_device {
 	struct notifier_block reboot_notifier;
 
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
+	wait_queue_head_t resource_lock_waitqueue;
 
 	struct tt_hwmon_context hwmon_context;
 

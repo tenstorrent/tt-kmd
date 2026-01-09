@@ -1215,6 +1215,11 @@ static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *v
 		goto unlock;
 	}
 
+	if (tlb_desc.bar_offset + size > pci_resource_len(tt_dev->pdev, tlb_desc.bar)) {
+		ret = -ENXIO;
+		goto unlock;
+	}
+
 	bar_start = pci_resource_start(tt_dev->pdev, tlb_desc.bar);
 	pfn = (bar_start + tlb_desc.bar_offset) >> PAGE_SHIFT;
 

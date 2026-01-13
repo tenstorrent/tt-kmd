@@ -16,14 +16,27 @@ struct file;
 struct tenstorrent_device;
 
 enum bar_mapping_type { BAR_MAPPING_UC, BAR_MAPPING_WC };
+enum tenstorrent_vma_type { TT_VMA_BAR, TT_VMA_TLB };
 
-struct bar_mapping {
+struct tenstorrent_mmap_vma {
 	struct list_head list;
-	u64 offset;
-	u64 size;
-	unsigned int bar_index;
-	enum bar_mapping_type type;
-	refcount_t refs;
+	struct vm_area_struct *vma;
+	enum tenstorrent_vma_type type;
+	enum bar_mapping_type cache_mode;
+
+	union {
+		// BAR mapping metadata
+		struct {
+			unsigned int bar_index;
+			u64 offset;
+			u64 size;
+		} bar;
+
+		// TLB mapping metadata
+		struct {
+			int id;
+		} tlb;
+	};
 };
 
 #define DMABUF_HASHTABLE_BITS 4
@@ -45,7 +58,9 @@ struct chardev_private {
 	DECLARE_HASHTABLE(dmabufs, DMABUF_HASHTABLE_BITS);	// keyed on by dmabuf.index, chained on struct dmabuf.hash_chain
 	struct list_head pinnings;	// struct pinned_page_range.list
 	struct list_head peer_mappings; // struct peer_resource_mapping.list
-	struct list_head bar_mappings;	// struct bar_mapping.list
+
+	struct list_head vma_list;	// struct tenstorrent_mmap_vma.list
+	struct mutex vma_lock;		// Protects vma_list
 
 	struct pid *pid;
 	char comm[TASK_COMM_LEN];

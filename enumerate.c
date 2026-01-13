@@ -56,7 +56,7 @@ static int mappings_seq_show(struct seq_file *s, void *v)
 
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
-		struct bar_mapping *bar_mapping;
+		struct tenstorrent_mmap_vma *mmap_vma;
 		struct dmabuf *dmabuf;
 		unsigned int bkt;
 		pid_t pid;
@@ -131,22 +131,36 @@ static int mappings_seq_show(struct seq_file *s, void *v)
 			}
 		}
 
-		// BAR mappings.
-		list_for_each_entry(bar_mapping, &priv->bar_mappings, list) {
-			seq_printf(s, "%-8d %-16s %-14s BAR%u %-2s (offset=0x%llx, size=0x%llx, refs=%d)\n", pid,
-				   priv->comm, "BAR", bar_mapping->bar_index,
-				   bar_mapping->type == BAR_MAPPING_WC ? "WC" : "UC", bar_mapping->offset,
-				   bar_mapping->size, refcount_read(&bar_mapping->refs));
+		// Allocated TLB windows.
+		for_each_set_bit(tlb_id, priv->tlbs, TENSTORRENT_MAX_INBOUND_TLBS) {
+			seq_printf(s, "%-8d %-16s %-14s ID: %-3u\n", pid, priv->comm, "TLB-alloc", tlb_id);
 		}
 
-		// Individual inbound TLB window mappings.
-		for_each_set_bit(tlb_id, priv->tlbs, TENSTORRENT_MAX_INBOUND_TLBS) {
-			if (tt_dev->dev_class->describe_tlb &&
-			    tt_dev->dev_class->describe_tlb(tt_dev, tlb_id, &desc) == 0) {
-				seq_printf(s, "%-8d %-16s %-14s ID: %-3u -> BAR%d + 0x%lx (size=0x%lx, refs=%d)\n", pid,
-					   priv->comm, "TLB", tlb_id, desc.bar, desc.bar_offset, desc.size,
-					   atomic_read(&tt_dev->tlb_refs[tlb_id]));
+		// BAR/TLB mappings.
+		if (!mutex_trylock(&priv->vma_lock)) {
+			seq_printf(s, "%-8s %-16s %-14s\n", "", "", "...VMA list busy, skipping...");
+		} else {
+			list_for_each_entry(mmap_vma, &priv->vma_list, list) {
+				const char *cache_str = mmap_vma->cache_mode == BAR_MAPPING_WC ? "WC" : "UC";
+
+				if (mmap_vma->type == TT_VMA_BAR) {
+					seq_printf(s, "%-8d %-16s %-14s BAR%u %-2s (offset=0x%llx, size=0x%llx)\n",
+						   pid, priv->comm, "BAR",
+						   mmap_vma->bar.bar_index, cache_str,
+						   mmap_vma->bar.offset,
+						   mmap_vma->bar.size);
+				} else if (mmap_vma->type == TT_VMA_TLB) {
+					tlb_id = mmap_vma->tlb.id;
+					if (tt_dev->dev_class->describe_tlb &&
+					    tt_dev->dev_class->describe_tlb(tt_dev, tlb_id, &desc) == 0) {
+						seq_printf(s,
+							   "%-8d %-16s %-14s ID: %-3u %-2s -> BAR%d + 0x%lx (size=0x%lx)\n",
+							   pid, priv->comm, "TLB", tlb_id, cache_str,
+							   desc.bar, desc.bar_offset, desc.size);
+					}
+				}
 			}
+			mutex_unlock(&priv->vma_lock);
 		}
 
 		mutex_unlock(&priv->device->iatu_mutex);

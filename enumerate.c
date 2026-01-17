@@ -224,8 +224,17 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	if (tt_dev == NULL)
 		return -ENOMEM;
 
+	tt_dev->inode = tenstorrent_fs_inode_new();
+	if (IS_ERR(tt_dev->inode)) {
+		err = PTR_ERR(tt_dev->inode);
+		kfree(tt_dev);
+		pci_disable_device(dev);
+		return err;
+	}
+
 	err = xa_alloc(&tenstorrent_dev_xa, &ordinal, tt_dev, xa_limit_31b, GFP_KERNEL);
 	if (err) {
+		tenstorrent_fs_inode_release(tt_dev->inode);
 		kfree(tt_dev);
 		pci_disable_device(dev);
 		return err;
@@ -361,7 +370,7 @@ static void tt_dev_release(struct kref *tt_dev_kref) {
 	if (tt_dev->dev_class->reboot)
 		unregister_reboot_notifier(&tt_dev->reboot_notifier);
 
-
+	tenstorrent_fs_inode_release(tt_dev->inode);
 	pci_dev_put(pdev);
 	kfree(tt_dev);
 }

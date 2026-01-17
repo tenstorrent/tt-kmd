@@ -7,11 +7,15 @@
 #include <linux/pci.h>
 #include <linux/debugfs.h>
 #include <linux/proc_fs.h>
+#include <linux/mount.h>
+#include <linux/pseudo_fs.h>
 
 #include "chardev.h"
 #include "enumerate.h"
 
 #include "module.h"
+
+#define TENSTORRENT_FS_MAGIC 0x54454E53	// "TENS"
 
 #define TENSTORRENT_DRIVER_VERSION_STRING \
 	__stringify(TENSTORRENT_DRIVER_VERSION_MAJOR) "." \
@@ -45,6 +49,46 @@ MODULE_PARM_DESC(auto_reset_timeout, "Timeout duration in seconds for M3 auto re
 bool power_policy = true;
 module_param(power_policy, bool, 0444);
 MODULE_PARM_DESC(power_policy, "Enable power policy: low power at probe, re-aggregate on close (default=on).");
+
+// Pseudo filesystem for per-device inodes. By linking all device fds to an
+// address_space through a pseudo fs inode, we can use unmap_mapping_range()
+// to zap all VMAs associated with a device. This is modeled after VFIO's
+// approach (see commit b7c5e64fecfa8876).
+static struct vfsmount *tenstorrent_vfs_mount;
+static int tenstorrent_fs_count;
+
+static int tenstorrent_fs_init_fs_context(struct fs_context *fc)
+{
+	return init_pseudo(fc, TENSTORRENT_FS_MAGIC) ? 0 : -ENOMEM;
+}
+
+static struct file_system_type tenstorrent_fs_type = {
+	.name = "tenstorrent",
+	.init_fs_context = tenstorrent_fs_init_fs_context,
+	.kill_sb = kill_anon_super,
+};
+
+struct inode *tenstorrent_fs_inode_new(void)
+{
+	struct inode *inode;
+	int ret;
+
+	ret = simple_pin_fs(&tenstorrent_fs_type, &tenstorrent_vfs_mount, &tenstorrent_fs_count);
+	if (ret)
+		return ERR_PTR(ret);
+
+	inode = alloc_anon_inode(tenstorrent_vfs_mount->mnt_sb);
+	if (IS_ERR(inode))
+		simple_release_fs(&tenstorrent_vfs_mount, &tenstorrent_fs_count);
+
+	return inode;
+}
+
+void tenstorrent_fs_inode_release(struct inode *inode)
+{
+	iput(inode);
+	simple_release_fs(&tenstorrent_vfs_mount, &tenstorrent_fs_count);
+}
 
 const struct pci_device_id tenstorrent_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_TENSTORRENT, PCI_DEVICE_ID_GRAYSKULL),

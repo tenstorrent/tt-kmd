@@ -34,6 +34,7 @@ struct tenstorrent_device {
 	struct rw_semaphore reset_rwsem;
 	struct dentry *debugfs_root;
 	struct proc_dir_entry *procfs_root;
+	struct inode *inode;	// Pseudo fs inode for address_space tracking
 
 	unsigned int ordinal;
 	bool dma_capable;

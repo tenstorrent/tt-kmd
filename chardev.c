@@ -619,6 +619,11 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	private_data->open_reset_gen = atomic_long_read(&tt_dev->reset_gen);
 	file->private_data = private_data;
 
+	// Link this fd's address_space to the device's pseudo fs inode. This allows
+	// unmap_mapping_range() to zap all VMAs associated with the device across
+	// all processes and file descriptors.
+	file->f_mapping = tt_dev->inode->i_mapping;
+
 	private_data->pid = get_pid(task_pid(current->group_leader));
 	get_task_comm(private_data->comm, current);
 

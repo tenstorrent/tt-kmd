@@ -1039,12 +1039,73 @@ static struct dmabuf *vma_dmabuf_target(struct chardev_private *priv,
 		return NULL;
 }
 
+// Decode BAR index and offset from a file offset in the BAR mmap regions.
+// Returns the BAR index (0, 2, or 4) and sets *offset_in_bar to the byte
+// offset within that BAR.
+static int decode_bar_from_offset(u64 file_offset, u64 *offset_in_bar)
+{
+	unsigned int region = file_offset >> 36;
+	u64 region_base = (u64)region << 36;
+
+	*offset_in_bar = file_offset - region_base;
+
+	// Regions 0-1 → BAR0, 2-3 → BAR2, 4-5 → BAR4
+	switch (region) {
+	case 0: case 1: return 0;
+	case 2: case 3: return 2;
+	case 4: case 5: return 4;
+	default: return -1;
+	}
+}
+
+static vm_fault_t bar_vm_fault(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	struct chardev_private *priv = vma->vm_file->private_data;
+	struct tenstorrent_device *tt_dev = priv->device;
+	u64 file_offset = (u64)vmf->pgoff << PAGE_SHIFT;
+	u64 offset_in_bar;
+	unsigned long pfn;
+	int bar;
+	vm_fault_t ret = VM_FAULT_SIGBUS;
+
+	bar = decode_bar_from_offset(file_offset, &offset_in_bar);
+	if (bar < 0)
+		return VM_FAULT_SIGBUS;
+
+	down_read(&tt_dev->reset_rwsem);
+
+	if (tt_dev->detached || tt_dev->needs_hw_init)
+		goto out;
+
+	pfn = (pci_resource_start(tt_dev->pdev, bar) + offset_in_bar) >> PAGE_SHIFT;
+	ret = vmf_insert_pfn(vma, vmf->address, pfn);
+
+out:
+	up_read(&tt_dev->reset_rwsem);
+	return ret;
+}
+
 static void bar_vma_open(struct vm_area_struct *vma)
 {
-	struct bar_mapping *mapping = vma->vm_private_data;
+	struct chardev_private *priv = vma->vm_file->private_data;
+	struct bar_mapping *mapping;
 
-	if (mapping)
-		refcount_inc(&mapping->refs);
+	// On fork, create a new tracking entry for the child's VMA.
+	mapping = kmalloc(sizeof(*mapping), GFP_KERNEL);
+	if (!mapping) {
+		// Can't track this mapping; it will work but won't appear in debugfs.
+		vma->vm_private_data = NULL;
+		return;
+	}
+
+	*mapping = *(struct bar_mapping *)vma->vm_private_data;
+
+	mutex_lock(&priv->mutex);
+	list_add(&mapping->list, &priv->bar_mappings);
+	mutex_unlock(&priv->mutex);
+
+	vma->vm_private_data = mapping;
 }
 
 static void bar_vma_close(struct vm_area_struct *vma)
@@ -1055,48 +1116,62 @@ static void bar_vma_close(struct vm_area_struct *vma)
 	if (!mapping)
 		return;
 
-	if (refcount_dec_and_test(&mapping->refs)) {
-		mutex_lock(&priv->mutex);
-		list_del(&mapping->list);
-		mutex_unlock(&priv->mutex);
+	mutex_lock(&priv->mutex);
+	list_del(&mapping->list);
+	mutex_unlock(&priv->mutex);
 
-		kfree(mapping);
-	}
+	kfree(mapping);
 }
 
 static const struct vm_operations_struct bar_vm_ops = {
+	.fault = bar_vm_fault,
 	.open = bar_vma_open,
 	.close = bar_vma_close,
 };
 
-static int map_pci_bar(struct chardev_private *priv, struct vm_area_struct *vma,
-		       unsigned int bar, enum bar_mapping_type type)
+// Validate that a BAR mmap request is within bounds.
+// Does not modify vma->vm_pgoff.
+static int validate_bar_mmap(struct chardev_private *priv, struct vm_area_struct *vma, u64 region_base,
+			     unsigned int bar)
 {
 	struct pci_dev *pdev = priv->device->pdev;
-	resource_size_t bar_start = pci_resource_start(pdev, bar);
 	resource_size_t bar_len = pci_resource_len(pdev, bar);
+	u64 file_offset = (u64)vma->vm_pgoff << PAGE_SHIFT;
+	u64 mapping_end = file_offset + (vma->vm_end - vma->vm_start);
+
+	// Check range is within [region_base, region_base + bar_len)
+	if (file_offset < region_base)
+		return -EINVAL;
+	if (mapping_end > region_base + bar_len)
+		return -EINVAL;
+
+	return 0;
+}
+
+static int map_pci_bar(struct chardev_private *priv, struct vm_area_struct *vma, unsigned int bar,
+		       enum bar_mapping_type type)
+{
 	struct bar_mapping *mapping;
-	int ret;
+	u64 file_offset = (u64)vma->vm_pgoff << PAGE_SHIFT;
+	u64 offset_in_bar;
 
 	mapping = kmalloc(sizeof(*mapping), GFP_KERNEL);
 	if (!mapping)
 		return -ENOMEM;
 
-	ret = vm_iomap_memory(vma, bar_start, bar_len);
-	if (ret) {
-		kfree(mapping);
-		return ret;
-	}
-
+	decode_bar_from_offset(file_offset, &offset_in_bar);
 	mapping->bar_index = bar;
-	mapping->offset = (u64)vma->vm_pgoff << PAGE_SHIFT;
+	mapping->offset = offset_in_bar;
 	mapping->size = vma->vm_end - vma->vm_start;
 	mapping->type = type;
-	refcount_set(&mapping->refs, 1);
 
 	mutex_lock(&priv->mutex);
 	list_add(&mapping->list, &priv->bar_mappings);
 	mutex_unlock(&priv->mutex);
+
+	// Set VM flags that io_remap_pfn_range() would normally set.
+	// VM_PFNMAP is required for vmf_insert_pfn().
+	vm_flags_set(vma, VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
 
 	vma->vm_ops = &bar_vm_ops;
 	vma->vm_private_data = mapping;
@@ -1247,32 +1322,35 @@ int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 	// Each mapping must be contained within a single entity.
 	// - PCI BAR 0/2/4 uncacheable mapping
 	// - PCI BAR 0/2/4 write-combining mapping
+	// - TLB window mapping
 	// - DMA buffer mapping
 
-	if (vma_target_range(vma, MMAP_OFFSET_RESOURCE0_UC, pci_resource_len(pdev, 0))) {
+	// BAR mappings use fault-based population to support unmap_mapping_range().
+	if (validate_bar_mmap(priv, vma, MMAP_OFFSET_RESOURCE0_UC, 0) == 0) {
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
 		return map_pci_bar(priv, vma, 0, BAR_MAPPING_UC);
 
-	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE0_WC, pci_resource_len(pdev, 0))) {
+	} else if (validate_bar_mmap(priv, vma, MMAP_OFFSET_RESOURCE0_WC, 0) == 0) {
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 		return map_pci_bar(priv, vma, 0, BAR_MAPPING_WC);
 
-	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE1_UC, pci_resource_len(pdev, 2))) {
+	} else if (validate_bar_mmap(priv, vma, MMAP_OFFSET_RESOURCE1_UC, 2) == 0) {
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
 		return map_pci_bar(priv, vma, 2, BAR_MAPPING_UC);
 
-	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE1_WC, pci_resource_len(pdev, 2))) {
+	} else if (validate_bar_mmap(priv, vma, MMAP_OFFSET_RESOURCE1_WC, 2) == 0) {
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 		return map_pci_bar(priv, vma, 2, BAR_MAPPING_WC);
 
-	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE2_UC, pci_resource_len(pdev, 4))) {
+	} else if (validate_bar_mmap(priv, vma, MMAP_OFFSET_RESOURCE2_UC, 4) == 0) {
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
 		return map_pci_bar(priv, vma, 4, BAR_MAPPING_UC);
 
-	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE2_WC, pci_resource_len(pdev, 4))) {
+	} else if (validate_bar_mmap(priv, vma, MMAP_OFFSET_RESOURCE2_WC, 4) == 0) {
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 		return map_pci_bar(priv, vma, 4, BAR_MAPPING_WC);
 
+	// TLB and DMA buffer mappings still use the old approach for now.
 	} else if (vma_target_range(vma, MMAP_OFFSET_TLB_UC, MMAP_RESOURCE_SIZE)) {
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
 		return map_tlb_window(priv, vma);

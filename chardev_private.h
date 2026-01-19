@@ -19,11 +19,10 @@ enum bar_mapping_type { BAR_MAPPING_UC, BAR_MAPPING_WC };
 
 struct bar_mapping {
 	struct list_head list;
-	u64 offset;
+	u64 offset;		// Offset within BAR (not file offset)
 	u64 size;
 	unsigned int bar_index;
 	enum bar_mapping_type type;
-	refcount_t refs;
 };
 
 #define DMABUF_HASHTABLE_BITS 4

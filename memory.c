@@ -12,6 +12,7 @@
 #include <linux/iommu.h>
 #include <linux/file.h>
 #include <linux/vmalloc.h>
+#include <linux/io.h>
 
 #include "chardev_private.h"
 #include "device.h"
@@ -1179,10 +1180,100 @@ static int map_pci_bar(struct chardev_private *priv, struct vm_area_struct *vma,
 	return 0;
 }
 
+// Decode TLB id from a file offset in the TLB mmap regions.
+// Returns the TLB id or -1 if the offset doesn't correspond to a valid TLB.
+// Also returns the tlb_descriptor and offset within the TLB window.
+static int decode_tlb_from_offset(struct tenstorrent_device *tt_dev, u64 file_offset,
+				  struct tlb_descriptor *tlb_desc, u64 *offset_in_window)
+{
+	unsigned int region = file_offset >> 36;
+	u64 region_base = (u64)region << 36;
+	u64 offset_in_region = file_offset - region_base;
+	bool bar4;
+	u64 bar_offset;
+	u64 total_tlbs = 0;
+	int i;
+
+	// Regions 6-7 are TLB UC/WC
+	if (region != 6 && region != 7)
+		return -1;
+
+	if (!tt_dev->dev_class->describe_tlb || tt_dev->dev_class->tlb_kinds == 0)
+		return -1;
+
+	// Offsets >= BAR0_SIZE indicate BAR4 TLBs (Blackhole 4G windows)
+	bar4 = offset_in_region >= BAR0_SIZE;
+	bar_offset = bar4 ? offset_in_region - BAR0_SIZE : offset_in_region;
+
+	for (i = 0; i < tt_dev->dev_class->tlb_kinds; ++i)
+		total_tlbs += tt_dev->tlb_counts[i];
+
+	// Find the TLB window containing this offset
+	for (i = 0; i < total_tlbs; ++i) {
+		if (tt_dev->dev_class->describe_tlb(tt_dev, i, tlb_desc))
+			continue;
+
+		if ((tlb_desc->bar == 4) != bar4)
+			continue;
+
+		if (bar_offset >= tlb_desc->bar_offset && bar_offset < tlb_desc->bar_offset + tlb_desc->size) {
+			*offset_in_window = bar_offset - tlb_desc->bar_offset;
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+// Encode TLB id and WC flag in vm_private_data
+#define TLB_PRIVATE_WC_FLAG (1UL << 31)
+#define TLB_PRIVATE_ID_MASK ((1UL << 31) - 1)
+
+static vm_fault_t tlb_vm_fault(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	struct chardev_private *priv = vma->vm_file->private_data;
+	struct tenstorrent_device *tt_dev = priv->device;
+	uintptr_t private_data = (uintptr_t)vma->vm_private_data;
+	int id = private_data & TLB_PRIVATE_ID_MASK;
+	struct tlb_descriptor tlb_desc;
+	unsigned long pfn;
+	unsigned long offset_in_vma;
+	vm_fault_t ret = VM_FAULT_SIGBUS;
+
+	// Sanity check - id was set in map_tlb_window
+	if (id < 0 || id >= TENSTORRENT_MAX_INBOUND_TLBS)
+		return VM_FAULT_SIGBUS;
+
+	// Check that this fd owns the TLB
+	if (!test_bit(id, priv->tlbs))
+		return VM_FAULT_SIGBUS;
+
+	down_read(&tt_dev->reset_rwsem);
+
+	if (tt_dev->detached || tt_dev->needs_hw_init)
+		goto out;
+
+	if (tt_dev->dev_class->describe_tlb(tt_dev, id, &tlb_desc))
+		goto out;
+
+	// Calculate offset within the VMA/TLB window
+	offset_in_vma = vmf->address - vma->vm_start;
+
+	pfn = (pci_resource_start(tt_dev->pdev, tlb_desc.bar) + tlb_desc.bar_offset + offset_in_vma) >> PAGE_SHIFT;
+	ret = vmf_insert_pfn(vma, vmf->address, pfn);
+	pr_info_ratelimited("tlb_vm_fault: pfn: %lx, offset_in_vma: %lx, tlb_desc.bar: %d, tlb_desc.bar_offset: %lx pgprot: %lx\n", pfn, offset_in_vma, tlb_desc.bar, tlb_desc.bar_offset, vma->vm_page_prot.pgprot);
+
+out:
+	up_read(&tt_dev->reset_rwsem);
+	return ret;
+}
+
 static void tlb_vma_open(struct vm_area_struct *vma)
 {
 	struct chardev_private *priv;
 	struct tenstorrent_device *tt_dev;
+	uintptr_t private_data;
 	unsigned int id;
 
 	if (!vma->vm_file)
@@ -1193,7 +1284,8 @@ static void tlb_vma_open(struct vm_area_struct *vma)
 		return;
 
 	tt_dev = priv->device;
-	id = (int)((uintptr_t)vma->vm_private_data);
+	private_data = (uintptr_t)vma->vm_private_data;
+	id = private_data & TLB_PRIVATE_ID_MASK;
 
 	if (id >= TENSTORRENT_MAX_INBOUND_TLBS)
 		return;
@@ -1205,7 +1297,10 @@ static void tlb_vma_close(struct vm_area_struct *vma)
 {
 	struct chardev_private *priv;
 	struct tenstorrent_device *tt_dev;
+	struct tlb_descriptor tlb_desc;
+	uintptr_t private_data;
 	unsigned int id;
+	bool wc;
 
 	if (!vma->vm_file)
 		return;
@@ -1215,10 +1310,20 @@ static void tlb_vma_close(struct vm_area_struct *vma)
 		return;
 
 	tt_dev = priv->device;
-	id = (int)((uintptr_t)vma->vm_private_data);
+	private_data = (uintptr_t)vma->vm_private_data;
+	id = private_data & TLB_PRIVATE_ID_MASK;
+	wc = (private_data & TLB_PRIVATE_WC_FLAG) != 0;
 
 	if (id >= TENSTORRENT_MAX_INBOUND_TLBS)
 		return;
+
+	// Free the WC memtype reservation made in map_tlb_window
+	if (wc && tt_dev->dev_class->describe_tlb &&
+	    tt_dev->dev_class->describe_tlb(tt_dev, id, &tlb_desc) == 0) {
+		phys_addr_t bar_start = pci_resource_start(tt_dev->pdev, tlb_desc.bar);
+		unsigned long size = vma->vm_end - vma->vm_start;
+		arch_io_free_memtype_wc(bar_start + tlb_desc.bar_offset, size);
+	}
 
 	if (atomic_dec_if_positive(&tt_dev->tlb_refs[id]) < 0)
 		pr_err("vma_close: negative refcount\n");	// Should never happen
@@ -1231,6 +1336,7 @@ static int tlb_vma_may_split(struct vm_area_struct *vma, unsigned long address)
 }
 
 static const struct vm_operations_struct tlb_vm_ops = {
+	.fault = tlb_vm_fault,
 	.open = tlb_vma_open,
 	.close = tlb_vma_close,
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
@@ -1240,47 +1346,50 @@ static const struct vm_operations_struct tlb_vm_ops = {
 #endif
 };
 
-static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *vma)
+// Validate that a TLB mmap request is within bounds and corresponds to a valid TLB.
+// Does not modify vma->vm_pgoff. On success, sets *tlb_id and returns 0.
+static int validate_tlb_mmap(struct chardev_private *priv, struct vm_area_struct *vma,
+			     u64 region_base, int *tlb_id)
 {
 	struct tenstorrent_device *tt_dev = priv->device;
-	struct tlb_descriptor tlb_desc = {0};
+	u64 file_offset = (u64)vma->vm_pgoff << PAGE_SHIFT;
 	unsigned long size = vma->vm_end - vma->vm_start;
-	unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
-	unsigned long pfn;
-	bool bar4 = offset >= BAR0_SIZE;
-	phys_addr_t bar_start;
-	int i;
-	int id = -1;
-	int ret = 0;
-	u64 total_tlbs = 0;
+	struct tlb_descriptor tlb_desc;
+	u64 offset_in_window;
+	int id;
 
-	if (!tt_dev->dev_class->describe_tlb)
+	// Check this is in the TLB region
+	if (file_offset < region_base || file_offset >= region_base + MMAP_RESOURCE_SIZE)
 		return -EINVAL;
 
-	if (tt_dev->dev_class->tlb_kinds == 0)
-		return -EINVAL;
-
-	for (i = 0; i < tt_dev->dev_class->tlb_kinds; ++i)
-		total_tlbs += tt_dev->tlb_counts[i];
-
-	if (bar4)
-		offset -= BAR0_SIZE;
-
-	// Find the window matching the requested offset.
-	for (i = 0; i < total_tlbs; ++i) {
-		if (tt_dev->dev_class->describe_tlb(tt_dev, i, &tlb_desc))
-			return -EINVAL;
-
-		if (tlb_desc.bar_offset == offset && (tlb_desc.bar == 4) == bar4) {
-			id = i;
-			break;
-		}
-	}
-
+	// Decode to find which TLB this maps
+	id = decode_tlb_from_offset(tt_dev, file_offset, &tlb_desc, &offset_in_window);
 	if (id < 0)
 		return -EINVAL;
 
+	// Mapping must start at beginning of TLB window
+	if (offset_in_window != 0)
+		return -EINVAL;
+
+	// Mapping size must not exceed TLB window size
 	if (size > tlb_desc.size)
+		return -EINVAL;
+
+	*tlb_id = id;
+	return 0;
+}
+
+static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *vma,
+			  int id, bool wc)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tlb_descriptor tlb_desc;
+	unsigned long size = vma->vm_end - vma->vm_start;
+	phys_addr_t bar_start;
+	uintptr_t private_data;
+	int ret = 0;
+
+	if (tt_dev->dev_class->describe_tlb(tt_dev, id, &tlb_desc))
 		return -EINVAL;
 
 	mutex_lock(&priv->mutex);
@@ -1296,15 +1405,28 @@ static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *v
 	}
 
 	bar_start = pci_resource_start(tt_dev->pdev, tlb_desc.bar);
-	pfn = (bar_start + tlb_desc.bar_offset) >> PAGE_SHIFT;
+
+	// For WC mappings, register the memtype with the kernel's PAT tracking.
+	// This is required because vmf_insert_pfn calls pfnmap_setup_cachemode_pfn
+	// which looks up the registered memtype and overwrites the pgprot caching
+	// bits. Without registration, it defaults to UC_MINUS.
+	if (wc) {
+		ret = arch_io_reserve_memtype_wc(bar_start + tlb_desc.bar_offset, size);
+		if (ret)
+			goto unlock;
+	}
+
+	// Fault-based population - pages inserted via tlb_vm_fault on access.
+	// This avoids the race condition between unmap_mapping_range() and mmap
+	// where pages populated by remap_pfn_range() would be invisible during
+	// the window between call_mmap() and vma_link_file().
+	vm_flags_set(vma, VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
 
 	vma->vm_ops = &tlb_vm_ops;
-	vma->vm_private_data = (void*)(uintptr_t)id;
-
-	if (io_remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot)) {
-		ret = -EAGAIN;
-		goto unlock;
-	}
+	private_data = id;
+	if (wc)
+		private_data |= TLB_PRIVATE_WC_FLAG;
+	vma->vm_private_data = (void *)private_data;
 
 	tlb_vma_open(vma);
 
@@ -1316,6 +1438,7 @@ unlock:
 int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 {
 	struct pci_dev *pdev = priv->device->pdev;
+	int tlb_id;
 
 	// We multiplex various mappable entities into a single character
 	// device using the mapping offset to determine which entity you get.
@@ -1325,7 +1448,7 @@ int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 	// - TLB window mapping
 	// - DMA buffer mapping
 
-	// BAR mappings use fault-based population to support unmap_mapping_range().
+	// BAR and TLB mappings use fault-based population to support unmap_mapping_range().
 	if (validate_bar_mmap(priv, vma, MMAP_OFFSET_RESOURCE0_UC, 0) == 0) {
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
 		return map_pci_bar(priv, vma, 0, BAR_MAPPING_UC);
@@ -1350,14 +1473,13 @@ int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 		return map_pci_bar(priv, vma, 4, BAR_MAPPING_WC);
 
-	// TLB and DMA buffer mappings still use the old approach for now.
-	} else if (vma_target_range(vma, MMAP_OFFSET_TLB_UC, MMAP_RESOURCE_SIZE)) {
+	} else if (validate_tlb_mmap(priv, vma, MMAP_OFFSET_TLB_UC, &tlb_id) == 0) {
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
-		return map_tlb_window(priv, vma);
+		return map_tlb_window(priv, vma, tlb_id, false);
 
-	} else if (vma_target_range(vma, MMAP_OFFSET_TLB_WC, MMAP_RESOURCE_SIZE)) {
+	} else if (validate_tlb_mmap(priv, vma, MMAP_OFFSET_TLB_WC, &tlb_id) == 0) {
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-		return map_tlb_window(priv, vma);
+		return map_tlb_window(priv, vma, tlb_id, true);
 
 	} else {
 		struct dmabuf *dmabuf = vma_dmabuf_target(priv, vma);

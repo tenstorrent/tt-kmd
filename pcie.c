@@ -5,6 +5,7 @@
 
 #include "pcie.h"
 
+#include <linux/bitfield.h>
 #include <linux/delay.h>
 
 #include "module.h"
@@ -147,4 +148,121 @@ bool is_reset_marker_zero(struct pci_dev *pdev)
 	// Read the reset marker
 	pci_read_config_word(pdev, PCI_COMMAND, &pci_command);
 	return (pci_command & PCI_COMMAND_PARITY) == 0;
+}
+
+// Wait for LBMS (Link Bandwidth Management Status) to be set, indicating that
+// link retraining has completed. Returns true if LBMS was set, false on timeout.
+static bool pcie_wait_for_lbms(struct pci_dev *dev, unsigned int timeout_ms)
+{
+	ktime_t end_time = ktime_add_ms(ktime_get(), timeout_ms);
+	u16 lnksta;
+
+	do {
+		pcie_capability_read_word(dev, PCI_EXP_LNKSTA, &lnksta);
+		if (lnksta & PCI_EXP_LNKSTA_LBMS)
+			return true;
+		msleep(1);
+	} while (ktime_before(ktime_get(), end_time));
+
+	return false;
+}
+
+// Clear LBMS on a device. LBMS is RW1C (write 1 to clear).
+static void pcie_clear_lbms(struct pci_dev *dev)
+{
+	pcie_capability_write_word(dev, PCI_EXP_LNKSTA, PCI_EXP_LNKSTA_LBMS);
+}
+
+// Workaround for Linux kernels 6.5-6.12 where pcie_failed_link_retrain()
+// forces the link to Gen1 (2.5GT/s) during hot-plug enumeration.
+//
+// The kernel quirk (commit a89c82249c37) detects LBMS=1 with DLLLA=0,
+// interprets this as a broken device, forces the target link speed to Gen1, and
+// retrains the link. The restriction is only lifted for whitelisted devices.
+//
+// During hotplug enumeration on Blackhole Galaxy, there is a ~1 second window
+// where the card is detected as present, link training occurs, but DLLLA is not
+// yet set when the kernel checks. Linux's pcie_wait_for_link_status() polls for
+// DLLLA for up to 1000ms. When it times out, pcie_failed_link_retrain() is
+// called and sees LBMS=1, DLLLA=0, triggering the quirk.
+//
+// Fixed upstream in kernel 6.13 by commit 665745f27487 ("PCI/bwctrl: Re-add
+// BW notification portdrv as PCIe BW controller").
+//
+// This function retrains the link to full speed by setting Target Link Speed
+// to the minimum of device and bridge capabilities and triggering a retrain.
+// Sometimes multiple retrains are needed as the link steps up.
+#define PCIE_LINK_RETRAIN_TIMEOUT_MS 1000
+
+void pcie_retrain_link_to_max_speed(struct pci_dev *pdev)
+{
+	struct pci_dev *bridge = pci_upstream_bridge(pdev);
+	u32 lnkcap, bridge_lnkcap;
+	u16 lnksta, lnkctl2;
+	u8 dev_max_speed, bridge_max_speed, target_speed, current_speed;
+	int retrain_count;
+
+	if (!bridge)
+		return;
+
+	// Get max link speed from device's LnkCap.
+	pcie_capability_read_dword(pdev, PCI_EXP_LNKCAP, &lnkcap);
+	dev_max_speed = FIELD_GET(PCI_EXP_LNKCAP_SLS, lnkcap);
+
+	// Get max link speed from bridge's LnkCap.
+	pcie_capability_read_dword(bridge, PCI_EXP_LNKCAP, &bridge_lnkcap);
+	bridge_max_speed = FIELD_GET(PCI_EXP_LNKCAP_SLS, bridge_lnkcap);
+
+	// Target speed is the minimum of device and bridge capabilities.
+	target_speed = min(dev_max_speed, bridge_max_speed);
+
+	// Get current link speed from LnkSta.
+	pcie_capability_read_word(pdev, PCI_EXP_LNKSTA, &lnksta);
+	current_speed = FIELD_GET(PCI_EXP_LNKSTA_CLS, lnksta);
+
+	if (current_speed >= target_speed)
+		return;
+
+	dev_info(&pdev->dev, "Link at Gen%u, retraining to Gen%u\n", current_speed, target_speed);
+
+	// Set Target Link Speed on the upstream bridge.
+	pcie_capability_read_word(bridge, PCI_EXP_LNKCTL2, &lnkctl2);
+	lnkctl2 = (lnkctl2 & ~PCI_EXP_LNKCTL2_TLS) | FIELD_PREP(PCI_EXP_LNKCTL2_TLS, target_speed);
+	pcie_capability_write_word(bridge, PCI_EXP_LNKCTL2, lnkctl2);
+
+	// Retrain up to 3 times. Sometimes the link steps up gradually rather than
+	// jumping directly to max.
+	for (retrain_count = 0; retrain_count < 3; retrain_count++) {
+		// Clear LBMS before triggering retrain so we can detect completion.
+		pcie_clear_lbms(bridge);
+
+		// Trigger link retrain.
+		pcie_capability_set_word(bridge, PCI_EXP_LNKCTL, PCI_EXP_LNKCTL_RL);
+
+		// Wait for retrain to complete by polling for LBMS=1.
+		if (!pcie_wait_for_lbms(bridge, PCIE_LINK_RETRAIN_TIMEOUT_MS)) {
+			dev_warn(&pdev->dev, "Timeout waiting for link retrain to complete\n");
+			break;
+		}
+
+		// Check new link speed.
+		pcie_capability_read_word(pdev, PCI_EXP_LNKSTA, &lnksta);
+		current_speed = FIELD_GET(PCI_EXP_LNKSTA_CLS, lnksta);
+
+		if (current_speed >= target_speed)
+			break;
+
+		dev_dbg(&pdev->dev, "Retrain %d: link at Gen%u, target Gen%u\n",
+			retrain_count + 1, current_speed, target_speed);
+	}
+
+	// Clear LBMS on both bridge and device so it won't be misinterpreted as a
+	// hardware failure by the kernel's pcie_failed_link_retrain().
+	pcie_clear_lbms(bridge);
+	pcie_clear_lbms(pdev);
+
+	if (current_speed >= target_speed)
+		dev_info(&pdev->dev, "Link retrained to Gen%u after %d attempt(s)\n", current_speed, retrain_count + 1);
+	else
+		dev_warn(&pdev->dev, "Link retrain incomplete: Gen%u (target Gen%u)\n", current_speed, target_speed);
 }

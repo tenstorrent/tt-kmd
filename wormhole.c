@@ -15,7 +15,6 @@
 #include "hwmon.h"
 #include "tlb.h"
 #include "telemetry.h"
-#include "pcie.h"
 #include "enumerate.h"
 
 #define TLB_1M_WINDOW_COUNT 156

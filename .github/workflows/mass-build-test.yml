@@ -14,4 +14,4 @@ jobs:
                 sudo apt update
                 sudo apt install -y dkms git libelf-dev
                 git clone https://github.com/gregkh/linux /tmp/linux
-                test/mass-build-test . /tmp/linux v5.2 v6.15
+                test/mass-build-test . /tmp/linux v5.2 v6.18

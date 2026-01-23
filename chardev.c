@@ -226,11 +226,13 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
 		atomic_long_inc(&priv->device->reset_gen);
 		tenstorrent_vma_zap(tt_dev);
+		pci_ignore_hotplug(pdev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
 		atomic_long_inc(&priv->device->reset_gen);
 		tenstorrent_vma_zap(tt_dev);
+		pci_ignore_hotplug(pdev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {
@@ -239,7 +241,15 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		// In the hotplug case, needs_hw_init is false and there is nothing to
 		// do here. Otherwise this was an in-place reset, so re-initialize now.
 		if (priv->device->needs_hw_init) {
+			struct pci_dev *bridge = pci_upstream_bridge(pdev);
+
 			priv->device->needs_hw_init = false;
+
+			// Re-enable hotplug events now that the reset is complete.
+			pdev->ignore_hotplug = 0;
+			if (bridge)
+				bridge->ignore_hotplug = 0;
+
 			if (ok && safe_pci_restore_state(pdev)) {
 				priv->device->dev_class->restore_reset_state(priv->device);
 				ok = priv->device->dev_class->init_hardware(priv->device);

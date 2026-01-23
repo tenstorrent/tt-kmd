@@ -61,9 +61,12 @@ bool safe_pci_restore_state(struct pci_dev *pdev) {
 bool pcie_hot_reset_and_restore_state(struct pci_dev *pdev) {
 	struct pci_dev *bridge_dev = pci_upstream_bridge(pdev);
 	u16 bridge_ctrl;
+	bool result;
 
 	if (!bridge_dev)
 		return false;
+
+	pci_ignore_hotplug(pdev);
 
 	// reset link - like pci_reset_secondary_bus, but we don't want the full 1s delay.
 	pci_read_config_word(bridge_dev, PCI_BRIDGE_CONTROL, &bridge_ctrl);
@@ -73,13 +76,14 @@ bool pcie_hot_reset_and_restore_state(struct pci_dev *pdev) {
 	pci_write_config_word(bridge_dev, PCI_BRIDGE_CONTROL, bridge_ctrl);
 	msleep(500);
 
-	if (!poll_pcie_link_up(pdev, 10000))
-		return false;
+	result = poll_pcie_link_up(pdev, 10000) && safe_pci_restore_state(pdev);
 
-	if (!safe_pci_restore_state(pdev))
-		return false;
+	// Re-enable hotplug events. There is no pci_unignore_hotplug(), but the
+	// flag is just a struct member we can clear directly.
+	pdev->ignore_hotplug = 0;
+	bridge_dev->ignore_hotplug = 0;
 
-	return true;
+	return result;
 }
 
 bool wormhole_complete_pcie_init(struct tenstorrent_device *tt_dev, u8 __iomem* reset_unit_regs) {

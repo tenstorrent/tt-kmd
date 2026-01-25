@@ -5,3 +5,4 @@ modprobe.d-tenstorrent.conf
 .git*
 .cache
 *.deb
+*.rpm

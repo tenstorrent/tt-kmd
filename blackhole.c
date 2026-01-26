@@ -7,12 +7,16 @@
 #include <linux/kernel.h>
 #include <linux/jiffies.h>
 #include <linux/delay.h>
+#include <linux/pm_runtime.h>
+#include <linux/cleanup.h>
 
 #include "blackhole.h"
 #include "pcie.h"
 #include "module.h"
 #include "tlb.h"
 #include "telemetry.h"
+
+DEFINE_GUARD(pm_runtime_put, struct device *, pm_runtime_mark_last_busy(_T), pm_runtime_put_autosuspend(_T))
 
 #define MAX_MRRS 4096
 
@@ -327,7 +331,15 @@ static ssize_t bh_show_pcie_single_counter(struct device *dev, char *buf, u32 co
 	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	u64 offset = NOC_STATUS_OFFSET + (4 * counter_offset) + (noc * NOC1_NOC2AXI_OFFSET);
-	u32 value = ioread32(bh->noc2axi_cfg + offset);
+	u32 value;
+	int ret;
+
+	ret = pm_runtime_resume_and_get(&tt_dev->pdev->dev);
+	if (ret < 0)
+		return ret;
+	guard(pm_runtime_put)(&tt_dev->pdev->dev);
+
+	value = ioread32(bh->noc2axi_cfg + offset);
 	return scnprintf(buf, PAGE_SIZE, "%u\n", value);
 }
 
@@ -434,6 +446,12 @@ static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *a
 	unsigned i = data - bh_sysfs_attributes;
 	u64 addr = bh->sysfs_attr_addrs[i];
 	u32 value = 0;
+	int ret;
+
+	ret = pm_runtime_resume_and_get(&tt_dev->pdev->dev);
+	if (ret < 0)
+		return ret;
+	guard(pm_runtime_put)(&tt_dev->pdev->dev);
 
 	if (csm_read32(bh, addr, &value) != 0)
 		return -EINVAL;
@@ -449,6 +467,12 @@ static ssize_t sysfs_show_u64_hex(struct device *dev, struct device_attribute *a
 	unsigned i = data - bh_sysfs_attributes;
 	u64 addr = bh->sysfs_attr_addrs[i];
 	u32 hi, lo;
+	int ret;
+
+	ret = pm_runtime_resume_and_get(&tt_dev->pdev->dev);
+	if (ret < 0)
+		return ret;
+	guard(pm_runtime_put)(&tt_dev->pdev->dev);
 
 	if (csm_read32(bh, addr, &hi) != 0)
 		return -EINVAL;
@@ -468,6 +492,12 @@ static ssize_t sysfs_show_u32_ver(struct device *dev, struct device_attribute *a
 	u64 addr = bh->sysfs_attr_addrs[i];
 	u32 fw_ver = 0;
 	u32 major, minor, patch, ver;
+	int ret;
+
+	ret = pm_runtime_resume_and_get(&tt_dev->pdev->dev);
+	if (ret < 0)
+		return ret;
+	guard(pm_runtime_put)(&tt_dev->pdev->dev);
 
 	if (csm_read32(bh, addr, &fw_ver) != 0)
 		return -EINVAL;
@@ -490,6 +520,12 @@ static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute 
 	u32 board_id_hi;
 	u16 card_type;
 	char *card_name;
+	int ret;
+
+	ret = pm_runtime_resume_and_get(&tt_dev->pdev->dev);
+	if (ret < 0)
+		return ret;
+	guard(pm_runtime_put)(&tt_dev->pdev->dev);
 
 	if (csm_read32(bh, addr, &board_id_hi) != 0)
 		return -EINVAL;
@@ -546,7 +582,12 @@ static umode_t bh_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types 
 
 static int bh_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long *val) {
 	struct blackhole_device *bh = dev_get_drvdata(dev);
-	int i;
+	int i, ret;
+
+	ret = pm_runtime_resume_and_get(&bh->tt.pdev->dev);
+	if (ret < 0)
+		return ret;
+	guard(pm_runtime_put)(&bh->tt.pdev->dev);
 
 	for (i = 0; i < ARRAY_SIZE(bh_hwmon_attrs); ++i) {
 		if (type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {

@@ -289,16 +289,23 @@ static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npage
 // These are the mmap offsets for various resources. In the user-kernel
 // interface they are dynamic (TENSTORRENT_IOCTL_QUERY_MAPPINGS and
 // TENSTORRENT_IOCTL_ALLOCATE_DMA_BUF), but they are actually hard-coded.
-#define MMAP_OFFSET_RESOURCE0_UC	(U64_C(0) << 36)
-#define MMAP_OFFSET_RESOURCE0_WC	(U64_C(1) << 36)
-#define MMAP_OFFSET_RESOURCE1_UC	(U64_C(2) << 36)
-#define MMAP_OFFSET_RESOURCE1_WC	(U64_C(3) << 36)
-#define MMAP_OFFSET_RESOURCE2_UC	(U64_C(4) << 36)
-#define MMAP_OFFSET_RESOURCE2_WC	(U64_C(5) << 36)
-#define MMAP_OFFSET_TLB_UC		(U64_C(6) << 36)
-#define MMAP_OFFSET_TLB_WC		(U64_C(7) << 36)
+//
+// TODO: Bumped from 36 to 40 to accommodate Grendel's 512GB BAR4. This is a
+// band-aid. Userspace can mmap a subset of the BAR, but mmapping the whole
+// 512GB is problematic: 1GB of PTEs, likely holes in the address space, and
+// we probably need a fault handler for sparse access patterns. Revisit this
+// when Grendel BAR layout is finalized.
+#define MMAP_OFFSET_SHIFT		40
+#define MMAP_OFFSET_RESOURCE0_UC	(U64_C(0) << MMAP_OFFSET_SHIFT)
+#define MMAP_OFFSET_RESOURCE0_WC	(U64_C(1) << MMAP_OFFSET_SHIFT)
+#define MMAP_OFFSET_RESOURCE1_UC	(U64_C(2) << MMAP_OFFSET_SHIFT)
+#define MMAP_OFFSET_RESOURCE1_WC	(U64_C(3) << MMAP_OFFSET_SHIFT)
+#define MMAP_OFFSET_RESOURCE2_UC	(U64_C(4) << MMAP_OFFSET_SHIFT)
+#define MMAP_OFFSET_RESOURCE2_WC	(U64_C(5) << MMAP_OFFSET_SHIFT)
+#define MMAP_OFFSET_TLB_UC		(U64_C(6) << MMAP_OFFSET_SHIFT)
+#define MMAP_OFFSET_TLB_WC		(U64_C(7) << MMAP_OFFSET_SHIFT)
 
-#define MMAP_RESOURCE_SIZE (U64_C(1) << 36)
+#define MMAP_RESOURCE_SIZE		(U64_C(1) << MMAP_OFFSET_SHIFT)
 
 // tenstorrent_allocate_dma_buf_in.buf_index is u8 so that sets a limit of
 // U8_MAX DMA buffers per fd. 32-bit mmap offsets are divided by PAGE_SIZE,

@@ -278,6 +278,14 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	dma_set_max_seg_size(&dev->dev, UINT_MAX);
 	dma_set_seg_boundary(&dev->dev, ULONG_MAX);
 
+	// Thunderbolt-connected devices are marked "untrusted" by the kernel, which
+	// forces SWIOTLB bounce buffering even with IOMMU enabled. Clear the flag
+	// since we trust our own hardware.
+	if (dev->untrusted) {
+		dev_info(&dev->dev, "Clearing untrusted flag\n");
+		dev->untrusted = 0;
+	}
+
 	pci_set_master(dev);
 	pci_enable_pcie_error_reporting(dev);
 

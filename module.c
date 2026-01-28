@@ -53,6 +53,8 @@ const struct pci_device_id tenstorrent_ids[] = {
 	  .driver_data=(kernel_ulong_t)&wormhole_class },
 	{ PCI_DEVICE(PCI_VENDOR_ID_TENSTORRENT, PCI_DEVICE_ID_BLACKHOLE),
 	  .driver_data=(kernel_ulong_t)&blackhole_class },
+	{ PCI_DEVICE(PCI_VENDOR_ID_TENSTORRENT, PCI_DEVICE_ID_GRENDEL),
+	  .driver_data=(kernel_ulong_t)&grendel_class },
 	{ 0 },
 };
 

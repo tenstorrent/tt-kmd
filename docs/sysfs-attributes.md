@@ -23,6 +23,65 @@ device structure:
 Where `<YYYY:XX:ZZ.Z>` is the PCI domain, bus, slot, and function of the
 Tenstorrent device.
 
+**Note on Shell Interaction**: When navigating to these directories in a shell,
+the exclamation mark `!` may need to be escaped (e.g. `cd tenstorrent\!0/`) or
+quoted (e.g. `cd 'tenstorrent!0/'`) depending on your shell, as `!` is often a
+special character for history expansion.
+
+---
+
+## Telemetry Attributes
+
+Telemetry attributes expose data provided by the on-chip ARC firmware. These
+attributes are read directly from the device's telemetry region and provide
+information about clock speeds, firmware versions, device identity, and health.
+
+**Location**: These attributes are found directly within each Tenstorrent
+device's sysfs entry (not in a subdirectory).
+
+**Primary Path Structure**:
+`/sys/class/tenstorrent/tenstorrent!<N>/tt_*`
+
+### Availability
+
+Not all attributes are available on all devices or firmware versions. Attributes
+will only appear in sysfs if the firmware reports the corresponding telemetry
+tag. If an attribute is missing, the firmware on that device does not support
+it.
+
+### Available Attributes
+
+| sysfs Filename       | Description                                           | Device Support |
+|----------------------|-------------------------------------------------------|----------------|
+| `tt_aiclk`           | Current AI clock frequency in MHz                     | BH, WH         |
+| `tt_axiclk`          | Current AXI clock frequency in MHz                    | BH, WH         |
+| `tt_arcclk`          | Current ARC clock frequency in MHz                    | BH, WH         |
+| `tt_serial`          | Board serial number (hex)                             | BH, WH         |
+| `tt_card_type`       | Card type identifier (e.g., "p150a", "n150")          | BH, WH         |
+| `tt_asic_id`         | ASIC identifier (hex)                                 | BH, WH         |
+| `tt_fw_bundle_ver`   | Firmware bundle version                               | BH, WH         |
+| `tt_m3app_fw_ver`    | M3 application firmware version                       | BH, WH         |
+| `tt_m3bl_fw_ver`     | M3 bootloader firmware version                        | WH             |
+| `tt_arc_fw_ver`      | ARC firmware version                                  | WH             |
+| `tt_eth_fw_ver`      | Ethernet firmware version                             | WH             |
+| `tt_ttflash_ver`     | tt-flash version                                      | WH             |
+| `tt_heartbeat`       | Firmware heartbeat counter (changing = alive)         | BH, WH         |
+| `tt_therm_trip_count`| ASIC shutdowns due to critical temperature (since power cycle) | BH             |
+
+### Example Usage
+
+To check if firmware is alive by reading the heartbeat counter:
+
+```bash
+cat '/sys/class/tenstorrent/tenstorrent!0/tt_heartbeat'
+```
+
+To check for thermal events:
+
+```bash
+cat '/sys/class/tenstorrent/tenstorrent!0/tt_therm_trip_count'
+```
+
 ---
 
 ## PCIe Performance Counters
@@ -48,12 +107,6 @@ within each Tenstorrent device's sysfs entry.
 **Full Path Example:**
 
 `/sys/class/tenstorrent/tenstorrent!0/pcie_perf_counters/`
-
-**Note on Shell Interaction**:
-When navigating to these directories in a shell, the exclamation mark `!` may
-need to be escaped (e.g. `cd tenstorrent\!0/`) or quoted (e.g. `cd
-'tenstorrent!0/'`) depending on your shell, as `!` is often a special character
-for history expansion.
 
 ### General Notes:
 
@@ -95,4 +148,3 @@ To read the number of posted write data words sent by the master interface via N
 ```bash
 cat '/sys/class/tenstorrent/tenstorrent!0/pcie_perf_counters/mst_posted_wr_data_word_sent0'
 ```
-

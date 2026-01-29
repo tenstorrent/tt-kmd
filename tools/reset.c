@@ -78,7 +78,7 @@ enum TtDeviceType get_device_type(int dev_id) {
     char dev_path[PATH_MAX];
     snprintf(dev_path, sizeof(dev_path), "/dev/tenstorrent/%d", dev_id);
 
-    int fd = open(dev_path, O_RDWR);
+    int fd = open(dev_path, O_RDWR | O_APPEND);
     if (fd < 0) {
         // This function should be non-fatal to be used safely.
         return DEVICE_TYPE_UNKNOWN;
@@ -111,7 +111,7 @@ int get_bdf_for_dev_id(int dev_id, char *bdf_buf) {
     char dev_path[PATH_MAX];
     snprintf(dev_path, sizeof(dev_path), "/dev/tenstorrent/%d", dev_id);
 
-    int fd = open(dev_path, O_RDWR);
+    int fd = open(dev_path, O_RDWR | O_APPEND);
     if (fd < 0) return -1;
 
     struct tenstorrent_get_device_info info = {0};
@@ -193,7 +193,7 @@ int main(int argc, char *argv[]) {
          device_type == DEVICE_TYPE_WORMHOLE ? "Wormhole" :
          device_type == DEVICE_TYPE_BLACKHOLE ? "Blackhole" : "Unknown");
 
-    int fd = open(dev_path, O_RDWR);
+    int fd = open(dev_path, O_RDWR | O_APPEND);
     if (fd < 0) FATAL("Could not open device %s: %s", dev_path, strerror(errno));
 
     struct tenstorrent_reset_device reset_cmd = {0};
@@ -272,7 +272,7 @@ int main(int argc, char *argv[]) {
 
     char new_dev_path[PATH_MAX];
     snprintf(new_dev_path, sizeof(new_dev_path), "/dev/tenstorrent/%d", new_dev_id);
-    fd = open(new_dev_path, O_RDWR);
+    fd = open(new_dev_path, O_RDWR | O_APPEND);
     if (fd < 0) FATAL("Could not open re-discovered device node %s: %s", new_dev_path, strerror(errno));
 
     memset(&reset_cmd, 0, sizeof(reset_cmd));

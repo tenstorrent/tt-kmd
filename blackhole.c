@@ -427,6 +427,8 @@ static struct tenstorrent_sysfs_attr bh_sysfs_attributes[] = {
 	{ TELEMETRY_FLASH_BUNDLE_VERSION, __ATTR(tt_fw_bundle_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
 	{ TELEMETRY_BM_APP_FW_VERSION, __ATTR(tt_m3app_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
 	{ TELEMETRY_ASIC_ID, __ATTR(tt_asic_id, S_IRUGO, sysfs_show_u64_hex, NULL) },
+	{ TELEMETRY_TIMER_HEARTBEAT, __ATTR(tt_heartbeat, S_IRUGO, sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_THERM_TRIP_COUNT, __ATTR(tt_therm_trip_count, S_IRUGO, sysfs_show_u32_dec, NULL) },
 };
 
 static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *attr, char *buf)

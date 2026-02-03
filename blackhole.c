@@ -789,6 +789,8 @@ static bool send_arc_message(struct blackhole_device *bh, struct arc_msg *msg)
 
 	do {
 		boot_status = noc_read32(bh, ARC_X, ARC_Y, ARC_BOOT_STATUS, 0);
+		if (boot_status == 0xFFFFFFFFu)
+			return false; // NOC is hung
 		if (boot_status & ARC_BOOT_STATUS_READY_FOR_MSG)
 			break;
 	} while (time_before(jiffies, timeout));

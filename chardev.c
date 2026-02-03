@@ -678,7 +678,12 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	struct chardev_private *priv = file->private_data;
 	struct tenstorrent_device *tt_dev = priv->device;
 	unsigned int bitpos;
-	bool power_down = !tt_dev->detached && power_policy && !tt_dev->needs_hw_init;
+	bool power_aware = file->f_flags & O_APPEND;
+	bool is_minimum_power = priv->power_state.validity == TT_POWER_VALIDITY(15, 0)
+				&& priv->power_state.power_flags == 0;
+	bool has_power_contribution = !power_aware || !is_minimum_power;
+	bool power_down = !tt_dev->detached && power_policy && !tt_dev->needs_hw_init
+			  && has_power_contribution;
 	bool cleanup_noc = !tt_dev->detached && priv->noc_cleanup.enabled;
 
 	if (cleanup_noc)

@@ -331,6 +331,9 @@ static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *a
 	u64 offset = wh->sysfs_attr_offsets[i];
 	u32 value = 0;
 
+	if (tt_dev->detached)
+		return -ENODEV;
+
 	value = ioread32(wh->bar4_mapping + offset);
 	return snprintf(buf, PAGE_SIZE, "%u\n", value);
 }
@@ -343,6 +346,9 @@ static ssize_t sysfs_show_u64_hex(struct device *dev, struct device_attribute *a
 	unsigned i = data - wh_sysfs_attributes;
 	u64 offset = wh->sysfs_attr_offsets[i];
 	u32 hi, lo;
+
+	if (tt_dev->detached)
+		return -ENODEV;
 
 	hi = ioread32(wh->bar4_mapping + offset);
 	lo = ioread32(wh->bar4_mapping + offset + 4);
@@ -358,6 +364,9 @@ static ssize_t sysfs_show_u32_ver(struct device *dev, struct device_attribute *a
 	u64 offset = wh->sysfs_attr_offsets[i];
 	u32 value = 0;
 	u32 major, minor, patch, ver;
+
+	if (tt_dev->detached)
+		return -ENODEV;
 
 	value = ioread32(wh->bar4_mapping + offset);
 
@@ -387,6 +396,9 @@ static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute 
 	u32 value;
 	u16 card_type;
 	char *card_name;
+
+	if (tt_dev->detached)
+		return -ENODEV;
 
 	value = ioread32(wh->bar4_mapping + offset);
 	card_type = (value >> 4) & 0xFFFF;
@@ -421,9 +433,16 @@ static ssize_t wh_show_pcie_single_counter(struct device *dev, char *buf, u32 co
 {
 	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
-	u8 __iomem *noc2axi = wh_dev->bar4_mapping + NIU_COUNTERS_START;
-	u64 addr = (4 * counter_offset) + (noc * NIU_NOC1_OFFSET);
-	u32 value = ioread32(noc2axi + addr);
+	u8 __iomem *noc2axi;
+	u64 addr;
+	u32 value;
+
+	if (tt_dev->detached)
+		return -ENODEV;
+
+	noc2axi = wh_dev->bar4_mapping + NIU_COUNTERS_START;
+	addr = (4 * counter_offset) + (noc * NIU_NOC1_OFFSET);
+	value = ioread32(noc2axi + addr);
 	return scnprintf(buf, PAGE_SIZE, "%u\n", value);
 }
 

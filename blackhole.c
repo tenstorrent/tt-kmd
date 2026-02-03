@@ -329,8 +329,14 @@ static ssize_t bh_show_pcie_single_counter(struct device *dev, char *buf, u32 co
 {
 	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-	u64 offset = NOC_STATUS_OFFSET + (4 * counter_offset) + (noc * NOC1_NOC2AXI_OFFSET);
-	u32 value = ioread32(bh->noc2axi_cfg + offset);
+	u64 offset;
+	u32 value;
+
+	if (tt_dev->detached)
+		return -ENODEV;
+
+	offset = NOC_STATUS_OFFSET + (4 * counter_offset) + (noc * NOC1_NOC2AXI_OFFSET);
+	value = ioread32(bh->noc2axi_cfg + offset);
 	return scnprintf(buf, PAGE_SIZE, "%u\n", value);
 }
 
@@ -440,6 +446,9 @@ static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *a
 	u64 addr = bh->sysfs_attr_addrs[i];
 	u32 value = 0;
 
+	if (tt_dev->detached)
+		return -ENODEV;
+
 	if (csm_read32(bh, addr, &value) != 0)
 		return -EINVAL;
 
@@ -454,6 +463,9 @@ static ssize_t sysfs_show_u64_hex(struct device *dev, struct device_attribute *a
 	unsigned i = data - bh_sysfs_attributes;
 	u64 addr = bh->sysfs_attr_addrs[i];
 	u32 hi, lo;
+
+	if (tt_dev->detached)
+		return -ENODEV;
 
 	if (csm_read32(bh, addr, &hi) != 0)
 		return -EINVAL;
@@ -473,6 +485,9 @@ static ssize_t sysfs_show_u32_ver(struct device *dev, struct device_attribute *a
 	u64 addr = bh->sysfs_attr_addrs[i];
 	u32 fw_ver = 0;
 	u32 major, minor, patch, ver;
+
+	if (tt_dev->detached)
+		return -ENODEV;
 
 	if (csm_read32(bh, addr, &fw_ver) != 0)
 		return -EINVAL;
@@ -495,6 +510,9 @@ static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute 
 	u32 board_id_hi;
 	u16 card_type;
 	char *card_name;
+
+	if (tt_dev->detached)
+		return -ENODEV;
 
 	if (csm_read32(bh, addr, &board_id_hi) != 0)
 		return -EINVAL;
@@ -552,6 +570,9 @@ static umode_t bh_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types 
 static int bh_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long *val) {
 	struct blackhole_device *bh = dev_get_drvdata(dev);
 	int i;
+
+	if (bh->tt.detached)
+		return -ENODEV;
 
 	for (i = 0; i < ARRAY_SIZE(bh_hwmon_attrs); ++i) {
 		if (type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {

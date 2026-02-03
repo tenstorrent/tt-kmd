@@ -338,13 +338,15 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	}
 
 	// In a hotplug scenario, the device may not be accessible anymore. Check
-	// if it is still accessible by reading the vendor ID. If it is not, set the
-	// detached flag to prevent further hardware access.
+	// if it is still accessible by reading the vendor ID. If it is not, skip
+	// cleanup_hardware (which requires device access).
 	pci_read_config_word(dev, PCI_VENDOR_ID, &vendor_id);
-	if (vendor_id == U16_MAX)
-		tt_dev->detached = true;
-	else
+	if (vendor_id != U16_MAX)
 		tt_dev->dev_class->cleanup_hardware(tt_dev); // Put FW into A3 state
+
+	// Set detached before unmapping BARs to prevent hwmon/sysfs callbacks
+	// from accessing unmapped memory.
+	tt_dev->detached = true;
 
 	tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
 
@@ -358,7 +360,6 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 
 	pci_disable_pcie_error_reporting(dev);
 	pci_disable_device(dev);
-	tt_dev->detached = true;
 
 	pci_set_drvdata(dev, NULL);
 

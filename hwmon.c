@@ -7,6 +7,7 @@
 #include <asm/io.h>
 
 #include "hwmon.h"
+#include "device.h"
 
 static umode_t tt_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type, u32 attr, int channel) {
 	const struct tt_hwmon_context *ctx = drvdata;
@@ -30,7 +31,11 @@ static umode_t tt_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types 
 
 static int tt_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long *val) {
 	const struct tt_hwmon_context *ctx = dev_get_drvdata(dev);
+	const struct tenstorrent_device *tt_dev = container_of(ctx, struct tenstorrent_device, hwmon_context);
 	const struct tt_hwmon_attr *attribute = ctx->attributes;
+
+	if (tt_dev->detached)
+		return -ENODEV;
 
 	while (attribute->reg_offset != TT_HWMON_ATTR_END) {
 		if (attribute->type == type && attribute->attr == attr) {

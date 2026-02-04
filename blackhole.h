@@ -20,6 +20,9 @@ struct blackhole_device {
 	u64 *sysfs_attr_addrs;
 
 	u8 saved_mps;
+
+	bool pcie_perf_group_registered;
+	bool telemetry_group_registered;
 };
 
 #define tt_dev_to_bh_dev(ttdev) \

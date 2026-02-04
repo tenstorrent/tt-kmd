@@ -350,8 +350,12 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	if (tt_dev->dev_class->cleanup_telemetry)
 		tt_dev->dev_class->cleanup_telemetry(tt_dev);
 
+	// Acquire reset_rwsem for write to ensure all in-flight ioctls complete
+	// before we set detached and unmap the BARs.
+	down_write(&tt_dev->reset_rwsem);
 	tt_dev->detached = true;
 	tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
+	up_write(&tt_dev->reset_rwsem);
 
 	list_for_each_entry_safe(priv, tmp, &tt_dev->open_fds_list, open_fd) {
 		tenstorrent_memory_cleanup(priv);

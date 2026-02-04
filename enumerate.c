@@ -344,11 +344,18 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	if (vendor_id != U16_MAX)
 		tt_dev->dev_class->cleanup_hardware(tt_dev); // Put FW into A3 state
 
+	// Acquire reset_rwsem for write to ensure all in-flight ioctls complete
+	// before we set detached and unmap the BARs. This prevents use-after-unmap
+	// crashes when hotplug races with ioctl processing.
+	down_write(&tt_dev->reset_rwsem);
+
 	// Set detached before unmapping BARs to prevent hwmon/sysfs callbacks
 	// from accessing unmapped memory.
 	tt_dev->detached = true;
 
 	tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
+
+	up_write(&tt_dev->reset_rwsem);
 
 	list_for_each_entry_safe(priv, tmp, &tt_dev->open_fds_list, open_fd) {
 		tenstorrent_memory_cleanup(priv);

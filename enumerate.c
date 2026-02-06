@@ -278,6 +278,21 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	dma_set_max_seg_size(&dev->dev, UINT_MAX);
 	dma_set_seg_boundary(&dev->dev, ULONG_MAX);
 
+	// Thunderbolt-connected devices are marked "untrusted" by the kernel,
+	// which forces SWIOTLB bounce buffering even with IOMMU enabled. The
+	// IOMMU itself provides DMA isolation; clear the flag only when IOMMU
+	// is active and the untrust is due to an external-facing port.
+	// pci_dev.external_facing was added in v5.9.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
+	if (dev->untrusted && is_iommu_translated(&dev->dev)) {
+		struct pci_dev *root = pcie_find_root_port(dev);
+		if (root && root->external_facing) {
+			dev_info(&dev->dev, "Clearing untrusted flag (external-facing port, IOMMU active)\n");
+			dev->untrusted = 0;
+		}
+	}
+#endif
+
 	pci_set_master(dev);
 	pci_enable_pcie_error_reporting(dev);
 

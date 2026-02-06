@@ -649,9 +649,11 @@ static void wormhole_hwmon_init(struct wormhole_device *wh_dev)
 	context->labels = wh_hwmon_labels;
 	context->telemetry_base = wh_dev->bar4_mapping + wh_arc_addr_to_sysreg(telemetry_offset);
 
-	hwmon_device = devm_hwmon_device_register_with_info(dev, "wormhole", context, &wh_hwmon_chip_info, NULL);
+	hwmon_device = hwmon_device_register_with_info(dev, "wormhole", context, &wh_hwmon_chip_info, NULL);
 	if (IS_ERR(hwmon_device))
 		goto wormhole_hwmon_init_err;
+
+	tt_dev->hwmon_dev = hwmon_device;
 
 	// Notify udev that telemetry attributes are now available.
 	kobject_uevent(&tt_dev->dev.kobj, KOBJ_CHANGE);
@@ -679,7 +681,9 @@ static int init_sysfs_and_hwmon_telemetry(struct tenstorrent_device *tt_dev)
 	int r = telemetry_probe(tt_dev);
 
 	if (!r) {
-		r = devm_device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
+		r = device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
+		if (!r)
+			wh_dev->telemetry_group_registered = true;
 		wormhole_hwmon_init(wh_dev);
 	}
 	return r;
@@ -760,9 +764,11 @@ static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev)
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 	int r;
 
-	r = devm_device_add_group(&tt_dev->dev, &wh_pcie_perf_counters_group);
+	r = device_add_group(&tt_dev->dev, &wh_pcie_perf_counters_group);
 	if (r)
 		dev_err(&tt_dev->dev, "PCIe perf counters unavailable: %d\n", r);
+	else
+		wh_dev->pcie_perf_group_registered = true;
 
 	// If the firmware is already ready, initialize telemetry immediately.
 	// Otherwise, wait for the fw_ready_work to detect when it becomes ready.
@@ -772,6 +778,26 @@ static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev)
 		schedule_delayed_work(&wh_dev->fw_ready_work, msecs_to_jiffies(1000));
 
 	return true;
+}
+
+static void wormhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
+{
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+
+	if (tt_dev->hwmon_dev) {
+		hwmon_device_unregister(tt_dev->hwmon_dev);
+		tt_dev->hwmon_dev = NULL;
+	}
+
+	if (wh_dev->telemetry_group_registered) {
+		device_remove_group(&tt_dev->dev, &tt_dev->telemetry_group);
+		wh_dev->telemetry_group_registered = false;
+	}
+
+	if (wh_dev->pcie_perf_group_registered) {
+		device_remove_group(&tt_dev->dev, &wh_pcie_perf_counters_group);
+		wh_dev->pcie_perf_group_registered = false;
+	}
 }
 
 static void wormhole_cleanup_hardware(struct tenstorrent_device *tt_dev) {
@@ -1030,6 +1056,7 @@ struct tenstorrent_device_class wormhole_class = {
 	.init_device = wormhole_init,
 	.init_hardware = wormhole_init_hardware,
 	.init_telemetry = wormhole_init_telemetry,
+	.cleanup_telemetry = wormhole_cleanup_telemetry,
 	.cleanup_hardware = wormhole_cleanup_hardware,
 	.cleanup_device = wormhole_cleanup,
 	.reboot = wormhole_cleanup_hardware,

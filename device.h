@@ -48,6 +48,7 @@ struct tenstorrent_device {
 	wait_queue_head_t resource_lock_waitqueue;
 
 	struct tt_hwmon_context hwmon_context;
+	struct device *hwmon_dev;
 
 	struct list_head open_fds_list;	// List of struct chardev_private, linked through open_fds field
 
@@ -76,6 +77,7 @@ struct tenstorrent_device_class {
 	bool (*init_device)(struct tenstorrent_device *ttdev);
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);
 	bool (*init_telemetry)(struct tenstorrent_device *ttdev);
+	void (*cleanup_telemetry)(struct tenstorrent_device *ttdev);
 	void (*cleanup_hardware)(struct tenstorrent_device *ttdev);
 	void (*cleanup_device)(struct tenstorrent_device *ttdev);
 	void (*first_open_cb)(struct tenstorrent_device *ttdev);

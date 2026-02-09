@@ -93,10 +93,13 @@ void VerifyBasic(const EnumeratedDevice &d1, const EnumeratedDevice &d2,
             struct tenstorrent_map_peer_bar map_peer_bar;
             zero(&map_peer_bar);
 
+            // Cap to the largest page-aligned size the u32 ABI field can hold.
+            uint32_t size = std::min(bar.second.size, (uint64_t)0xFFFFF000);
+
             map_peer_bar.in.peer_fd = fd2.get();
             map_peer_bar.in.peer_bar_index = bar.first;
             map_peer_bar.in.peer_bar_offset = 0;
-            map_peer_bar.in.peer_bar_length = bar.second.size;
+            map_peer_bar.in.peer_bar_length = size;
 
             if (ioctl(fd1.get(), TENSTORRENT_IOCTL_MAP_PEER_BAR, &map_peer_bar) != 0)
                 THROW_TEST_FAILURE("MAP_PEER_BAR failed.");

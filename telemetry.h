@@ -47,6 +47,13 @@ struct tenstorrent_sysfs_attr {
 struct tenstorrent_device;
 int tt_telemetry_read32(struct tenstorrent_device *tt_dev, u16 tag_id, u32 *value);
 
+// Common sysfs show callbacks for telemetry attributes.
+ssize_t tt_sysfs_show_u32_dec(struct device *dev, struct device_attribute *attr, char *buf);
+ssize_t tt_sysfs_show_u64_hex(struct device *dev, struct device_attribute *attr, char *buf);
+ssize_t tt_sysfs_show_u32_ver(struct device *dev, struct device_attribute *attr, char *buf);
+ssize_t tt_sysfs_show_card_type(struct device *dev, struct device_attribute *attr, char *buf);
+umode_t tt_sysfs_telemetry_is_visible(struct kobject *kobj, struct attribute *attr, int n);
+
 #define ARC_CSM_BASE 0x10000000
 #define ARC_CSM_SIZE (1 << 19)
 static inline bool is_range_within_csm(u64 addr, size_t len)

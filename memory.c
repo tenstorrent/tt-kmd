@@ -528,6 +528,7 @@ long ioctl_allocate_dma_buf(struct chardev_private *priv,
 	out.size = in.requested_size;
 
 	if (copy_to_user(&arg->out, &out, sizeof(out)) != 0) {
+		teardown_outbound_iatu(priv, iatu_region);
 		dma_free_coherent(&priv->device->pdev->dev, dmabuf->size,
 				  dmabuf->ptr, dmabuf->phys);
 

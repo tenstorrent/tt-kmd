@@ -99,6 +99,7 @@ struct tenstorrent_device_class {
 	int (*csm_read32)(struct tenstorrent_device *ttdev, u64 addr, u32 *value);
 	int (*csm_write32)(struct tenstorrent_device *ttdev, u64 addr, u32 value);
 	int (*set_power_state)(struct tenstorrent_device *ttdev, struct tenstorrent_power_state *power_state);
+	int (*read_telemetry_tag)(struct tenstorrent_device *ttdev, u16 tag_id, u32 *value);
 };
 
 void tenstorrent_device_put(struct tenstorrent_device *);

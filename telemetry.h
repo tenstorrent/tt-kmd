@@ -44,6 +44,9 @@ struct tenstorrent_sysfs_attr {
     struct device_attribute attr;
 };
 
+struct tenstorrent_device;
+int tt_telemetry_read32(struct tenstorrent_device *tt_dev, u16 tag_id, u32 *value);
+
 #define ARC_CSM_BASE 0x10000000
 #define ARC_CSM_SIZE (1 << 19)
 static inline bool is_range_within_csm(u64 addr, size_t len)

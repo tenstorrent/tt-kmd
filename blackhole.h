@@ -17,7 +17,6 @@ struct blackhole_device {
 	u8 __iomem *bar2_mapping;
 
 	u64 *hwmon_attr_addrs;
-	u64 *sysfs_attr_addrs;
 
 	u8 saved_mps;
 

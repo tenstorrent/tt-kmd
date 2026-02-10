@@ -300,119 +300,21 @@ static void write_iatu_reg(struct wormhole_device *wh_dev, unsigned direction,
 	iowrite32(value, wh_dev->bar2_mapping + offset);
 }
 
-static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *attr, char *buf);
-static ssize_t sysfs_show_u64_hex(struct device *dev, struct device_attribute *attr, char *buf);
-static ssize_t sysfs_show_u32_ver(struct device *dev, struct device_attribute *attr, char *buf);
-static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute *attr, char *buf);
-static umode_t sysfs_telemetry_is_visible(struct kobject *kobj, struct attribute *attr, int n);
-
 static struct tenstorrent_sysfs_attr wh_sysfs_attributes[] = {
-	{ TELEMETRY_AICLK, __ATTR(tt_aiclk,  S_IRUGO, sysfs_show_u32_dec, NULL) },
-	{ TELEMETRY_AXICLK, __ATTR(tt_axiclk, S_IRUGO, sysfs_show_u32_dec, NULL) },
-	{ TELEMETRY_ARCCLK, __ATTR(tt_arcclk, S_IRUGO, sysfs_show_u32_dec, NULL) },
-	{ TELEMETRY_BOARD_ID, __ATTR(tt_serial, S_IRUGO, sysfs_show_u64_hex, NULL) },
-	{ TELEMETRY_BOARD_ID, __ATTR(tt_card_type, S_IRUGO, sysfs_show_card_type, NULL) },
-	{ TELEMETRY_FLASH_BUNDLE_VERSION, __ATTR(tt_fw_bundle_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
-	{ TELEMETRY_BM_APP_FW_VERSION, __ATTR(tt_m3app_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
-	{ TELEMETRY_TT_FLASH_VERSION, __ATTR(tt_ttflash_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
-	{ TELEMETRY_BM_BL_FW_VERSION, __ATTR(tt_m3bl_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
-	{ TELEMETRY_CM_FW_VERSION, __ATTR(tt_arc_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
-	{ TELEMETRY_ETH_FW_VERSION, __ATTR(tt_eth_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
-	{ TELEMETRY_ASIC_ID, __ATTR(tt_asic_id, S_IRUGO, sysfs_show_u64_hex, NULL) },
-	{ TELEMETRY_TIMER_HEARTBEAT, __ATTR(tt_heartbeat, S_IRUGO, sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_AICLK, __ATTR(tt_aiclk,  S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_AXICLK, __ATTR(tt_axiclk, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_ARCCLK, __ATTR(tt_arcclk, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_BOARD_ID, __ATTR(tt_serial, S_IRUGO, tt_sysfs_show_u64_hex, NULL) },
+	{ TELEMETRY_BOARD_ID, __ATTR(tt_card_type, S_IRUGO, tt_sysfs_show_card_type, NULL) },
+	{ TELEMETRY_FLASH_BUNDLE_VERSION, __ATTR(tt_fw_bundle_ver, S_IRUGO, tt_sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_BM_APP_FW_VERSION, __ATTR(tt_m3app_fw_ver, S_IRUGO, tt_sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_TT_FLASH_VERSION, __ATTR(tt_ttflash_ver, S_IRUGO, tt_sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_BM_BL_FW_VERSION, __ATTR(tt_m3bl_fw_ver, S_IRUGO, tt_sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_CM_FW_VERSION, __ATTR(tt_arc_fw_ver, S_IRUGO, tt_sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_ETH_FW_VERSION, __ATTR(tt_eth_fw_ver, S_IRUGO, tt_sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_ASIC_ID, __ATTR(tt_asic_id, S_IRUGO, tt_sysfs_show_u64_hex, NULL) },
+	{ TELEMETRY_TIMER_HEARTBEAT, __ATTR(tt_heartbeat, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
 };
-
-static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
-	struct tenstorrent_sysfs_attr *data = container_of(attr, struct tenstorrent_sysfs_attr, attr);
-	unsigned i = data - wh_sysfs_attributes;
-	u64 offset = wh->sysfs_attr_offsets[i];
-	u32 value = 0;
-
-	value = ioread32(wh->bar4_mapping + offset);
-	return snprintf(buf, PAGE_SIZE, "%u\n", value);
-}
-
-static ssize_t sysfs_show_u64_hex(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
-	struct tenstorrent_sysfs_attr *data = container_of(attr, struct tenstorrent_sysfs_attr, attr);
-	unsigned i = data - wh_sysfs_attributes;
-	u64 offset = wh->sysfs_attr_offsets[i];
-	u32 hi, lo;
-
-	hi = ioread32(wh->bar4_mapping + offset);
-	lo = ioread32(wh->bar4_mapping + offset + 4);
-	return scnprintf(buf, PAGE_SIZE, "%08X%08X\n", hi, lo);
-}
-
-static ssize_t sysfs_show_u32_ver(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
-	struct tenstorrent_sysfs_attr *data = container_of(attr, struct tenstorrent_sysfs_attr, attr);
-	unsigned i = data - wh_sysfs_attributes;
-	u64 offset = wh->sysfs_attr_offsets[i];
-	u32 value = 0;
-	u32 major, minor, patch, ver;
-
-	value = ioread32(wh->bar4_mapping + offset);
-
-	// HACK: preserve behavior for eth_fw_ver.
-	if (data->tag_id == TELEMETRY_ETH_FW_VERSION) {
-		major = (value >> 16) & 0xFF;
-		minor = (value >> 12) & 0xF;
-		patch = (value >>  0) & 0xFFF;
-		return scnprintf(buf, PAGE_SIZE, "%u.%u.%u\n", major, minor, patch);
-	}
-
-	major = (value >> 24) & 0xFF;
-	minor = (value >> 16) & 0xFF;
-	patch = (value >>  8) & 0xFF;
-	ver = value & 0xFF;
-
-	return scnprintf(buf, PAGE_SIZE, "%u.%u.%u.%u\n", major, minor, patch, ver);
-}
-
-static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
-	struct tenstorrent_sysfs_attr *data = container_of(attr, struct tenstorrent_sysfs_attr, attr);
-	unsigned i = data - wh_sysfs_attributes;
-	u64 offset = wh->sysfs_attr_offsets[i];
-	u32 value;
-	u16 card_type;
-	char *card_name;
-
-	value = ioread32(wh->bar4_mapping + offset);
-	card_type = (value >> 4) & 0xFFFF;
-	switch (card_type) {
-	case 0x14: card_name = "n300"; break;
-	case 0x18: card_name = "n150"; break;
-	case 0x35: card_name = "galaxy-wormhole"; break;
-	default: card_name = "unknown"; break;
-	}
-
-	return scnprintf(buf, PAGE_SIZE, "%s\n", card_name);
-}
-
-static umode_t sysfs_telemetry_is_visible(struct kobject *kobj, struct attribute *attr, int n)
-{
-	struct device *dev = kobj_to_dev(kobj);
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	struct device_attribute *dev_attr = container_of(attr, struct device_attribute, attr);
-	struct tenstorrent_sysfs_attr *ts_attr = container_of(dev_attr, struct tenstorrent_sysfs_attr, attr);
-	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
-	unsigned i = ts_attr - wh_sysfs_attributes;
-	bool visible = wh->sysfs_attr_offsets[i] != 0;
-
-	return visible ? attr->mode : 0;
-}
-
 
 #define NIU_COUNTERS_START (NOC2AXI_START + 0x200)
 #define NIU_NOC1_OFFSET 0x8000
@@ -578,7 +480,7 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 	u32 version, major_ver, minor_ver, patch_ver;
 	u32 tags_addr = base_addr + 8;
 	u32 num_entries;
-	u32 i, j;
+	u32 i;
 
 	if (!is_range_within_csm(base_addr, sizeof(u32)) || !is_range_within_csm(data_addr, sizeof(u32))) {
 		dev_err(&tt_dev->pdev->dev, "Telemetry not available\n");
@@ -610,11 +512,6 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 
 		if (tag_id < TELEM_TAG_CACHE_SIZE)
 			tt_dev->telemetry_tag_cache[tag_id] = wh_arc_addr_to_sysreg(addr);
-
-		for (j = 0; j < ARRAY_SIZE(wh_sysfs_attributes); ++j) {
-			if (wh_sysfs_attributes[j].tag_id == tag_id)
-				wh->sysfs_attr_offsets[j] = wh_arc_addr_to_sysreg(addr);
-		}
 	}
 
 	return 0;
@@ -734,10 +631,9 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev)
 	INIT_DELAYED_WORK(&wh_dev->fw_ready_work, fw_ready_work_func);
 	wh_dev->telemetry_retries = 120;	// If telemetry is not ready, defer initialization for up to 2 minutes.
 
-	wh_dev->sysfs_attr_offsets = devm_kcalloc(dev, ARRAY_SIZE(wh_sysfs_attributes), sizeof(u64), GFP_KERNEL);
 	tt_dev->telemetry_attrs = devm_kcalloc(dev, ARRAY_SIZE(wh_sysfs_attributes) + 1, sizeof(struct attribute *), GFP_KERNEL);
 
-	if (!wh_dev->sysfs_attr_offsets || !tt_dev->telemetry_attrs)
+	if (!tt_dev->telemetry_attrs)
 		return false;
 
 	wh_dev->bar2_mapping = pci_iomap(wh_dev->tt.pdev, 2, 0);
@@ -752,7 +648,7 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev)
 	for (i = 0; i < ARRAY_SIZE(wh_sysfs_attributes); ++i)
 		tt_dev->telemetry_attrs[i] = &wh_sysfs_attributes[i].attr.attr;
 	tt_dev->telemetry_group.attrs = tt_dev->telemetry_attrs;
-	tt_dev->telemetry_group.is_visible = sysfs_telemetry_is_visible;
+	tt_dev->telemetry_group.is_visible = tt_sysfs_telemetry_is_visible;
 
 	return true;
 

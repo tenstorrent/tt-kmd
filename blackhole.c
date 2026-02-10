@@ -412,122 +412,18 @@ static const struct blackhole_hwmon_attr bh_hwmon_attrs[] = {
 	{ TELEMETRY_FAN_RPM,   hwmon_fan,   hwmon_fan_input   },
 };
 
-static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *attr, char *buf);
-static ssize_t sysfs_show_u64_hex(struct device *dev, struct device_attribute *attr, char *buf);
-static ssize_t sysfs_show_u32_ver(struct device *dev, struct device_attribute *attr, char *buf);
-static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute *attr, char *buf);
-static umode_t sysfs_telemetry_is_visible(struct kobject *kobj, struct attribute *attr, int n);
-
 static struct tenstorrent_sysfs_attr bh_sysfs_attributes[] = {
-	{ TELEMETRY_AICLK, __ATTR(tt_aiclk,  S_IRUGO, sysfs_show_u32_dec, NULL) },
-	{ TELEMETRY_AXICLK, __ATTR(tt_axiclk, S_IRUGO, sysfs_show_u32_dec, NULL) },
-	{ TELEMETRY_ARCCLK, __ATTR(tt_arcclk, S_IRUGO, sysfs_show_u32_dec, NULL) },
-	{ TELEMETRY_BOARD_ID, __ATTR(tt_serial, S_IRUGO, sysfs_show_u64_hex, NULL) },
-	{ TELEMETRY_BOARD_ID, __ATTR(tt_card_type, S_IRUGO, sysfs_show_card_type, NULL) },
-	{ TELEMETRY_FLASH_BUNDLE_VERSION, __ATTR(tt_fw_bundle_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
-	{ TELEMETRY_BM_APP_FW_VERSION, __ATTR(tt_m3app_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
-	{ TELEMETRY_ASIC_ID, __ATTR(tt_asic_id, S_IRUGO, sysfs_show_u64_hex, NULL) },
-	{ TELEMETRY_TIMER_HEARTBEAT, __ATTR(tt_heartbeat, S_IRUGO, sysfs_show_u32_dec, NULL) },
-	{ TELEMETRY_THERM_TRIP_COUNT, __ATTR(tt_therm_trip_count, S_IRUGO, sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_AICLK, __ATTR(tt_aiclk,  S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_AXICLK, __ATTR(tt_axiclk, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_ARCCLK, __ATTR(tt_arcclk, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_BOARD_ID, __ATTR(tt_serial, S_IRUGO, tt_sysfs_show_u64_hex, NULL) },
+	{ TELEMETRY_BOARD_ID, __ATTR(tt_card_type, S_IRUGO, tt_sysfs_show_card_type, NULL) },
+	{ TELEMETRY_FLASH_BUNDLE_VERSION, __ATTR(tt_fw_bundle_ver, S_IRUGO, tt_sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_BM_APP_FW_VERSION, __ATTR(tt_m3app_fw_ver, S_IRUGO, tt_sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_ASIC_ID, __ATTR(tt_asic_id, S_IRUGO, tt_sysfs_show_u64_hex, NULL) },
+	{ TELEMETRY_TIMER_HEARTBEAT, __ATTR(tt_heartbeat, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_THERM_TRIP_COUNT, __ATTR(tt_therm_trip_count, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
 };
-
-static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-	struct tenstorrent_sysfs_attr *data = container_of(attr, struct tenstorrent_sysfs_attr, attr);
-	unsigned i = data - bh_sysfs_attributes;
-	u64 addr = bh->sysfs_attr_addrs[i];
-	u32 value = 0;
-
-	if (csm_read32(bh, addr, &value) != 0)
-		return -EINVAL;
-
-	return snprintf(buf, PAGE_SIZE, "%u\n", value);
-}
-
-static ssize_t sysfs_show_u64_hex(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-	struct tenstorrent_sysfs_attr *data = container_of(attr, struct tenstorrent_sysfs_attr, attr);
-	unsigned i = data - bh_sysfs_attributes;
-	u64 addr = bh->sysfs_attr_addrs[i];
-	u32 hi, lo;
-
-	if (csm_read32(bh, addr, &hi) != 0)
-		return -EINVAL;
-
-	if (csm_read32(bh, addr + 4, &lo) != 0)
-		return -EINVAL;
-
-	return scnprintf(buf, PAGE_SIZE, "%08X%08X\n", hi, lo);
-}
-
-static ssize_t sysfs_show_u32_ver(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-	struct tenstorrent_sysfs_attr *data = container_of(attr, struct tenstorrent_sysfs_attr, attr);
-	unsigned i = data - bh_sysfs_attributes;
-	u64 addr = bh->sysfs_attr_addrs[i];
-	u32 fw_ver = 0;
-	u32 major, minor, patch, ver;
-
-	if (csm_read32(bh, addr, &fw_ver) != 0)
-		return -EINVAL;
-
-	major = (fw_ver >> 24) & 0xFF;
-	minor = (fw_ver >> 16) & 0xFF;
-	patch = (fw_ver >>  8) & 0xFF;
-	ver = fw_ver & 0xFF;
-
-	return scnprintf(buf, PAGE_SIZE, "%u.%u.%u.%u\n", major, minor, patch, ver);
-}
-
-static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-	struct tenstorrent_sysfs_attr *data = container_of(attr, struct tenstorrent_sysfs_attr, attr);
-	unsigned i = data - bh_sysfs_attributes;
-	u64 addr = bh->sysfs_attr_addrs[i];
-	u32 board_id_hi;
-	u16 card_type;
-	char *card_name;
-
-	if (csm_read32(bh, addr, &board_id_hi) != 0)
-		return -EINVAL;
-
-	card_type = (board_id_hi >> 4) & 0xFFFF;
-	switch (card_type) {
-	case 0x36: card_name = "p100"; break;
-	case 0x40: card_name = "p150a"; break;
-	case 0x41: card_name = "p150b"; break;
-	case 0x42: card_name = "p150c"; break;
-	case 0x43: card_name = "p100a"; break;
-	case 0x44: card_name = "p300b"; break;
-	case 0x45: card_name = "p300a"; break;
-	case 0x46: card_name = "p300c"; break;
-	case 0x47: card_name = "galaxy-blackhole"; break;
-	default: card_name = "unknown"; break;
-	}
-
-	return scnprintf(buf, PAGE_SIZE, "%s\n", card_name);
-}
-
-static umode_t sysfs_telemetry_is_visible(struct kobject *kobj, struct attribute *attr, int n)
-{
-	struct device *dev = kobj_to_dev(kobj);
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	struct device_attribute *dev_attr = container_of(attr, struct device_attribute, attr);
-	struct tenstorrent_sysfs_attr *ts_attr = container_of(dev_attr, struct tenstorrent_sysfs_attr, attr);
-	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-	unsigned i = ts_attr - bh_sysfs_attributes;
-	bool visible = bh->sysfs_attr_addrs[i] != 0;
-
-	return visible ? attr->mode : 0;
-}
 
 static umode_t bh_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type, u32 attr, int channel) {
 	struct blackhole_device *bh = (struct blackhole_device *)drvdata;
@@ -667,18 +563,12 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 		if (tag_id < TELEM_TAG_CACHE_SIZE)
 			tt_dev->telemetry_tag_cache[tag_id] = addr;
 
-		// First, check if this tag is one hwmon cares about
+		// Check if this tag is one hwmon cares about
 		for (j = 0; j < ARRAY_SIZE(bh_hwmon_attrs); ++j) {
 			if (bh_hwmon_attrs[j].tag_id == tag_id) {
 				bh->hwmon_attr_addrs[j] = addr;
 				break;
 			}
-		}
-
-		// Check if it's a device attribute we will expose in sysfs
-		for (j = 0; j < ARRAY_SIZE(bh_sysfs_attributes); ++j) {
-			if (bh_sysfs_attributes[j].tag_id == tag_id)
-				bh->sysfs_attr_addrs[j] = addr;
 		}
 	}
 
@@ -879,10 +769,9 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	tt_dev->tlb_counts[1] = bar4_len / TLB_4G_WINDOW_SIZE;
 
 	bh->hwmon_attr_addrs = devm_kcalloc(dev, ARRAY_SIZE(bh_hwmon_attrs), sizeof(u64), GFP_KERNEL);
-	bh->sysfs_attr_addrs = devm_kcalloc(dev, ARRAY_SIZE(bh_sysfs_attributes), sizeof(u64), GFP_KERNEL);
 	tt_dev->telemetry_attrs = devm_kcalloc(dev, ARRAY_SIZE(bh_sysfs_attributes) + 1, sizeof(struct attribute *), GFP_KERNEL);
 
-	if (!bh->hwmon_attr_addrs || !bh->sysfs_attr_addrs || !tt_dev->telemetry_attrs)
+	if (!bh->hwmon_attr_addrs || !tt_dev->telemetry_attrs)
 		return false;
 
 	bh->tlb_regs = pci_iomap_range(bh->tt.pdev, 0, TLB_REGS_START, TLB_REGS_LEN);
@@ -913,7 +802,7 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	for (i = 0; i < ARRAY_SIZE(bh_sysfs_attributes); ++i)
 		tt_dev->telemetry_attrs[i] = &bh_sysfs_attributes[i].attr.attr;
 	tt_dev->telemetry_group.attrs = tt_dev->telemetry_attrs;
-	tt_dev->telemetry_group.is_visible = sysfs_telemetry_is_visible;
+	tt_dev->telemetry_group.is_visible = tt_sysfs_telemetry_is_visible;
 
 	return true;
 }

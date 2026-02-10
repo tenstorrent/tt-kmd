@@ -426,19 +426,18 @@ static struct tenstorrent_sysfs_attr bh_sysfs_attributes[] = {
 };
 
 static umode_t bh_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type, u32 attr, int channel) {
-	struct blackhole_device *bh = (struct blackhole_device *)drvdata;
+	const struct tenstorrent_device *tt_dev = drvdata;
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(bh_hwmon_labels); ++i) {
-		if (type == bh_hwmon_labels[i].type && attr == bh_hwmon_labels[i].attr) {
+		if (type == bh_hwmon_labels[i].type && attr == bh_hwmon_labels[i].attr)
 			return S_IRUGO;
-		}
 	}
 
 	for (i = 0; i < ARRAY_SIZE(bh_hwmon_attrs); ++i) {
-		bool valid = (bh->hwmon_attr_addrs[i] != 0); // Whether the attribute was probed successfully.
-		if (valid && type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {
-			return S_IRUGO;
+		if (type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {
+			bool valid = tt_dev->telemetry_tag_cache[bh_hwmon_attrs[i].tag_id] != 0;
+			return valid ? S_IRUGO : 0;
 		}
 	}
 
@@ -446,17 +445,17 @@ static umode_t bh_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types 
 }
 
 static int bh_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long *val) {
-	struct blackhole_device *bh = dev_get_drvdata(dev);
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(bh_hwmon_attrs); ++i) {
 		if (type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {
 			u32 raw;
+			int r;
 
-			if (bh->hwmon_attr_addrs[i] == 0)
-				return -ENOTSUPP;
-
-			raw = noc_read32(bh, ARC_X, ARC_Y, bh->hwmon_attr_addrs[i], 0);
+			r = tt_telemetry_read32(tt_dev, bh_hwmon_attrs[i].tag_id, &raw);
+			if (r)
+				return r;
 
 			if (type == hwmon_temp) {
 				u32 int_part = raw >> 16;
@@ -475,7 +474,7 @@ static int bh_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 a
 		}
 	}
 
-	return -ENOTSUPP;
+	return -EOPNOTSUPP;
 }
 
 static int bh_hwmon_read_string(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel,
@@ -535,7 +534,7 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 	u32 version, major_ver, minor_ver, patch_ver;
 	u32 tags_addr = base_addr + 8;
 	u32 num_entries;
-	u32 i, j;
+	u32 i;
 
 	if (!is_range_within_csm(base_addr, 1) || !is_range_within_csm(data_addr, 1)) {
 		dev_err(&tt_dev->pdev->dev, "Telemetry not available\n");
@@ -562,14 +561,6 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 
 		if (tag_id < TELEM_TAG_CACHE_SIZE)
 			tt_dev->telemetry_tag_cache[tag_id] = addr;
-
-		// Check if this tag is one hwmon cares about
-		for (j = 0; j < ARRAY_SIZE(bh_hwmon_attrs); ++j) {
-			if (bh_hwmon_attrs[j].tag_id == tag_id) {
-				bh->hwmon_attr_addrs[j] = addr;
-				break;
-			}
-		}
 	}
 
 	return 0;
@@ -768,10 +759,9 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	// Limit 4G window count to what's available; partial windows not supported.
 	tt_dev->tlb_counts[1] = bar4_len / TLB_4G_WINDOW_SIZE;
 
-	bh->hwmon_attr_addrs = devm_kcalloc(dev, ARRAY_SIZE(bh_hwmon_attrs), sizeof(u64), GFP_KERNEL);
 	tt_dev->telemetry_attrs = devm_kcalloc(dev, ARRAY_SIZE(bh_sysfs_attributes) + 1, sizeof(struct attribute *), GFP_KERNEL);
 
-	if (!bh->hwmon_attr_addrs || !tt_dev->telemetry_attrs)
+	if (!tt_dev->telemetry_attrs)
 		return false;
 
 	bh->tlb_regs = pci_iomap_range(bh->tt.pdev, 0, TLB_REGS_START, TLB_REGS_LEN);
@@ -854,7 +844,7 @@ static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
 		if (!r)
 			bh->telemetry_group_registered = true;
 
-		hwmon_device = hwmon_device_register_with_info(dev, "blackhole", bh, &bh_hwmon_chip_info, NULL);
+		hwmon_device = hwmon_device_register_with_info(dev, "blackhole", tt_dev, &bh_hwmon_chip_info, NULL);
 		if (IS_ERR(hwmon_device))
 			return false;
 

@@ -616,6 +616,21 @@ static const struct hwmon_chip_info bh_hwmon_chip_info = {
 	.info = bh_hwmon_channel_info,
 };
 
+static int blackhole_read_telemetry_tag(struct tenstorrent_device *tt_dev, u16 tag_id, u32 *value)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	u64 addr;
+
+	if (tag_id >= TELEM_TAG_CACHE_SIZE)
+		return -EINVAL;
+
+	addr = tt_dev->telemetry_tag_cache[tag_id];
+	if (addr == 0)
+		return -ENODATA;
+
+	return csm_read32(bh, addr, value);
+}
+
 static int telemetry_probe(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
@@ -1113,6 +1128,7 @@ struct tenstorrent_device_class blackhole_class = {
 	.init_hardware = blackhole_init_hardware,
 	.init_telemetry = blackhole_init_telemetry,
 	.cleanup_telemetry = blackhole_cleanup_telemetry,
+	.read_telemetry_tag = blackhole_read_telemetry_tag,
 	.cleanup_hardware = blackhole_cleanup_hardware,
 	.cleanup_device = blackhole_cleanup,
 	.configure_tlb = blackhole_configure_tlb,

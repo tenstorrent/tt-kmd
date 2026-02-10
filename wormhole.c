@@ -552,6 +552,22 @@ static bool wormhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 	return false;
 }
 
+static int wormhole_read_telemetry_tag(struct tenstorrent_device *tt_dev, u16 tag_id, u32 *value)
+{
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	u64 offset;
+
+	if (tag_id >= TELEM_TAG_CACHE_SIZE)
+		return -EINVAL;
+
+	offset = tt_dev->telemetry_tag_cache[tag_id];
+	if (offset == 0)
+		return -ENODATA;
+
+	*value = ioread32(wh->bar4_mapping + offset);
+	return 0;
+}
+
 static int telemetry_probe(struct tenstorrent_device *tt_dev)
 {
 	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
@@ -1060,6 +1076,7 @@ struct tenstorrent_device_class wormhole_class = {
 	.init_hardware = wormhole_init_hardware,
 	.init_telemetry = wormhole_init_telemetry,
 	.cleanup_telemetry = wormhole_cleanup_telemetry,
+	.read_telemetry_tag = wormhole_read_telemetry_tag,
 	.cleanup_hardware = wormhole_cleanup_hardware,
 	.cleanup_device = wormhole_cleanup,
 	.reboot = wormhole_cleanup_hardware,

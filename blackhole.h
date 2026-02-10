@@ -16,8 +16,6 @@ struct blackhole_device {
 	u8 __iomem *noc2axi_cfg;
 	u8 __iomem *bar2_mapping;
 
-	u64 *hwmon_attr_addrs;
-
 	u8 saved_mps;
 
 	bool pcie_perf_group_registered;

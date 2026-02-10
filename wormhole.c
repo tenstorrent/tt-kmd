@@ -592,6 +592,9 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 			continue;
 		}
 
+		if (tag_id < TELEM_TAG_CACHE_SIZE)
+			tt_dev->telemetry_tag_cache[tag_id] = wh_arc_addr_to_sysreg(addr);
+
 		for (j = 0; j < ARRAY_SIZE(wh_sysfs_attributes); ++j) {
 			if (wh_sysfs_attributes[j].tag_id == tag_id)
 				wh->sysfs_attr_offsets[j] = wh_arc_addr_to_sysreg(addr);

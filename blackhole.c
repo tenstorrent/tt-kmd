@@ -649,6 +649,9 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 		u16 offset = (tag_entry >> 16) & 0xFFFF;
 		u32 addr = data_addr + (offset * 4);
 
+		if (tag_id < TELEM_TAG_CACHE_SIZE)
+			tt_dev->telemetry_tag_cache[tag_id] = addr;
+
 		// First, check if this tag is one hwmon cares about
 		for (j = 0; j < ARRAY_SIZE(bh_hwmon_attrs); ++j) {
 			if (bh_hwmon_attrs[j].tag_id == tag_id) {

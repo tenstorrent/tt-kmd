@@ -243,6 +243,11 @@ static long ioctl_reset_device(struct chardev_private *priv,
 			if (ok && safe_pci_restore_state(pdev)) {
 				priv->device->dev_class->restore_reset_state(priv->device);
 				ok = priv->device->dev_class->init_hardware(priv->device);
+
+				// Re-probe telemetry tag addresses in case
+				// firmware was updated before this reset.
+				if (ok && priv->device->dev_class->probe_telemetry)
+					priv->device->dev_class->probe_telemetry(priv->device);
 			} else {
 				ok = false;
 			}

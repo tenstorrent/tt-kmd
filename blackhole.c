@@ -451,12 +451,17 @@ static int blackhole_read_telemetry_tag(struct tenstorrent_device *tt_dev, u16 t
 static int telemetry_probe(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-	u32 base_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_PTR, 0);
-	u32 data_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_DATA, 0);
+	u32 base_addr, data_addr;
 	u32 version, major_ver, minor_ver, patch_ver;
-	u32 tags_addr = base_addr + 8;
+	u32 tags_addr;
 	u32 num_entries;
 	u32 i;
+
+	memset(tt_dev->telemetry_tag_cache, 0, sizeof(tt_dev->telemetry_tag_cache));
+
+	base_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_PTR, 0);
+	data_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_DATA, 0);
+	tags_addr = base_addr + 8;
 
 	if (!is_range_within_csm(base_addr, 1) || !is_range_within_csm(data_addr, 1)) {
 		dev_err(&tt_dev->pdev->dev, "Telemetry not available\n");
@@ -933,6 +938,7 @@ struct tenstorrent_device_class blackhole_class = {
 	.init_telemetry = blackhole_init_telemetry,
 	.cleanup_telemetry = blackhole_cleanup_telemetry,
 	.read_telemetry_tag = blackhole_read_telemetry_tag,
+	.probe_telemetry = telemetry_probe,
 	.cleanup_hardware = blackhole_cleanup_hardware,
 	.cleanup_device = blackhole_cleanup,
 	.configure_tlb = blackhole_configure_tlb,

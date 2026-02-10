@@ -114,7 +114,6 @@
 #define WH_FW_MSG_ASTATE0 0xA0
 #define WH_FW_MSG_ASTATE3 0xA3
 #define WH_FW_MSG_CURR_DATE 0xB7
-#define WH_FW_MSG_GET_TELEMETRY_OFFSET 0x2C
 
 #define WRITE_IATU_REG(wh_dev, direction, region, reg, value) \
 	write_iatu_reg(wh_dev, IATU_##direction, region, \
@@ -209,18 +208,6 @@ bool wormhole_send_arc_fw_message_with_args(u8 __iomem *reset_unit_regs, u8 mess
 static bool wormhole_send_arc_fw_message(u8 __iomem *reset_unit_regs, u8 message_id, u32 timeout_us, u16 *exit_code)
 {
 	return wormhole_send_arc_fw_message_with_args(reset_unit_regs, message_id, 0, 0, timeout_us, exit_code);
-}
-
-static bool wormhole_read_fw_telemetry_offset(u8 __iomem *reset_unit_regs, u32 *offset)
-{
-	u8 __iomem *arc_return_reg = reset_unit_regs + SCRATCH_REG(3);
-
-	if (!wormhole_send_arc_fw_message(reset_unit_regs, WH_FW_MSG_GET_TELEMETRY_OFFSET, 10000, NULL))
-		return false;
-
-	*offset = ioread32(arc_return_reg);
-
-	return true;
 }
 
 static bool wormhole_shutdown_firmware(struct pci_dev *pdev, u8 __iomem *reset_unit_regs)
@@ -517,25 +504,110 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 	return 0;
 }
 
-static const struct tt_hwmon_attr wh_hwmon_attributes[] = {
-	{ hwmon_temp,  hwmon_temp_input,  0x74, 0,  GENMASK(15, 0), 1000,    16 },
-	{ hwmon_temp,  hwmon_temp_max,    0x8c, 0,  GENMASK(15, 0), 1000,    1 },
-	{ hwmon_in,    hwmon_in_input,    0x70, 0,  GENMASK(31, 0), 1,       1 },
-	{ hwmon_in,    hwmon_in_max,      0x88, 16, GENMASK(15, 0), 1,       1 },
-	{ hwmon_curr,  hwmon_curr_input,  0x84, 0,  GENMASK(15, 0), 1000,    1 },
-	{ hwmon_curr,  hwmon_curr_max,    0x84, 16, GENMASK(15, 0), 1000,    1 },
-	{ hwmon_power, hwmon_power_input, 0x80, 0,  GENMASK(15, 0), 1000000, 1 },
-	{ hwmon_power, hwmon_power_max,   0x80, 16, GENMASK(15, 0), 1000000, 1 },
-	{ .reg_offset = TT_HWMON_ATTR_END },
+struct wh_hwmon_attr {
+	u32 tag_id;
+	enum hwmon_sensor_types type;
+	u32 attr;
 };
 
-static const struct tt_hwmon_label wh_hwmon_labels[] = {
-	{ hwmon_temp,  hwmon_temp_label,  "asic1_temp" },
-	{ hwmon_in,    hwmon_in_label,    "vcore1"     },
-	{ hwmon_curr,  hwmon_curr_label,  "current1"   },
-	{ hwmon_power, hwmon_power_label, "power1"     },
-	{ .name = NULL },
+struct wh_hwmon_label {
+	const char *label;
+	enum hwmon_sensor_types type;
+	u32 attr;
 };
+
+static const struct wh_hwmon_attr wh_hwmon_attrs[] = {
+	{ TELEMETRY_ASIC_TEMP,          hwmon_temp,  hwmon_temp_input  },
+	{ TELEMETRY_THM_LIMIT_THROTTLE, hwmon_temp,  hwmon_temp_max    },
+	{ TELEMETRY_VCORE,              hwmon_in,    hwmon_in_input    },
+	{ TELEMETRY_VDD_LIMITS,         hwmon_in,    hwmon_in_max      },
+	{ TELEMETRY_CURRENT,            hwmon_curr,  hwmon_curr_input  },
+	{ TELEMETRY_TDC_LIMIT_MAX,      hwmon_curr,  hwmon_curr_max    },
+	{ TELEMETRY_POWER,              hwmon_power, hwmon_power_input },
+	{ TELEMETRY_TDP_LIMIT_MAX,      hwmon_power, hwmon_power_max   },
+};
+
+static const struct wh_hwmon_label wh_hwmon_labels[] = {
+	{ "asic1_temp", hwmon_temp,  hwmon_temp_label  },
+	{ "vcore1",     hwmon_in,    hwmon_in_label    },
+	{ "current1",   hwmon_curr,  hwmon_curr_label  },
+	{ "power1",     hwmon_power, hwmon_power_label },
+};
+
+static umode_t wh_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type, u32 attr, int channel)
+{
+	const struct tenstorrent_device *tt_dev = drvdata;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(wh_hwmon_labels); ++i) {
+		if (type == wh_hwmon_labels[i].type && attr == wh_hwmon_labels[i].attr)
+			return S_IRUGO;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(wh_hwmon_attrs); ++i) {
+		if (type == wh_hwmon_attrs[i].type && attr == wh_hwmon_attrs[i].attr) {
+			bool valid = tt_dev->telemetry_tag_cache[wh_hwmon_attrs[i].tag_id] != 0;
+			return valid ? S_IRUGO : 0;
+		}
+	}
+
+	return 0;
+}
+
+static int wh_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long *val)
+{
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(wh_hwmon_attrs); ++i) {
+		if (type == wh_hwmon_attrs[i].type && attr == wh_hwmon_attrs[i].attr) {
+			u32 raw;
+			int r;
+
+			r = tt_telemetry_read32(tt_dev, wh_hwmon_attrs[i].tag_id, &raw);
+			if (r)
+				return r;
+
+			if (type == hwmon_temp) {
+				if (attr == hwmon_temp_input) {
+					// ASIC_TEMPERATURE is 16.16 fixed-point
+					u32 int_part = raw >> 16;
+					u32 frac_part = raw & 0xFFFF;
+					*val = (int_part * 1000) + ((frac_part * 1000) / 0x10000);
+				} else {
+					// Limit tags are plain degrees C
+					*val = raw * 1000;
+				}
+			} else if (type == hwmon_curr) {
+				*val = raw * 1000;	// Convert A to mA
+			} else if (type == hwmon_power) {
+				*val = raw * 1000000;	// Convert W to uW
+			} else if (type == hwmon_in) {
+				if (attr == hwmon_in_max)
+					raw = (raw >> 16) & 0xFFFF;  // VDD_LIMITS: max in upper 16
+				*val = raw;		// Reported in mV
+			}
+			return 0;
+		}
+	}
+
+	return -EOPNOTSUPP;
+}
+
+static int wh_hwmon_read_string(struct device *dev, enum hwmon_sensor_types type,
+				u32 attr, int channel, const char **str)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(wh_hwmon_labels); ++i) {
+		if (type == wh_hwmon_labels[i].type && attr == wh_hwmon_labels[i].attr) {
+			*str = wh_hwmon_labels[i].label;
+			return 0;
+		}
+	}
+
+	return -EOPNOTSUPP;
+}
 
 static const struct hwmon_channel_info *wh_hwmon_info[] = {
 	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_MAX),
@@ -545,8 +617,14 @@ static const struct hwmon_channel_info *wh_hwmon_info[] = {
 	NULL,
 };
 
+static const struct hwmon_ops wh_hwmon_ops = {
+	.is_visible = wh_hwmon_is_visible,
+	.read = wh_hwmon_read,
+	.read_string = wh_hwmon_read_string,
+};
+
 static const struct hwmon_chip_info wh_hwmon_chip_info = {
-	.ops = &tt_hwmon_ops,
+	.ops = &wh_hwmon_ops,
 	.info = wh_hwmon_info,
 };
 
@@ -554,30 +632,18 @@ static void wormhole_hwmon_init(struct wormhole_device *wh_dev)
 {
 	struct tenstorrent_device *tt_dev = &wh_dev->tt;
 	struct device *dev = &tt_dev->pdev->dev;
-	struct tt_hwmon_context *context = &tt_dev->hwmon_context;
 	struct device *hwmon_device;
-	u32 telemetry_offset;
 
-	if (!wormhole_read_fw_telemetry_offset(reset_unit_regs(wh_dev), &telemetry_offset))
-		goto wormhole_hwmon_init_err;
-
-	context->attributes = wh_hwmon_attributes;
-	context->labels = wh_hwmon_labels;
-	context->telemetry_base = wh_dev->bar4_mapping + wh_arc_addr_to_sysreg(telemetry_offset);
-
-	hwmon_device = hwmon_device_register_with_info(dev, "wormhole", context, &wh_hwmon_chip_info, NULL);
-	if (IS_ERR(hwmon_device))
-		goto wormhole_hwmon_init_err;
+	hwmon_device = hwmon_device_register_with_info(dev, "wormhole", tt_dev, &wh_hwmon_chip_info, NULL);
+	if (IS_ERR(hwmon_device)) {
+		dev_warn(dev, "Failed to initialize hwmon.\n");
+		return;
+	}
 
 	tt_dev->hwmon_dev = hwmon_device;
 
 	// Notify udev that telemetry attributes are now available.
 	kobject_uevent(&tt_dev->dev.kobj, KOBJ_CHANGE);
-
-	return;
-
-wormhole_hwmon_init_err:
-	dev_warn(dev, "Failed to initialize hwmon.\n");
 }
 
 static bool is_fw_ready_for_telemetry(struct wormhole_device *wh)

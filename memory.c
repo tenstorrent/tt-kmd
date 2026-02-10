@@ -878,6 +878,13 @@ long ioctl_map_peer_bar(struct chardev_private *priv,
 	peer_mapping->mapped_address = mapping;
 	peer_mapping->size = in.peer_bar_length;
 
+	out.dma_address = mapping;
+
+	if (copy_to_user(&arg->out, &out, sizeof(out)) != 0) {
+		ret = -EFAULT;
+		goto err_dma_unmap;
+	}
+
 	list_add(&peer_mapping->list, &priv->peer_mappings);
 
 	mutex_unlock(&priv->mutex);
@@ -885,13 +892,10 @@ long ioctl_map_peer_bar(struct chardev_private *priv,
 
 	fput(peer_file);
 
-	out.dma_address = mapping;
-
-	if (copy_to_user(&arg->out, &out, sizeof(out)) != 0)
-		return -EFAULT;
-
 	return 0;
 
+err_dma_unmap:
+	dma_unmap_resource(&priv->device->pdev->dev, mapping, in.peer_bar_length, DMA_BIDIRECTIONAL, 0);
 err_unlock:
 	mutex_unlock(&priv->mutex);
 	mutex_unlock(&peer_priv->mutex);

@@ -12,7 +12,6 @@
 #include "wormhole.h"
 #include "pcie.h"
 #include "module.h"
-#include "hwmon.h"
 #include "tlb.h"
 #include "telemetry.h"
 #include "enumerate.h"
@@ -504,19 +503,7 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 	return 0;
 }
 
-struct wh_hwmon_attr {
-	u32 tag_id;
-	enum hwmon_sensor_types type;
-	u32 attr;
-};
-
-struct wh_hwmon_label {
-	const char *label;
-	enum hwmon_sensor_types type;
-	u32 attr;
-};
-
-static const struct wh_hwmon_attr wh_hwmon_attrs[] = {
+static const struct tt_hwmon_attr wh_hwmon_attrs[] = {
 	{ TELEMETRY_ASIC_TEMP,          hwmon_temp,  hwmon_temp_input  },
 	{ TELEMETRY_THM_LIMIT_THROTTLE, hwmon_temp,  hwmon_temp_max    },
 	{ TELEMETRY_VCORE,              hwmon_in,    hwmon_in_input    },
@@ -525,89 +512,16 @@ static const struct wh_hwmon_attr wh_hwmon_attrs[] = {
 	{ TELEMETRY_TDC_LIMIT_MAX,      hwmon_curr,  hwmon_curr_max    },
 	{ TELEMETRY_POWER,              hwmon_power, hwmon_power_input },
 	{ TELEMETRY_TDP_LIMIT_MAX,      hwmon_power, hwmon_power_max   },
+	{ 0 },	// sentinel
 };
 
-static const struct wh_hwmon_label wh_hwmon_labels[] = {
+static const struct tt_hwmon_label wh_hwmon_labels[] = {
 	{ "asic1_temp", hwmon_temp,  hwmon_temp_label  },
 	{ "vcore1",     hwmon_in,    hwmon_in_label    },
 	{ "current1",   hwmon_curr,  hwmon_curr_label  },
 	{ "power1",     hwmon_power, hwmon_power_label },
+	{ NULL },	// sentinel
 };
-
-static umode_t wh_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type, u32 attr, int channel)
-{
-	const struct tenstorrent_device *tt_dev = drvdata;
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(wh_hwmon_labels); ++i) {
-		if (type == wh_hwmon_labels[i].type && attr == wh_hwmon_labels[i].attr)
-			return S_IRUGO;
-	}
-
-	for (i = 0; i < ARRAY_SIZE(wh_hwmon_attrs); ++i) {
-		if (type == wh_hwmon_attrs[i].type && attr == wh_hwmon_attrs[i].attr) {
-			bool valid = tt_dev->telemetry_tag_cache[wh_hwmon_attrs[i].tag_id] != 0;
-			return valid ? S_IRUGO : 0;
-		}
-	}
-
-	return 0;
-}
-
-static int wh_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long *val)
-{
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(wh_hwmon_attrs); ++i) {
-		if (type == wh_hwmon_attrs[i].type && attr == wh_hwmon_attrs[i].attr) {
-			u32 raw;
-			int r;
-
-			r = tt_telemetry_read32(tt_dev, wh_hwmon_attrs[i].tag_id, &raw);
-			if (r)
-				return r;
-
-			if (type == hwmon_temp) {
-				if (attr == hwmon_temp_input) {
-					// ASIC_TEMPERATURE is 16.16 fixed-point
-					u32 int_part = raw >> 16;
-					u32 frac_part = raw & 0xFFFF;
-					*val = (int_part * 1000) + ((frac_part * 1000) / 0x10000);
-				} else {
-					// Limit tags are plain degrees C
-					*val = raw * 1000;
-				}
-			} else if (type == hwmon_curr) {
-				*val = raw * 1000;	// Convert A to mA
-			} else if (type == hwmon_power) {
-				*val = raw * 1000000;	// Convert W to uW
-			} else if (type == hwmon_in) {
-				if (attr == hwmon_in_max)
-					raw = (raw >> 16) & 0xFFFF;  // VDD_LIMITS: max in upper 16
-				*val = raw;		// Reported in mV
-			}
-			return 0;
-		}
-	}
-
-	return -EOPNOTSUPP;
-}
-
-static int wh_hwmon_read_string(struct device *dev, enum hwmon_sensor_types type,
-				u32 attr, int channel, const char **str)
-{
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(wh_hwmon_labels); ++i) {
-		if (type == wh_hwmon_labels[i].type && attr == wh_hwmon_labels[i].attr) {
-			*str = wh_hwmon_labels[i].label;
-			return 0;
-		}
-	}
-
-	return -EOPNOTSUPP;
-}
 
 static const struct hwmon_channel_info *wh_hwmon_info[] = {
 	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_MAX),
@@ -617,14 +531,8 @@ static const struct hwmon_channel_info *wh_hwmon_info[] = {
 	NULL,
 };
 
-static const struct hwmon_ops wh_hwmon_ops = {
-	.is_visible = wh_hwmon_is_visible,
-	.read = wh_hwmon_read,
-	.read_string = wh_hwmon_read_string,
-};
-
 static const struct hwmon_chip_info wh_hwmon_chip_info = {
-	.ops = &wh_hwmon_ops,
+	.ops = &tt_hwmon_ops,
 	.info = wh_hwmon_info,
 };
 
@@ -633,6 +541,9 @@ static void wormhole_hwmon_init(struct wormhole_device *wh_dev)
 	struct tenstorrent_device *tt_dev = &wh_dev->tt;
 	struct device *dev = &tt_dev->pdev->dev;
 	struct device *hwmon_device;
+
+	tt_dev->hwmon_attributes = wh_hwmon_attrs;
+	tt_dev->hwmon_labels = wh_hwmon_labels;
 
 	hwmon_device = hwmon_device_register_with_info(dev, "wormhole", tt_dev, &wh_hwmon_chip_info, NULL);
 	if (IS_ERR(hwmon_device)) {

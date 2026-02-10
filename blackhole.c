@@ -384,32 +384,26 @@ static const struct attribute_group bh_pcie_perf_counters_group = {
 	.attrs = bh_pcie_perf_counters_attrs,
 };
 
-struct blackhole_hwmon_label {
-	enum hwmon_sensor_types type;
-	u32 attr;
-	const char *label;
+static const struct tt_hwmon_label bh_hwmon_labels[] = {
+	{ "asic_temp", hwmon_temp,  hwmon_temp_label  },
+	{ "vcore",     hwmon_in,    hwmon_in_label    },
+	{ "current",   hwmon_curr,  hwmon_curr_label  },
+	{ "power",     hwmon_power, hwmon_power_label },
+	{ "fan_rpm",   hwmon_fan,   hwmon_fan_label   },
+	{ NULL },	// sentinel
 };
 
-struct blackhole_hwmon_attr {
-	u32 tag_id;
-	enum hwmon_sensor_types type;
-	u32 attr;
-};
-
-static const struct blackhole_hwmon_label bh_hwmon_labels[] = {
-	{ hwmon_temp,  hwmon_temp_label,  "asic_temp" },
-	{ hwmon_in,    hwmon_in_label,    "vcore"     },
-	{ hwmon_curr,  hwmon_curr_label,  "current"   },
-	{ hwmon_power, hwmon_power_label, "power"     },
-	{ hwmon_fan,   hwmon_fan_label,   "fan_rpm"   },
-};
-
-static const struct blackhole_hwmon_attr bh_hwmon_attrs[] = {
-	{ TELEMETRY_ASIC_TEMP, hwmon_temp,  hwmon_temp_input  },
-	{ TELEMETRY_VCORE,     hwmon_in,    hwmon_in_input    },
-	{ TELEMETRY_CURRENT,   hwmon_curr,  hwmon_curr_input  },
-	{ TELEMETRY_POWER,     hwmon_power, hwmon_power_input },
-	{ TELEMETRY_FAN_RPM,   hwmon_fan,   hwmon_fan_input   },
+static const struct tt_hwmon_attr bh_hwmon_attrs[] = {
+	{ TELEMETRY_ASIC_TEMP,          hwmon_temp,  hwmon_temp_input  },
+	{ TELEMETRY_THM_LIMIT_THROTTLE, hwmon_temp,  hwmon_temp_max    },
+	{ TELEMETRY_VCORE,              hwmon_in,    hwmon_in_input    },
+	{ TELEMETRY_VDD_LIMITS,         hwmon_in,    hwmon_in_max      },
+	{ TELEMETRY_CURRENT,            hwmon_curr,  hwmon_curr_input  },
+	{ TELEMETRY_TDC_LIMIT_MAX,      hwmon_curr,  hwmon_curr_max    },
+	{ TELEMETRY_POWER,              hwmon_power, hwmon_power_input },
+	{ TELEMETRY_TDP_LIMIT_MAX,      hwmon_power, hwmon_power_max   },
+	{ TELEMETRY_FAN_RPM,            hwmon_fan,   hwmon_fan_input   },
+	{ 0 },	// sentinel
 };
 
 static struct tenstorrent_sysfs_attr bh_sysfs_attributes[] = {
@@ -425,89 +419,17 @@ static struct tenstorrent_sysfs_attr bh_sysfs_attributes[] = {
 	{ TELEMETRY_THERM_TRIP_COUNT, __ATTR(tt_therm_trip_count, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
 };
 
-static umode_t bh_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type, u32 attr, int channel) {
-	const struct tenstorrent_device *tt_dev = drvdata;
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(bh_hwmon_labels); ++i) {
-		if (type == bh_hwmon_labels[i].type && attr == bh_hwmon_labels[i].attr)
-			return S_IRUGO;
-	}
-
-	for (i = 0; i < ARRAY_SIZE(bh_hwmon_attrs); ++i) {
-		if (type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {
-			bool valid = tt_dev->telemetry_tag_cache[bh_hwmon_attrs[i].tag_id] != 0;
-			return valid ? S_IRUGO : 0;
-		}
-	}
-
-	return 0;
-}
-
-static int bh_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long *val) {
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(bh_hwmon_attrs); ++i) {
-		if (type == bh_hwmon_attrs[i].type && attr == bh_hwmon_attrs[i].attr) {
-			u32 raw;
-			int r;
-
-			r = tt_telemetry_read32(tt_dev, bh_hwmon_attrs[i].tag_id, &raw);
-			if (r)
-				return r;
-
-			if (type == hwmon_temp) {
-				u32 int_part = raw >> 16;
-				u32 frac_part = raw & 0xFFFF;
-				*val = (int_part * 1000) + ((frac_part * 1000) / 0x10000);
-			} else if (type == hwmon_curr) {
-				*val = raw * 1000;     // Convert A to mA
-			} else if (type == hwmon_power) {
-				*val = raw * 1000000;  // Convert W to uW
-			} else if (type == hwmon_in) {
-				*val = raw;            // Reported in mV
-			} else if (type == hwmon_fan) {
-				*val = raw;            // Reported in RPM
-			}
-			return 0;
-		}
-	}
-
-	return -EOPNOTSUPP;
-}
-
-static int bh_hwmon_read_string(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel,
-				   const char **str) {
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(bh_hwmon_labels); i++) {
-		if (type == bh_hwmon_labels[i].type && attr == bh_hwmon_labels[i].attr) {
-			*str = bh_hwmon_labels[i].label;
-			return 0;
-		}
-	}
-
-	return -EOPNOTSUPP;
-}
-
 static const struct hwmon_channel_info *bh_hwmon_channel_info[] = {
-	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT | HWMON_T_LABEL),
-	HWMON_CHANNEL_INFO(in, HWMON_I_INPUT | HWMON_I_LABEL),
-	HWMON_CHANNEL_INFO(curr, HWMON_C_INPUT | HWMON_C_LABEL),
-	HWMON_CHANNEL_INFO(power, HWMON_P_INPUT | HWMON_P_LABEL),
+	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_MAX),
+	HWMON_CHANNEL_INFO(in, HWMON_I_INPUT | HWMON_I_LABEL | HWMON_I_MAX),
+	HWMON_CHANNEL_INFO(curr, HWMON_C_INPUT | HWMON_C_LABEL | HWMON_C_MAX),
+	HWMON_CHANNEL_INFO(power, HWMON_P_INPUT | HWMON_P_LABEL | HWMON_P_MAX),
 	HWMON_CHANNEL_INFO(fan, HWMON_F_INPUT | HWMON_F_LABEL),
 	NULL,
 };
 
-static const struct hwmon_ops bh_hwmon_ops = {
-	.is_visible = bh_hwmon_is_visible,
-	.read = bh_hwmon_read,
-	.read_string = bh_hwmon_read_string,
-};
-
 static const struct hwmon_chip_info bh_hwmon_chip_info = {
-	.ops = &bh_hwmon_ops,
+	.ops = &tt_hwmon_ops,
 	.info = bh_hwmon_channel_info,
 };
 
@@ -843,6 +765,9 @@ static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
 		r = device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
 		if (!r)
 			bh->telemetry_group_registered = true;
+
+		tt_dev->hwmon_attributes = bh_hwmon_attrs;
+		tt_dev->hwmon_labels = bh_hwmon_labels;
 
 		hwmon_device = hwmon_device_register_with_info(dev, "blackhole", tt_dev, &bh_hwmon_chip_info, NULL);
 		if (IS_ERR(hwmon_device))

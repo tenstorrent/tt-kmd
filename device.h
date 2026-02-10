@@ -14,7 +14,6 @@
 #include <linux/wait.h>
 
 #include "ioctl.h"
-#include "hwmon.h"
 #include "memory.h"
 #include "telemetry.h"
 
@@ -48,8 +47,9 @@ struct tenstorrent_device {
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
 	wait_queue_head_t resource_lock_waitqueue;
 
-	struct tt_hwmon_context hwmon_context;
 	struct device *hwmon_dev;
+	const struct tt_hwmon_attr *hwmon_attributes;
+	const struct tt_hwmon_label *hwmon_labels;
 
 	struct list_head open_fds_list;	// List of struct chardev_private, linked through open_fds field
 

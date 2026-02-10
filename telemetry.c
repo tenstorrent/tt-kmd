@@ -141,3 +141,92 @@ umode_t tt_sysfs_telemetry_is_visible(struct kobject *kobj, struct attribute *at
 	visible = tt_dev->telemetry_tag_cache[ts_attr->tag_id] != 0;
 	return visible ? attr->mode : 0;
 }
+
+// Common hwmon callbacks for tag-based telemetry.
+// Arch-specific attr/label/channel tables are defined per-architecture;
+// these callbacks are shared via tt_hwmon_ops.
+
+static umode_t tt_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type, u32 attr, int channel)
+{
+	const struct tenstorrent_device *tt_dev = drvdata;
+	const struct tt_hwmon_attr *a;
+	const struct tt_hwmon_label *l;
+
+	for (l = tt_dev->hwmon_labels; l && l->label; l++) {
+		if (type == l->type && attr == l->attr)
+			return S_IRUGO;
+	}
+
+	for (a = tt_dev->hwmon_attributes; a && a->tag_id; a++) {
+		if (type == a->type && attr == a->attr) {
+			bool valid = tt_dev->telemetry_tag_cache[a->tag_id] != 0;
+			return valid ? S_IRUGO : 0;
+		}
+	}
+
+	return 0;
+}
+
+static int tt_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long *val)
+{
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	const struct tt_hwmon_attr *a;
+
+	for (a = tt_dev->hwmon_attributes; a && a->tag_id; a++) {
+		if (type == a->type && attr == a->attr) {
+			u32 raw;
+			int r;
+
+			r = tt_telemetry_read32(tt_dev, a->tag_id, &raw);
+			if (r)
+				return r;
+
+			if (type == hwmon_temp) {
+				if (attr == hwmon_temp_input) {
+					// ASIC_TEMPERATURE is 16.16 fixed-point
+					u32 int_part = raw >> 16;
+					u32 frac_part = raw & 0xFFFF;
+					*val = (int_part * 1000) + ((frac_part * 1000) / 0x10000);
+				} else {
+					// Limit tags are plain degrees C
+					*val = raw * 1000;
+				}
+			} else if (type == hwmon_curr) {
+				*val = raw * 1000;	// Convert A to mA
+			} else if (type == hwmon_power) {
+				*val = raw * 1000000;	// Convert W to uW
+			} else if (type == hwmon_in) {
+				if (attr == hwmon_in_max)
+					raw = (raw >> 16) & 0xFFFF;  // VDD_LIMITS: max in upper 16
+				*val = raw;		// Reported in mV
+			} else if (type == hwmon_fan) {
+				*val = raw;		// Reported in RPM
+			}
+			return 0;
+		}
+	}
+
+	return -EOPNOTSUPP;
+}
+
+static int tt_hwmon_read_string(struct device *dev, enum hwmon_sensor_types type,
+				u32 attr, int channel, const char **str)
+{
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	const struct tt_hwmon_label *l;
+
+	for (l = tt_dev->hwmon_labels; l && l->label; l++) {
+		if (type == l->type && attr == l->attr) {
+			*str = l->label;
+			return 0;
+		}
+	}
+
+	return -EOPNOTSUPP;
+}
+
+const struct hwmon_ops tt_hwmon_ops = {
+	.is_visible = tt_hwmon_is_visible,
+	.read = tt_hwmon_read,
+	.read_string = tt_hwmon_read_string,
+};

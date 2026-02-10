@@ -6,6 +6,7 @@
 
 #include <linux/types.h>
 #include <linux/device.h>
+#include <linux/hwmon.h>
 
 // Maximum number of tag IDs in the per-device tag-to-address cache.
 // Tag IDs are small integers (currently up to 64); 128 gives comfortable headroom.
@@ -53,6 +54,21 @@ ssize_t tt_sysfs_show_u64_hex(struct device *dev, struct device_attribute *attr,
 ssize_t tt_sysfs_show_u32_ver(struct device *dev, struct device_attribute *attr, char *buf);
 ssize_t tt_sysfs_show_card_type(struct device *dev, struct device_attribute *attr, char *buf);
 umode_t tt_sysfs_telemetry_is_visible(struct kobject *kobj, struct attribute *attr, int n);
+
+// Common hwmon attribute and label types for tag-based telemetry.
+struct tt_hwmon_attr {
+	u16 tag_id;
+	enum hwmon_sensor_types type;
+	u32 attr;
+};
+
+struct tt_hwmon_label {
+	const char *label;
+	enum hwmon_sensor_types type;
+	u32 attr;
+};
+
+extern const struct hwmon_ops tt_hwmon_ops;
 
 #define ARC_CSM_BASE 0x10000000
 #define ARC_CSM_SIZE (1 << 19)

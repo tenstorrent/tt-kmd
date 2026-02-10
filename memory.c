@@ -597,6 +597,9 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
 		return -EFAULT;
 
+	if (clear_user(&arg->out, in.output_size_bytes) != 0)
+		return -EFAULT;
+
 	if (in.flags & ~valid_flags)
 		return -EINVAL;
 
@@ -720,6 +723,14 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		}
 	}
 
+	out.noc_address = noc_address;
+	bytes_to_copy = min(in.output_size_bytes, (u32)sizeof(out));
+
+	if (copy_to_user(&arg->out, &out, bytes_to_copy) != 0) {
+		ret = -EFAULT;
+		goto err_teardown_iatu;
+	}
+
 	pinning->page_count = nr_pages;
 	pinning->pages = pages;
 	pinning->dma_mapping = dma_mapping;
@@ -729,17 +740,13 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	list_add(&pinning->list, &priv->pinnings);
 	mutex_unlock(&priv->mutex);
 
-	out.noc_address = noc_address;
-	if (clear_user(&arg->out, in.output_size_bytes) != 0)
-		return -EFAULT;
-
-	bytes_to_copy = min(in.output_size_bytes, (u32)sizeof(out));
-
-	if (copy_to_user(&arg->out, &out, bytes_to_copy) != 0)
-		return -EFAULT;
-
 	return 0;
 
+err_teardown_iatu:
+	// teardown_outbound_iatu is a no-op when iatu_region == -1.
+	// dma_unmap_sgtable and free_chained_sgt are no-ops on the
+	// zero-initialized dma_mapping from the non-IOMMU path.
+	teardown_outbound_iatu(priv, iatu_region);
 err_dma_unmap:
 	dma_unmap_sgtable(&priv->device->pdev->dev, &dma_mapping, DMA_BIDIRECTIONAL, 0);
 err_unlock_priv:

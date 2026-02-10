@@ -16,6 +16,7 @@
 #include "ioctl.h"
 #include "hwmon.h"
 #include "memory.h"
+#include "telemetry.h"
 
 #define MAX_TLB_KINDS 4
 
@@ -60,6 +61,12 @@ struct tenstorrent_device {
 
 	struct attribute **telemetry_attrs;
 	struct attribute_group telemetry_group;
+
+	// Per-device tag-to-address cache, indexed by tag ID.
+	// Populated by telemetry_probe(); zero means tag not available.
+	// The stored value is arch-specific: WH stores a BAR4 sysreg offset,
+	// BH stores a raw CSM address for NOC reads.
+	u64 telemetry_tag_cache[TELEM_TAG_CACHE_SIZE];
 };
 
 struct tlb_descriptor;

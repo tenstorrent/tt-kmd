@@ -14,8 +14,8 @@
 #include <linux/wait.h>
 
 #include "ioctl.h"
-#include "hwmon.h"
 #include "memory.h"
+#include "telemetry.h"
 
 #define MAX_TLB_KINDS 4
 
@@ -47,8 +47,9 @@ struct tenstorrent_device {
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
 	wait_queue_head_t resource_lock_waitqueue;
 
-	struct tt_hwmon_context hwmon_context;
 	struct device *hwmon_dev;
+	const struct tt_hwmon_attr *hwmon_attributes;
+	const struct tt_hwmon_label *hwmon_labels;
 
 	struct list_head open_fds_list;	// List of struct chardev_private, linked through open_fds field
 
@@ -60,6 +61,12 @@ struct tenstorrent_device {
 
 	struct attribute **telemetry_attrs;
 	struct attribute_group telemetry_group;
+
+	// Per-device tag-to-address cache, indexed by tag ID.
+	// Populated by telemetry_probe(); zero means tag not available.
+	// The stored value is arch-specific: WH stores a BAR4 sysreg offset,
+	// BH stores a raw CSM address for NOC reads.
+	u64 telemetry_tag_cache[TELEM_TAG_CACHE_SIZE];
 };
 
 struct tlb_descriptor;
@@ -90,6 +97,8 @@ struct tenstorrent_device_class {
 	int (*configure_outbound_atu)(struct tenstorrent_device *ttdev, u32 region, u64 base, u64 limit, u64 target);
 	void (*noc_write32)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, u32 data, int noc);
 	int (*set_power_state)(struct tenstorrent_device *ttdev, struct tenstorrent_power_state *power_state);
+	int (*read_telemetry_tag)(struct tenstorrent_device *ttdev, u16 tag_id, u32 *value);
+	int (*probe_telemetry)(struct tenstorrent_device *ttdev);
 };
 
 void tenstorrent_device_put(struct tenstorrent_device *);

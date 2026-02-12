@@ -12,7 +12,6 @@
 #include "wormhole.h"
 #include "pcie.h"
 #include "module.h"
-#include "hwmon.h"
 #include "tlb.h"
 #include "telemetry.h"
 #include "enumerate.h"
@@ -114,7 +113,6 @@
 #define WH_FW_MSG_ASTATE0 0xA0
 #define WH_FW_MSG_ASTATE3 0xA3
 #define WH_FW_MSG_CURR_DATE 0xB7
-#define WH_FW_MSG_GET_TELEMETRY_OFFSET 0x2C
 
 #define WRITE_IATU_REG(wh_dev, direction, region, reg, value) \
 	write_iatu_reg(wh_dev, IATU_##direction, region, \
@@ -211,18 +209,6 @@ static bool wormhole_send_arc_fw_message(u8 __iomem *reset_unit_regs, u8 message
 	return wormhole_send_arc_fw_message_with_args(reset_unit_regs, message_id, 0, 0, timeout_us, exit_code);
 }
 
-static bool wormhole_read_fw_telemetry_offset(u8 __iomem *reset_unit_regs, u32 *offset)
-{
-	u8 __iomem *arc_return_reg = reset_unit_regs + SCRATCH_REG(3);
-
-	if (!wormhole_send_arc_fw_message(reset_unit_regs, WH_FW_MSG_GET_TELEMETRY_OFFSET, 10000, NULL))
-		return false;
-
-	*offset = ioread32(arc_return_reg);
-
-	return true;
-}
-
 static bool wormhole_shutdown_firmware(struct pci_dev *pdev, u8 __iomem *reset_unit_regs)
 {
 	if (is_hardware_hung(pdev, reset_unit_regs))
@@ -300,119 +286,21 @@ static void write_iatu_reg(struct wormhole_device *wh_dev, unsigned direction,
 	iowrite32(value, wh_dev->bar2_mapping + offset);
 }
 
-static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *attr, char *buf);
-static ssize_t sysfs_show_u64_hex(struct device *dev, struct device_attribute *attr, char *buf);
-static ssize_t sysfs_show_u32_ver(struct device *dev, struct device_attribute *attr, char *buf);
-static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute *attr, char *buf);
-static umode_t sysfs_telemetry_is_visible(struct kobject *kobj, struct attribute *attr, int n);
-
 static struct tenstorrent_sysfs_attr wh_sysfs_attributes[] = {
-	{ TELEMETRY_AICLK, __ATTR(tt_aiclk,  S_IRUGO, sysfs_show_u32_dec, NULL) },
-	{ TELEMETRY_AXICLK, __ATTR(tt_axiclk, S_IRUGO, sysfs_show_u32_dec, NULL) },
-	{ TELEMETRY_ARCCLK, __ATTR(tt_arcclk, S_IRUGO, sysfs_show_u32_dec, NULL) },
-	{ TELEMETRY_BOARD_ID, __ATTR(tt_serial, S_IRUGO, sysfs_show_u64_hex, NULL) },
-	{ TELEMETRY_BOARD_ID, __ATTR(tt_card_type, S_IRUGO, sysfs_show_card_type, NULL) },
-	{ TELEMETRY_FLASH_BUNDLE_VERSION, __ATTR(tt_fw_bundle_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
-	{ TELEMETRY_BM_APP_FW_VERSION, __ATTR(tt_m3app_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
-	{ TELEMETRY_TT_FLASH_VERSION, __ATTR(tt_ttflash_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
-	{ TELEMETRY_BM_BL_FW_VERSION, __ATTR(tt_m3bl_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
-	{ TELEMETRY_CM_FW_VERSION, __ATTR(tt_arc_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
-	{ TELEMETRY_ETH_FW_VERSION, __ATTR(tt_eth_fw_ver, S_IRUGO, sysfs_show_u32_ver, NULL) },
-	{ TELEMETRY_ASIC_ID, __ATTR(tt_asic_id, S_IRUGO, sysfs_show_u64_hex, NULL) },
-	{ TELEMETRY_TIMER_HEARTBEAT, __ATTR(tt_heartbeat, S_IRUGO, sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_AICLK, __ATTR(tt_aiclk,  S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_AXICLK, __ATTR(tt_axiclk, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_ARCCLK, __ATTR(tt_arcclk, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_BOARD_ID, __ATTR(tt_serial, S_IRUGO, tt_sysfs_show_u64_hex, NULL) },
+	{ TELEMETRY_BOARD_ID, __ATTR(tt_card_type, S_IRUGO, tt_sysfs_show_card_type, NULL) },
+	{ TELEMETRY_FLASH_BUNDLE_VERSION, __ATTR(tt_fw_bundle_ver, S_IRUGO, tt_sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_BM_APP_FW_VERSION, __ATTR(tt_m3app_fw_ver, S_IRUGO, tt_sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_TT_FLASH_VERSION, __ATTR(tt_ttflash_ver, S_IRUGO, tt_sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_BM_BL_FW_VERSION, __ATTR(tt_m3bl_fw_ver, S_IRUGO, tt_sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_CM_FW_VERSION, __ATTR(tt_arc_fw_ver, S_IRUGO, tt_sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_ETH_FW_VERSION, __ATTR(tt_eth_fw_ver, S_IRUGO, tt_sysfs_show_u32_ver, NULL) },
+	{ TELEMETRY_ASIC_ID, __ATTR(tt_asic_id, S_IRUGO, tt_sysfs_show_u64_hex, NULL) },
+	{ TELEMETRY_TIMER_HEARTBEAT, __ATTR(tt_heartbeat, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
 };
-
-static ssize_t sysfs_show_u32_dec(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
-	struct tenstorrent_sysfs_attr *data = container_of(attr, struct tenstorrent_sysfs_attr, attr);
-	unsigned i = data - wh_sysfs_attributes;
-	u64 offset = wh->sysfs_attr_offsets[i];
-	u32 value = 0;
-
-	value = ioread32(wh->bar4_mapping + offset);
-	return snprintf(buf, PAGE_SIZE, "%u\n", value);
-}
-
-static ssize_t sysfs_show_u64_hex(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
-	struct tenstorrent_sysfs_attr *data = container_of(attr, struct tenstorrent_sysfs_attr, attr);
-	unsigned i = data - wh_sysfs_attributes;
-	u64 offset = wh->sysfs_attr_offsets[i];
-	u32 hi, lo;
-
-	hi = ioread32(wh->bar4_mapping + offset);
-	lo = ioread32(wh->bar4_mapping + offset + 4);
-	return scnprintf(buf, PAGE_SIZE, "%08X%08X\n", hi, lo);
-}
-
-static ssize_t sysfs_show_u32_ver(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
-	struct tenstorrent_sysfs_attr *data = container_of(attr, struct tenstorrent_sysfs_attr, attr);
-	unsigned i = data - wh_sysfs_attributes;
-	u64 offset = wh->sysfs_attr_offsets[i];
-	u32 value = 0;
-	u32 major, minor, patch, ver;
-
-	value = ioread32(wh->bar4_mapping + offset);
-
-	// HACK: preserve behavior for eth_fw_ver.
-	if (data->tag_id == TELEMETRY_ETH_FW_VERSION) {
-		major = (value >> 16) & 0xFF;
-		minor = (value >> 12) & 0xF;
-		patch = (value >>  0) & 0xFFF;
-		return scnprintf(buf, PAGE_SIZE, "%u.%u.%u\n", major, minor, patch);
-	}
-
-	major = (value >> 24) & 0xFF;
-	minor = (value >> 16) & 0xFF;
-	patch = (value >>  8) & 0xFF;
-	ver = value & 0xFF;
-
-	return scnprintf(buf, PAGE_SIZE, "%u.%u.%u.%u\n", major, minor, patch, ver);
-}
-
-static ssize_t sysfs_show_card_type(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
-	struct tenstorrent_sysfs_attr *data = container_of(attr, struct tenstorrent_sysfs_attr, attr);
-	unsigned i = data - wh_sysfs_attributes;
-	u64 offset = wh->sysfs_attr_offsets[i];
-	u32 value;
-	u16 card_type;
-	char *card_name;
-
-	value = ioread32(wh->bar4_mapping + offset);
-	card_type = (value >> 4) & 0xFFFF;
-	switch (card_type) {
-	case 0x14: card_name = "n300"; break;
-	case 0x18: card_name = "n150"; break;
-	case 0x35: card_name = "galaxy-wormhole"; break;
-	default: card_name = "unknown"; break;
-	}
-
-	return scnprintf(buf, PAGE_SIZE, "%s\n", card_name);
-}
-
-static umode_t sysfs_telemetry_is_visible(struct kobject *kobj, struct attribute *attr, int n)
-{
-	struct device *dev = kobj_to_dev(kobj);
-	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
-	struct device_attribute *dev_attr = container_of(attr, struct device_attribute, attr);
-	struct tenstorrent_sysfs_attr *ts_attr = container_of(dev_attr, struct tenstorrent_sysfs_attr, attr);
-	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
-	unsigned i = ts_attr - wh_sysfs_attributes;
-	bool visible = wh->sysfs_attr_offsets[i] != 0;
-
-	return visible ? attr->mode : 0;
-}
-
 
 #define NIU_COUNTERS_START (NOC2AXI_START + 0x200)
 #define NIU_NOC1_OFFSET 0x8000
@@ -552,17 +440,36 @@ static bool wormhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 	return false;
 }
 
+static int wormhole_read_telemetry_tag(struct tenstorrent_device *tt_dev, u16 tag_id, u32 *value)
+{
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	u64 offset;
+
+	if (tag_id >= TELEM_TAG_CACHE_SIZE)
+		return -EINVAL;
+
+	offset = tt_dev->telemetry_tag_cache[tag_id];
+	if (offset == 0)
+		return -ENODATA;
+
+	*value = ioread32(wh->bar4_mapping + offset);
+	return 0;
+}
+
 static int telemetry_probe(struct tenstorrent_device *tt_dev)
 {
 	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
-
-	u32 base_addr = ioread32(wh->bar4_mapping + ARC_TELEMETRY_PTR);
-	u32 data_addr = ioread32(wh->bar4_mapping + ARC_TELEMETRY_DATA);
-
+	u32 base_addr, data_addr;
 	u32 version, major_ver, minor_ver, patch_ver;
-	u32 tags_addr = base_addr + 8;
+	u32 tags_addr;
 	u32 num_entries;
-	u32 i, j;
+	u32 i;
+
+	memset(tt_dev->telemetry_tag_cache, 0, sizeof(tt_dev->telemetry_tag_cache));
+
+	base_addr = ioread32(wh->bar4_mapping + ARC_TELEMETRY_PTR);
+	data_addr = ioread32(wh->bar4_mapping + ARC_TELEMETRY_DATA);
+	tags_addr = base_addr + 8;
 
 	if (!is_range_within_csm(base_addr, sizeof(u32)) || !is_range_within_csm(data_addr, sizeof(u32))) {
 		dev_err(&tt_dev->pdev->dev, "Telemetry not available\n");
@@ -592,33 +499,31 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 			continue;
 		}
 
-		for (j = 0; j < ARRAY_SIZE(wh_sysfs_attributes); ++j) {
-			if (wh_sysfs_attributes[j].tag_id == tag_id)
-				wh->sysfs_attr_offsets[j] = wh_arc_addr_to_sysreg(addr);
-		}
+		if (tag_id < TELEM_TAG_CACHE_SIZE)
+			tt_dev->telemetry_tag_cache[tag_id] = wh_arc_addr_to_sysreg(addr);
 	}
 
 	return 0;
 }
 
-static const struct tt_hwmon_attr wh_hwmon_attributes[] = {
-	{ hwmon_temp,  hwmon_temp_input,  0x74, 0,  GENMASK(15, 0), 1000,    16 },
-	{ hwmon_temp,  hwmon_temp_max,    0x8c, 0,  GENMASK(15, 0), 1000,    1 },
-	{ hwmon_in,    hwmon_in_input,    0x70, 0,  GENMASK(31, 0), 1,       1 },
-	{ hwmon_in,    hwmon_in_max,      0x88, 16, GENMASK(15, 0), 1,       1 },
-	{ hwmon_curr,  hwmon_curr_input,  0x84, 0,  GENMASK(15, 0), 1000,    1 },
-	{ hwmon_curr,  hwmon_curr_max,    0x84, 16, GENMASK(15, 0), 1000,    1 },
-	{ hwmon_power, hwmon_power_input, 0x80, 0,  GENMASK(15, 0), 1000000, 1 },
-	{ hwmon_power, hwmon_power_max,   0x80, 16, GENMASK(15, 0), 1000000, 1 },
-	{ .reg_offset = TT_HWMON_ATTR_END },
+static const struct tt_hwmon_attr wh_hwmon_attrs[] = {
+	{ TELEMETRY_ASIC_TEMP,          hwmon_temp,  hwmon_temp_input  },
+	{ TELEMETRY_THM_LIMIT_THROTTLE, hwmon_temp,  hwmon_temp_max    },
+	{ TELEMETRY_VCORE,              hwmon_in,    hwmon_in_input    },
+	{ TELEMETRY_VDD_LIMITS,         hwmon_in,    hwmon_in_max      },
+	{ TELEMETRY_CURRENT,            hwmon_curr,  hwmon_curr_input  },
+	{ TELEMETRY_TDC_LIMIT_MAX,      hwmon_curr,  hwmon_curr_max    },
+	{ TELEMETRY_POWER,              hwmon_power, hwmon_power_input },
+	{ TELEMETRY_TDP_LIMIT_MAX,      hwmon_power, hwmon_power_max   },
+	{ 0 },	// sentinel
 };
 
 static const struct tt_hwmon_label wh_hwmon_labels[] = {
-	{ hwmon_temp,  hwmon_temp_label,  "asic1_temp" },
-	{ hwmon_in,    hwmon_in_label,    "vcore1"     },
-	{ hwmon_curr,  hwmon_curr_label,  "current1"   },
-	{ hwmon_power, hwmon_power_label, "power1"     },
-	{ .name = NULL },
+	{ "asic1_temp", hwmon_temp,  hwmon_temp_label  },
+	{ "vcore1",     hwmon_in,    hwmon_in_label    },
+	{ "current1",   hwmon_curr,  hwmon_curr_label  },
+	{ "power1",     hwmon_power, hwmon_power_label },
+	{ NULL },	// sentinel
 };
 
 static const struct hwmon_channel_info *wh_hwmon_info[] = {
@@ -638,30 +543,21 @@ static void wormhole_hwmon_init(struct wormhole_device *wh_dev)
 {
 	struct tenstorrent_device *tt_dev = &wh_dev->tt;
 	struct device *dev = &tt_dev->pdev->dev;
-	struct tt_hwmon_context *context = &tt_dev->hwmon_context;
 	struct device *hwmon_device;
-	u32 telemetry_offset;
 
-	if (!wormhole_read_fw_telemetry_offset(reset_unit_regs(wh_dev), &telemetry_offset))
-		goto wormhole_hwmon_init_err;
+	tt_dev->hwmon_attributes = wh_hwmon_attrs;
+	tt_dev->hwmon_labels = wh_hwmon_labels;
 
-	context->attributes = wh_hwmon_attributes;
-	context->labels = wh_hwmon_labels;
-	context->telemetry_base = wh_dev->bar4_mapping + wh_arc_addr_to_sysreg(telemetry_offset);
-
-	hwmon_device = hwmon_device_register_with_info(dev, "wormhole", context, &wh_hwmon_chip_info, NULL);
-	if (IS_ERR(hwmon_device))
-		goto wormhole_hwmon_init_err;
+	hwmon_device = hwmon_device_register_with_info(dev, "wormhole", tt_dev, &wh_hwmon_chip_info, NULL);
+	if (IS_ERR(hwmon_device)) {
+		dev_warn(dev, "Failed to initialize hwmon.\n");
+		return;
+	}
 
 	tt_dev->hwmon_dev = hwmon_device;
 
 	// Notify udev that telemetry attributes are now available.
 	kobject_uevent(&tt_dev->dev.kobj, KOBJ_CHANGE);
-
-	return;
-
-wormhole_hwmon_init_err:
-	dev_warn(dev, "Failed to initialize hwmon.\n");
 }
 
 static bool is_fw_ready_for_telemetry(struct wormhole_device *wh)
@@ -673,22 +569,11 @@ static bool is_fw_ready_for_telemetry(struct wormhole_device *wh)
 	return ready;
 }
 
-static void wormhole_hwmon_init(struct wormhole_device *wh_dev);
-
-static int init_sysfs_and_hwmon_telemetry(struct tenstorrent_device *tt_dev)
-{
-	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
-	int r = telemetry_probe(tt_dev);
-
-	if (!r) {
-		r = device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
-		if (!r)
-			wh_dev->telemetry_group_registered = true;
-		wormhole_hwmon_init(wh_dev);
-	}
-	return r;
-}
-
+// On some WH systems, ARC firmware may not have finished initializing by the
+// time the PCI driver probes or a reset completes. This work function polls for
+// firmware readiness, then scans the telemetry tag table. On first init it also
+// registers the sysfs group and hwmon device; on re-probe after reset it just
+// refreshes the tag cache (sysfs/hwmon are already registered).
 static void fw_ready_work_func(struct work_struct *work)
 {
 	struct delayed_work *dwork = to_delayed_work(work);
@@ -698,12 +583,24 @@ static void fw_ready_work_func(struct work_struct *work)
 	if (tt_dev->detached)
 		return;
 
-	if (is_fw_ready_for_telemetry(wh))
-		init_sysfs_and_hwmon_telemetry(tt_dev);
-	else if (wh->telemetry_retries-- > 0)
-		schedule_delayed_work(&wh->fw_ready_work, msecs_to_jiffies(1000));
-	else
-		dev_err(&tt_dev->pdev->dev, "Timed out waiting for FW telemetry; sysfs/hwmon will be unavailable\n");
+	if (!is_fw_ready_for_telemetry(wh)) {
+		if (wh->telemetry_retries-- > 0)
+			schedule_delayed_work(&wh->fw_ready_work, msecs_to_jiffies(1000));
+		else
+			dev_err(&tt_dev->pdev->dev, "Timed out waiting for FW telemetry\n");
+		return;
+	}
+
+	telemetry_probe(tt_dev);
+
+	// First-time init: register sysfs and hwmon if not already done.
+	if (!wh->telemetry_group_registered) {
+		if (!device_add_group(&tt_dev->dev, &tt_dev->telemetry_group))
+			wh->telemetry_group_registered = true;
+	}
+
+	if (!tt_dev->hwmon_dev)
+		wormhole_hwmon_init(wh);
 }
 
 static bool wormhole_init(struct tenstorrent_device *tt_dev)
@@ -713,12 +610,10 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev)
 	int i;
 
 	INIT_DELAYED_WORK(&wh_dev->fw_ready_work, fw_ready_work_func);
-	wh_dev->telemetry_retries = 120;	// If telemetry is not ready, defer initialization for up to 2 minutes.
 
-	wh_dev->sysfs_attr_offsets = devm_kcalloc(dev, ARRAY_SIZE(wh_sysfs_attributes), sizeof(u64), GFP_KERNEL);
 	tt_dev->telemetry_attrs = devm_kcalloc(dev, ARRAY_SIZE(wh_sysfs_attributes) + 1, sizeof(struct attribute *), GFP_KERNEL);
 
-	if (!wh_dev->sysfs_attr_offsets || !tt_dev->telemetry_attrs)
+	if (!tt_dev->telemetry_attrs)
 		return false;
 
 	wh_dev->bar2_mapping = pci_iomap(wh_dev->tt.pdev, 2, 0);
@@ -733,7 +628,7 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev)
 	for (i = 0; i < ARRAY_SIZE(wh_sysfs_attributes); ++i)
 		tt_dev->telemetry_attrs[i] = &wh_sysfs_attributes[i].attr.attr;
 	tt_dev->telemetry_group.attrs = tt_dev->telemetry_attrs;
-	tt_dev->telemetry_group.is_visible = sysfs_telemetry_is_visible;
+	tt_dev->telemetry_group.is_visible = tt_sysfs_telemetry_is_visible;
 
 	return true;
 
@@ -759,6 +654,17 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 	return true;
 }
 
+// Re-probe telemetry after reset. If FW is ready, scan immediately.
+// If not (slow ARC init on some WH boards), defer and poll via fw_ready_work.
+static int wormhole_probe_telemetry(struct tenstorrent_device *tt_dev)
+{
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+
+	wh->telemetry_retries = 120;
+	schedule_delayed_work(&wh->fw_ready_work, 0);
+	return 0;
+}
+
 static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev)
 {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
@@ -770,12 +676,9 @@ static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev)
 	else
 		wh_dev->pcie_perf_group_registered = true;
 
-	// If the firmware is already ready, initialize telemetry immediately.
-	// Otherwise, wait for the fw_ready_work to detect when it becomes ready.
-	if (is_fw_ready_for_telemetry(wh_dev))
-		init_sysfs_and_hwmon_telemetry(tt_dev);
-	else
-		schedule_delayed_work(&wh_dev->fw_ready_work, msecs_to_jiffies(1000));
+	// Probe telemetry and register sysfs/hwmon. On some WH systems the ARC
+	// firmware may still be initializing, so fw_ready_work polls until ready.
+	wormhole_probe_telemetry(tt_dev);
 
 	return true;
 }
@@ -1057,6 +960,8 @@ struct tenstorrent_device_class wormhole_class = {
 	.init_hardware = wormhole_init_hardware,
 	.init_telemetry = wormhole_init_telemetry,
 	.cleanup_telemetry = wormhole_cleanup_telemetry,
+	.read_telemetry_tag = wormhole_read_telemetry_tag,
+	.probe_telemetry = wormhole_probe_telemetry,
 	.cleanup_hardware = wormhole_cleanup_hardware,
 	.cleanup_device = wormhole_cleanup,
 	.reboot = wormhole_cleanup_hardware,

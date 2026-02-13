@@ -197,31 +197,37 @@ static void pcie_clear_lbms(struct pci_dev *dev)
 // to the minimum of device and bridge capabilities and triggering a retrain.
 // Sometimes multiple retrains are needed as the link steps up.
 #define PCIE_LINK_RETRAIN_TIMEOUT_MS 1000
+#define PCIE_LINK_RETRAIN_MAX_ATTEMPTS 5
+#define PCIE_DEVICE_ACCESSIBLE_TIMEOUT_MS 500
 
 void pcie_retrain_link_to_max_speed(struct pci_dev *pdev)
 {
 	struct pci_dev *bridge = pci_upstream_bridge(pdev);
 	u32 lnkcap, bridge_lnkcap;
-	u16 lnksta, lnkctl2;
+	u16 lnksta, lnkctl2, vendor_id;
 	u8 dev_max_speed, bridge_max_speed, target_speed, current_speed;
+	ktime_t end_time;
 	int retrain_count;
 
 	if (!bridge)
 		return;
 
-	// Get max link speed from device's LnkCap.
 	pcie_capability_read_dword(pdev, PCI_EXP_LNKCAP, &lnkcap);
 	dev_max_speed = FIELD_GET(PCI_EXP_LNKCAP_SLS, lnkcap);
 
-	// Get max link speed from bridge's LnkCap.
+	if (lnkcap == ~0u) {
+		dev_warn(&pdev->dev, "Device not accessible, skipping link retrain\n");
+		return;
+	}
+
 	pcie_capability_read_dword(bridge, PCI_EXP_LNKCAP, &bridge_lnkcap);
 	bridge_max_speed = FIELD_GET(PCI_EXP_LNKCAP_SLS, bridge_lnkcap);
 
-	// Target speed is the minimum of device and bridge capabilities.
 	target_speed = min(dev_max_speed, bridge_max_speed);
 
-	// Get current link speed from LnkSta.
-	pcie_capability_read_word(pdev, PCI_EXP_LNKSTA, &lnksta);
+	// Read current link speed from bridge (always accessible, even if the
+	// device is momentarily unreachable during link training).
+	pcie_capability_read_word(bridge, PCI_EXP_LNKSTA, &lnksta);
 	current_speed = FIELD_GET(PCI_EXP_LNKSTA_CLS, lnksta);
 
 	if (current_speed >= target_speed)
@@ -229,28 +235,20 @@ void pcie_retrain_link_to_max_speed(struct pci_dev *pdev)
 
 	dev_info(&pdev->dev, "Link at Gen%u, retraining to Gen%u\n", current_speed, target_speed);
 
-	// Set Target Link Speed on the upstream bridge.
 	pcie_capability_read_word(bridge, PCI_EXP_LNKCTL2, &lnkctl2);
 	lnkctl2 = (lnkctl2 & ~PCI_EXP_LNKCTL2_TLS) | FIELD_PREP(PCI_EXP_LNKCTL2_TLS, target_speed);
 	pcie_capability_write_word(bridge, PCI_EXP_LNKCTL2, lnkctl2);
 
-	// Retrain up to 3 times. Sometimes the link steps up gradually rather than
-	// jumping directly to max.
-	for (retrain_count = 0; retrain_count < 3; retrain_count++) {
-		// Clear LBMS before triggering retrain so we can detect completion.
+	for (retrain_count = 0; retrain_count < PCIE_LINK_RETRAIN_MAX_ATTEMPTS; retrain_count++) {
 		pcie_clear_lbms(bridge);
-
-		// Trigger link retrain.
 		pcie_capability_set_word(bridge, PCI_EXP_LNKCTL, PCI_EXP_LNKCTL_RL);
 
-		// Wait for retrain to complete by polling for LBMS=1.
 		if (!pcie_wait_for_lbms(bridge, PCIE_LINK_RETRAIN_TIMEOUT_MS)) {
 			dev_warn(&pdev->dev, "Timeout waiting for link retrain to complete\n");
 			break;
 		}
 
-		// Check new link speed.
-		pcie_capability_read_word(pdev, PCI_EXP_LNKSTA, &lnksta);
+		pcie_capability_read_word(bridge, PCI_EXP_LNKSTA, &lnksta);
 		current_speed = FIELD_GET(PCI_EXP_LNKSTA_CLS, lnksta);
 
 		if (current_speed >= target_speed)
@@ -260,13 +258,28 @@ void pcie_retrain_link_to_max_speed(struct pci_dev *pdev)
 			retrain_count + 1, current_speed, target_speed);
 	}
 
-	// Clear LBMS on both bridge and device so it won't be misinterpreted as a
-	// hardware failure by the kernel's pcie_failed_link_retrain().
+	// Clear LBMS so the kernel's pcie_failed_link_retrain() won't
+	// misinterpret it as a hardware failure.
 	pcie_clear_lbms(bridge);
 	pcie_clear_lbms(pdev);
+
+	// Verify the device is accessible before returning.
+	end_time = ktime_add_ms(ktime_get(), PCIE_DEVICE_ACCESSIBLE_TIMEOUT_MS);
+	pci_read_config_word(pdev, PCI_VENDOR_ID, &vendor_id);
+	while (vendor_id != PCI_VENDOR_ID_TENSTORRENT) {
+		if (ktime_after(ktime_get(), end_time)) {
+			dev_warn(&pdev->dev,
+				 "Device not accessible %ums after link retrain\n",
+				 PCIE_DEVICE_ACCESSIBLE_TIMEOUT_MS);
+			break;
+		}
+		msleep(1);
+		pci_read_config_word(pdev, PCI_VENDOR_ID, &vendor_id);
+	}
 
 	if (current_speed >= target_speed)
 		dev_info(&pdev->dev, "Link retrained to Gen%u after %d attempt(s)\n", current_speed, retrain_count + 1);
 	else
-		dev_warn(&pdev->dev, "Link retrain incomplete: Gen%u (target Gen%u)\n", current_speed, target_speed);
+		dev_warn(&pdev->dev, "Link retrain incomplete: Gen%u (target Gen%u) after %d attempt(s)\n",
+			 current_speed, target_speed, retrain_count + 1);
 }

@@ -41,6 +41,7 @@
 #define WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT 0xBC
 #define WH_FW_MSG_TRIGGER_RESET 0x56
 #define WH_FW_MSG_NOP 0x11
+#define WH_FW_MSG_POWER_SETTING 0xBE
 
 // The iATU can be used to match & remap PCIE transactions.
 #define IATU_BASE 0x1200	// Relative to the start of BAR2
@@ -1040,7 +1041,18 @@ static void wormhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y
 
 static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct tenstorrent_power_state *power_state)
 {
-	return 0; // Treat as success/no-op rather than an error.
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	bool ok;
+
+	ok = wormhole_send_arc_fw_message_with_args(reset_unit_regs(wh_dev),
+						     WH_FW_MSG_POWER_SETTING,
+						     power_state->validity,
+						     power_state->power_flags,
+						     10000, NULL);
+	if (!ok)
+		pr_warn("Failed to send power state message to firmware\n");
+
+	return 0;
 }
 
 struct tenstorrent_device_class wormhole_class = {

@@ -1049,8 +1049,17 @@ static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct te
 						     power_state->validity,
 						     power_state->power_flags,
 						     10000, NULL);
-	if (!ok)
-		pr_warn("Failed to send power state message to firmware\n");
+	if (!ok) {
+		ok = wormhole_send_arc_fw_message_with_args(reset_unit_regs(wh_dev),
+					     WH_FW_MSG_NOP,
+					     0,
+					     0,
+					     10000, NULL);
+		pr_warn("Failed to send power state message to firmware; post NOP okay: %u\n", ok);
+
+		if (!ok)
+			return -EINVAL;
+	}
 
 	return 0;
 }

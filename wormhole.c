@@ -120,6 +120,7 @@
 // ARC message queue. FW publishes the QCB pointer in NOC_NODEID_X_1.
 #define ARC_MSG_QCB_PTR (RESET_UNIT_START + 0x01D8)
 #define ARC_MSG_READY_MS 500
+#define ARC_MSG_TYPE_POWER_SETTING 0xBF
 
 #define WRITE_IATU_REG(wh_dev, direction, region, reg, value) \
 	write_iatu_reg(wh_dev, IATU_##direction, region, \
@@ -1124,7 +1125,20 @@ static int wormhole_csm_write32(struct tenstorrent_device *tt_dev, u64 addr, u32
 
 static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct tenstorrent_power_state *power_state)
 {
-	return 0; // Treat as success/no-op rather than an error.
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	struct arc_msg msg = {0};
+	bool ok;
+
+	msg.header = ARC_MSG_TYPE_POWER_SETTING | (power_state->validity << 8) | (power_state->power_flags << 16);
+	BUILD_BUG_ON(sizeof(power_state->power_settings) != sizeof(msg.payload));
+	memcpy(msg.payload, power_state->power_settings, sizeof(msg.payload));
+
+	ok = send_arc_message(wh, &msg);
+
+	if (!ok)
+		return -EINVAL;
+
+	return 0;
 }
 
 struct tenstorrent_device_class wormhole_class = {

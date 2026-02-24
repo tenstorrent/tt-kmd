@@ -12,6 +12,7 @@
 #include "wormhole.h"
 #include "pcie.h"
 #include "module.h"
+#include "msgqueue.h"
 #include "hwmon.h"
 #include "tlb.h"
 #include "telemetry.h"
@@ -115,6 +116,10 @@
 #define WH_FW_MSG_ASTATE3 0xA3
 #define WH_FW_MSG_CURR_DATE 0xB7
 #define WH_FW_MSG_GET_TELEMETRY_OFFSET 0x2C
+
+// ARC message queue. FW publishes the QCB pointer in NOC_NODEID_X_1.
+#define ARC_MSG_QCB_PTR (RESET_UNIT_START + 0x01D8)
+#define ARC_MSG_READY_MS 500
 
 #define WRITE_IATU_REG(wh_dev, direction, region, reg, value) \
 	write_iatu_reg(wh_dev, IATU_##direction, region, \
@@ -244,6 +249,57 @@ static bool wormhole_read_fw_telemetry_offset(u8 __iomem *reset_unit_regs, u32 *
 	*offset = ioread32(arc_return_reg);
 
 	return true;
+}
+
+static bool send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
+{
+	u8 __iomem *regs = wh->bar4_mapping + RESET_UNIT_START;
+	u32 qcb_ptr;
+	u32 queue_base;
+	u32 queue_info;
+	u32 num_entries;
+	u32 arc_misc_cntl;
+	unsigned long timeout;
+
+	// Wait for ARC L2 to be running.
+	timeout = jiffies + msecs_to_jiffies(ARC_MSG_READY_MS);
+	do {
+		if (arc_l2_is_running(regs))
+			break;
+	} while (time_before(jiffies, timeout));
+
+	if (!arc_l2_is_running(regs))
+		return false;
+
+	// Read QCB pointer from NOC_NODEID_X_1. Zero means FW doesn't support queues.
+	qcb_ptr = ioread32(wh->bar4_mapping + ARC_MSG_QCB_PTR);
+	if (qcb_ptr == 0) {
+		dev_warn_once(&wh->tt.pdev->dev, "ARC message queue not available (this is normal for old FW)\n");
+		return false;
+	}
+	if (!is_range_within_csm(qcb_ptr, sizeof(u32)))
+		return false;
+
+	if (csm_read32(wh, qcb_ptr + 0, &queue_base) != 0)
+		return false;
+
+	if (csm_read32(wh, qcb_ptr + 4, &queue_info) != 0)
+		return false;
+
+	queue_base += ARC_CSM_BASE;
+	num_entries = queue_info & 0xFF;
+
+	if (!arc_msg_push(&wh->tt, msg, queue_base, num_entries))
+		return false;
+
+	// Trigger ARC interrupt via IRQ0.
+	arc_misc_cntl = ioread32(regs + ARC_MISC_CNTL_REG);
+	iowrite32(arc_misc_cntl | ARC_MISC_CNTL_IRQ0_MASK, regs + ARC_MISC_CNTL_REG);
+
+	if (!arc_msg_pop(&wh->tt, msg, queue_base, num_entries))
+		return false;
+
+	return msg->header == 0;
 }
 
 static bool wormhole_shutdown_firmware(struct pci_dev *pdev, u8 __iomem *reset_unit_regs)

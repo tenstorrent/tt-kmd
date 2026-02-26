@@ -11,6 +11,7 @@
 #include "blackhole.h"
 #include "pcie.h"
 #include "module.h"
+#include "msgqueue.h"
 #include "tlb.h"
 #include "telemetry.h"
 
@@ -62,13 +63,7 @@
 // ARC FW has a messaging interface, see msgqueue.c in tt-zephyr-platforms.git
 #define ARC_MSG_QCB_PTR RESET_SCRATCH(11) // Message Queue Control Block
 #define ARC_MSI_FIFO 0x800B0000           // Write 0 to trigger the ARC message queue processor
-#define ARC_MSG_QUEUE_HEADER_SIZE 32      // Header contains request and response read/write pointers
-#define ARC_MSG_TIMEOUT_MS 100            // Wait this long for ARC message queue operations
 #define ARC_MSG_READY_MS 500              // Wait this long for ARC to be ready for message queue operations
-#define ARC_MSG_QUEUE_REQ_WPTR(base) ((base) + 0x00)
-#define ARC_MSG_QUEUE_RES_RPTR(base) ((base) + 0x04)
-#define ARC_MSG_QUEUE_REQ_RPTR(base) ((base) + 0x10)
-#define ARC_MSG_QUEUE_RES_WPTR(base) ((base) + 0x14)
 #define ARC_MSG_TYPE_ASIC_STATE0 0xA0
 #define ARC_MSG_TYPE_ASIC_STATE3 0xA3
 #define ARC_MSG_TYPE_SET_WDT_TIMEOUT 0xC1
@@ -676,117 +671,6 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 	return 0;
 }
 
-struct arc_msg {
-	u32 header;
-	u32 payload[7];
-};
-
-static bool push_arc_msg(struct blackhole_device *bh, const struct arc_msg *msg, u32 queue_base, u32 num_entries)
-{
-	u32 request_base = queue_base + ARC_MSG_QUEUE_HEADER_SIZE;
-	unsigned long timeout;
-	u32 wptr;
-	u32 slot;
-	u32 req_offset;
-	int i;
-
-	if (csm_read32(bh, ARC_MSG_QUEUE_REQ_WPTR(queue_base), &wptr) != 0)
-		return false;
-
-	// Wait until there is space in the request queue or we timeout.
-	timeout = jiffies + msecs_to_jiffies(ARC_MSG_TIMEOUT_MS);
-	for (;;) {
-		u32 rptr;
-		u32 num_occupied;
-
-		if (csm_read32(bh, ARC_MSG_QUEUE_REQ_RPTR(queue_base), &rptr) != 0)
-			return false;
-
-		num_occupied = (wptr - rptr) % (2 * num_entries);
-		if (num_occupied < num_entries)
-			break;
-
-		if (time_after(jiffies, timeout)) {
-			dev_err(&bh->tt.pdev->dev, "Timeout waiting for space in ARC message queue\n");
-			return false;
-		}
-
-		usleep_range(100, 200);
-	}
-
-	// Write the message header and payload to the request queue.
-	slot = wptr % num_entries;
-	req_offset = slot * sizeof(struct arc_msg);
-	for (i = 0; i < 8; ++i) {
-		u32 addr = request_base + req_offset + (i * sizeof(u32));
-		u32 value = (i == 0) ? msg->header : msg->payload[i - 1];
-
-		if (csm_write32(bh, addr, value) != 0)
-			return false;
-	}
-
-	// Increment the request write pointer.
-	wptr = (wptr + 1) % (2 * num_entries);
-	if (csm_write32(bh, ARC_MSG_QUEUE_REQ_WPTR(queue_base), wptr) != 0)
-		return false;
-
-	return true;
-}
-
-static bool pop_arc_msg(struct blackhole_device *bh, struct arc_msg *msg, u32 queue_base, u32 num_entries)
-{
-	u32 response_base = queue_base + ARC_MSG_QUEUE_HEADER_SIZE + (num_entries * sizeof(struct arc_msg));
-	unsigned long timeout;
-	u32 rptr;
-	u32 slot;
-	u32 response_offset ;
-	int i;
-
-	if (csm_read32(bh, ARC_MSG_QUEUE_RES_RPTR(queue_base), &rptr) != 0)
-		return false;
-
-	// Wait until there is a message in the response queue or we timeout.
-	timeout = jiffies + msecs_to_jiffies(ARC_MSG_TIMEOUT_MS);
-	for (;;) {
-		u32 wptr;
-		u32 num_occupied;
-
-		if (csm_read32(bh, ARC_MSG_QUEUE_RES_WPTR(queue_base), &wptr) != 0)
-			return false;
-
-		num_occupied = (wptr - rptr) % (2 * num_entries);
-		if (num_occupied > 0)
-			break;
-
-		if (time_after(jiffies, timeout)) {
-			dev_err(&bh->tt.pdev->dev, "Timeout waiting for ARC response\n");
-			return false;
-		}
-
-		usleep_range(100, 200);
-	}
-
-	// Read the message header and payload from the response queue.
-	slot = rptr % num_entries;
-	response_offset = slot * sizeof(struct arc_msg);
-	if (csm_read32(bh, response_base + response_offset, &msg->header) != 0)
-		return false;
-
-	for (i = 0; i < 7; ++i) {
-		u32 addr = response_base + response_offset + ((i + 1) * sizeof(u32));
-
-		if (csm_read32(bh, addr, &msg->payload[i]) != 0)
-			return false;
-	}
-
-	// Increment the response read pointer.
-	rptr = (rptr + 1) % (2 * num_entries);
-	if (csm_write32(bh, ARC_MSG_QUEUE_RES_RPTR(queue_base), rptr) != 0)
-		return false;
-
-	return true;
-}
-
 static bool send_arc_message(struct blackhole_device *bh, struct arc_msg *msg)
 {
 	u32 boot_status;
@@ -817,13 +701,13 @@ static bool send_arc_message(struct blackhole_device *bh, struct arc_msg *msg)
 
 	num_entries = queue_info & 0xFF;
 
-	if (!push_arc_msg(bh, msg, queue_base, num_entries))
+	if (!arc_msg_push(&bh->tt, msg, queue_base, num_entries))
 		return false;
 
 	// Trigger ARC interrupt
 	noc_write32(bh, ARC_X, ARC_Y, ARC_MSI_FIFO, 0, 0);
 
-	if (!pop_arc_msg(bh, msg, queue_base, num_entries))
+	if (!arc_msg_pop(&bh->tt, msg, queue_base, num_entries))
 		return false;
 
 	return msg->header == 0;

@@ -1,0 +1,111 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Fix BAR allocation for Thunderbolt-connected Tenstorrent devices.
+#
+# When a Tenstorrent device is connected via Thunderbolt, the kernel may fail
+# to allocate sufficient memory for the device's BARs. This script fixes that
+# by removing the Thunderbolt bridge and rescanning, which allows the kernel's
+# pci=realloc logic to properly size the bridge windows.
+#
+# PREREQUISITE: Boot with "pci=realloc" on the kernel command line.
+#   1. Edit /etc/default/grub
+#   2. Add "pci=realloc" to GRUB_CMDLINE_LINUX
+#   3. Run: sudo update-grub && sudo reboot
+#
+# Usage: fix-tt-hotplug-bars [--dry-run]
+
+set -euo pipefail
+
+TENSTORRENT_VENDOR="0x1e52"
+DRY_RUN=0
+
+die() { echo "fix-tt-hotplug-bars: $*" >&2; exit 1; }
+log() { echo "fix-tt-hotplug-bars: $*" >&2; }
+
+# Check if device has unassigned BARs
+has_unassigned_bars() {
+    lspci -s "${1#0000:}" -v 2>/dev/null | grep -q '<unassigned>'
+}
+
+# Walk up the PCI tree to find the Thunderbolt Host bridge.
+# "Host" = in your computer, "Hub" = in external docks.
+# We want the first Host bridge - the downstream port connecting to the dock.
+find_thunderbolt_bridge() {
+    local dev="$1"
+    local current="$dev"
+    
+    while [[ -d "/sys/bus/pci/devices/$current" ]]; do
+        local real_path parent_path parent
+        real_path=$(readlink -f "/sys/bus/pci/devices/$current")
+        parent_path=$(dirname "$real_path")
+        parent=$(basename "$parent_path")
+        
+        # Stop at root
+        [[ "$parent" == pci* || "$parent" == "devices" ]] && break
+        
+        # Look for Thunderbolt "Host" bridge (not "Hub" which is in docks)
+        if [[ -f "/sys/bus/pci/devices/$parent/vendor" ]]; then
+            if [[ "$(cat "/sys/bus/pci/devices/$parent/vendor")" == "0x8086" ]]; then
+                if lspci -s "${parent#0000:}" 2>/dev/null | grep -qiE "thunderbolt.*host|usb4.*host"; then
+                    echo "$parent"
+                    return 0
+                fi
+            fi
+        fi
+        
+        current="$parent"
+    done
+    
+    return 1
+}
+
+main() {
+    [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+    [[ $EUID -eq 0 ]] || die "must be run as root"
+    
+    local fixed=0
+
+    echo 1 > /sys/bus/pci/rescan
+    
+    for dev_path in /sys/bus/pci/devices/*; do
+        [[ -f "$dev_path/vendor" ]] || continue
+        [[ "$(cat "$dev_path/vendor")" == "$TENSTORRENT_VENDOR" ]] || continue
+        
+        local dev=$(basename "$dev_path")
+        
+        has_unassigned_bars "$dev" || continue
+        
+        log "device $dev has unassigned BARs"
+        
+        local bridge
+        if ! bridge=$(find_thunderbolt_bridge "$dev"); then
+            log "warning: $dev not behind a Thunderbolt bridge, skipping"
+            continue
+        fi
+        
+        log "removing Thunderbolt bridge $bridge and rescanning..."
+        
+        if [[ $DRY_RUN -eq 1 ]]; then
+            log "[dry-run] would remove $bridge and rescan"
+        else
+            echo 1 > "/sys/bus/pci/devices/$bridge/remove"
+            sleep 2
+            echo 1 > /sys/bus/pci/rescan
+            sleep 3
+
+            if has_unassigned_bars "$dev"; then
+                log "warning: $dev still has unassigned BARs after rescan"
+                continue
+            fi
+        fi
+        
+        ((fixed++)) || true
+    done
+    
+    [[ $fixed -eq 0 ]] && log "no Tenstorrent devices with BAR issues found"
+    [[ $fixed -gt 0 ]] && log "fixed $fixed device(s)"
+}
+
+main "$@"

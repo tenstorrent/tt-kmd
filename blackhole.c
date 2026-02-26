@@ -290,6 +290,15 @@ static int csm_write32(struct blackhole_device *bh, u64 addr, u32 value)
 	return 0;
 }
 
+static int blackhole_csm_read32(struct tenstorrent_device *tt_dev, u64 addr, u32 *value)
+{
+	return csm_read32(tt_dev_to_bh_dev(tt_dev), addr, value);
+}
+
+static int blackhole_csm_write32(struct tenstorrent_device *tt_dev, u64 addr, u32 value)
+{
+	return csm_write32(tt_dev_to_bh_dev(tt_dev), addr, value);
+}
 
 // BH has two PCIE instances, the function reads NOC ID to find out which one is active
 static bool blackhole_detect_pcie_noc_x(struct blackhole_device *bh, u32 *noc_x) {
@@ -1118,5 +1127,7 @@ struct tenstorrent_device_class blackhole_class = {
 	.restore_reset_state = blackhole_restore_reset_state,
 	.configure_outbound_atu = blackhole_configure_outbound_atu,
 	.noc_write32 = blackhole_noc_write32,
+	.csm_read32 = blackhole_csm_read32,
+	.csm_write32 = blackhole_csm_write32,
 	.set_power_state = blackhole_set_power_state,
 };

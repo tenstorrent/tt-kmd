@@ -133,6 +133,29 @@ static bool is_hardware_hung(struct pci_dev *pdev, u8 __iomem *reset_unit_regs)
 	return (ioread32(reset_unit_regs + SCRATCH_REG(6)) == 0xFFFFFFFF);
 }
 
+static u32 wh_arc_addr_to_sysreg(u32 arc_addr)
+{
+	return ARC_CSM_START + (arc_addr - ARC_CSM_BASE);
+}
+
+static int csm_read32(struct wormhole_device *wh, u32 addr, u32 *value)
+{
+	if (!is_range_within_csm(addr, sizeof(u32)))
+		return -EINVAL;
+
+	*value = ioread32(wh->bar4_mapping + wh_arc_addr_to_sysreg(addr));
+	return 0;
+}
+
+static int csm_write32(struct wormhole_device *wh, u32 addr, u32 value)
+{
+	if (!is_range_within_csm(addr, sizeof(u32)))
+		return -EINVAL;
+
+	iowrite32(value, wh->bar4_mapping + wh_arc_addr_to_sysreg(addr));
+	return 0;
+}
+
 static int arc_msg_poll_completion(u8 __iomem *reset_unit_regs, u8 __iomem *msg_reg, u32 msg_code, u32 timeout_us,
 				   u16 *exit_code)
 {
@@ -476,11 +499,6 @@ static const struct attribute_group wh_pcie_perf_counters_group = {
 	.name = "pcie_perf_counters",
 	.attrs = wh_pcie_perf_counters_attrs,
 };
-
-static u32 wh_arc_addr_to_sysreg(u32 arc_addr)
-{
-	return ARC_CSM_START + (arc_addr - ARC_CSM_BASE);
-}
 
 // Program the iATU so that BAR4 is directed to the system registers.
 static void map_bar4_to_system_registers(struct wormhole_device *wh_dev) {
@@ -1038,6 +1056,16 @@ static void wormhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y
 	noc_write32(wh_dev, x, y, addr, data, noc);
 }
 
+static int wormhole_csm_read32(struct tenstorrent_device *tt_dev, u64 addr, u32 *value)
+{
+	return csm_read32(tt_dev_to_wh_dev(tt_dev), addr, value);
+}
+
+static int wormhole_csm_write32(struct tenstorrent_device *tt_dev, u64 addr, u32 value)
+{
+	return csm_write32(tt_dev_to_wh_dev(tt_dev), addr, value);
+}
+
 static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct tenstorrent_power_state *power_state)
 {
 	return 0; // Treat as success/no-op rather than an error.
@@ -1066,5 +1094,7 @@ struct tenstorrent_device_class wormhole_class = {
 	.restore_reset_state = wormhole_restore_reset_state,
 	.configure_outbound_atu = wormhole_configure_outbound_atu,
 	.noc_write32 = wormhole_noc_write32,
+	.csm_read32 = wormhole_csm_read32,
+	.csm_write32 = wormhole_csm_write32,
 	.set_power_state = wormhole_set_power_state,
 };

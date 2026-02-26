@@ -528,6 +528,7 @@ long ioctl_allocate_dma_buf(struct chardev_private *priv,
 	out.size = in.requested_size;
 
 	if (copy_to_user(&arg->out, &out, sizeof(out)) != 0) {
+		teardown_outbound_iatu(priv, iatu_region);
 		dma_free_coherent(&priv->device->pdev->dev, dmabuf->size,
 				  dmabuf->ptr, dmabuf->phys);
 
@@ -595,6 +596,9 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	memset(&out, 0, sizeof(out));
 
 	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
+		return -EFAULT;
+
+	if (clear_user(&arg->out, in.output_size_bytes) != 0)
 		return -EFAULT;
 
 	if (in.flags & ~valid_flags)
@@ -720,6 +724,14 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		}
 	}
 
+	out.noc_address = noc_address;
+	bytes_to_copy = min(in.output_size_bytes, (u32)sizeof(out));
+
+	if (copy_to_user(&arg->out, &out, bytes_to_copy) != 0) {
+		ret = -EFAULT;
+		goto err_teardown_iatu;
+	}
+
 	pinning->page_count = nr_pages;
 	pinning->pages = pages;
 	pinning->dma_mapping = dma_mapping;
@@ -729,17 +741,13 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	list_add(&pinning->list, &priv->pinnings);
 	mutex_unlock(&priv->mutex);
 
-	out.noc_address = noc_address;
-	if (clear_user(&arg->out, in.output_size_bytes) != 0)
-		return -EFAULT;
-
-	bytes_to_copy = min(in.output_size_bytes, (u32)sizeof(out));
-
-	if (copy_to_user(&arg->out, &out, bytes_to_copy) != 0)
-		return -EFAULT;
-
 	return 0;
 
+err_teardown_iatu:
+	// teardown_outbound_iatu is a no-op when iatu_region == -1.
+	// dma_unmap_sgtable and free_chained_sgt are no-ops on the
+	// zero-initialized dma_mapping from the non-IOMMU path.
+	teardown_outbound_iatu(priv, iatu_region);
 err_dma_unmap:
 	dma_unmap_sgtable(&priv->device->pdev->dev, &dma_mapping, DMA_BIDIRECTIONAL, 0);
 err_unlock_priv:
@@ -871,6 +879,13 @@ long ioctl_map_peer_bar(struct chardev_private *priv,
 	peer_mapping->mapped_address = mapping;
 	peer_mapping->size = in.peer_bar_length;
 
+	out.dma_address = mapping;
+
+	if (copy_to_user(&arg->out, &out, sizeof(out)) != 0) {
+		ret = -EFAULT;
+		goto err_dma_unmap;
+	}
+
 	list_add(&peer_mapping->list, &priv->peer_mappings);
 
 	mutex_unlock(&priv->mutex);
@@ -878,13 +893,10 @@ long ioctl_map_peer_bar(struct chardev_private *priv,
 
 	fput(peer_file);
 
-	out.dma_address = mapping;
-
-	if (copy_to_user(&arg->out, &out, sizeof(out)) != 0)
-		return -EFAULT;
-
 	return 0;
 
+err_dma_unmap:
+	dma_unmap_resource(&priv->device->pdev->dev, mapping, in.peer_bar_length, DMA_BIDIRECTIONAL, 0);
 err_unlock:
 	mutex_unlock(&priv->mutex);
 	mutex_unlock(&peer_priv->mutex);

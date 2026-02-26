@@ -27,6 +27,7 @@
 #define TENSTORRENT_IOCTL_CONFIGURE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 13)
 #define TENSTORRENT_IOCTL_SET_NOC_CLEANUP		_IO(TENSTORRENT_IOCTL_MAGIC, 14)
 #define TENSTORRENT_IOCTL_SET_POWER_STATE		_IO(TENSTORRENT_IOCTL_MAGIC, 15)
+#define TENSTORRENT_IOCTL_SEND_ARC_MSG			_IO(TENSTORRENT_IOCTL_MAGIC, 16)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -406,6 +407,28 @@ struct tenstorrent_power_state {
 #define TT_POWER_FLAG_TENSIX_ENABLE     (1U << 2) /* 1=Enable Tensix, 0=Clock Gate Tensix */
 #define TT_POWER_FLAG_L2CPU_ENABLE      (1U << 3) /* 1=Enable L2CPU,  0=Clock Gate L2CPU */
 	__u16 power_settings[14];
+};
+
+/**
+ * TENSTORRENT_IOCTL_SEND_ARC_MSG - Send a message to the ARC processor
+ *
+ * Sends a synchronous message to the on-chip ARC management processor via the
+ * firmware message queue. The caller provides an 8-word message and receives
+ * an 8-word response. The driver serializes concurrent callers.
+ *
+ * On success, @message contains the firmware's response.
+ * On firmware error (errno EREMOTEIO), @message still contains the response
+ * (inspect message[0] for the firmware status code).
+ * On transport failure (errno EIO, ETIMEDOUT), @message is undefined.
+ *
+ * @argsz: Must be at least sizeof(struct tenstorrent_send_arc_msg).
+ * @flags: Reserved for future use, must be 0.
+ * @message: 8 x u32 message (request on entry, response on return).
+ */
+struct tenstorrent_send_arc_msg {
+	__u32 argsz;
+	__u32 flags;
+	__u32 message[8];
 };
 
 #endif

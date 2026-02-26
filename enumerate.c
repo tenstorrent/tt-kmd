@@ -262,6 +262,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	mutex_init(&tt_dev->chardev_mutex);
 	mutex_init(&tt_dev->iatu_mutex);
+	mutex_init(&tt_dev->arc_msg_mutex);
 
 	// Use dma_address_bits from module parameter or device class for coherent
 	// DMA mask, but use a 64-bit mask for streaming mappings. The problem this

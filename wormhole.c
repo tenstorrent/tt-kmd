@@ -252,7 +252,7 @@ static bool wormhole_read_fw_telemetry_offset(u8 __iomem *reset_unit_regs, u32 *
 	return true;
 }
 
-static bool send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
+static int send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
 {
 	u8 __iomem *regs = wh->bar4_mapping + RESET_UNIT_START;
 	u32 qcb_ptr;
@@ -260,7 +260,10 @@ static bool send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
 	u32 queue_info;
 	u32 num_entries;
 	u32 arc_misc_cntl;
+	int ret;
 	unsigned long timeout;
+
+	mutex_lock(&wh->tt.arc_msg_mutex);
 
 	// Wait for ARC L2 to be running.
 	timeout = jiffies + msecs_to_jiffies(ARC_MSG_READY_MS);
@@ -269,38 +272,51 @@ static bool send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
 			break;
 	} while (time_before(jiffies, timeout));
 
-	if (!arc_l2_is_running(regs))
-		return false;
+	if (!arc_l2_is_running(regs)) {
+		ret = -ETIMEDOUT;
+		goto out;
+	}
 
 	// Read QCB pointer from NOC_NODEID_X_1. Zero means FW doesn't support queues.
 	qcb_ptr = ioread32(wh->bar4_mapping + ARC_MSG_QCB_PTR);
 	if (qcb_ptr == 0) {
 		dev_warn_once(&wh->tt.pdev->dev, "ARC message queue not available (this is normal for old FW)\n");
-		return false;
+		ret = -EOPNOTSUPP;
+		goto out;
 	}
-	if (!is_range_within_csm(qcb_ptr, sizeof(u32)))
-		return false;
+	if (!is_range_within_csm(qcb_ptr, sizeof(u32))) {
+		ret = -EIO;
+		goto out;
+	}
 
-	if (csm_read32(wh, qcb_ptr + 0, &queue_base) != 0)
-		return false;
-
-	if (csm_read32(wh, qcb_ptr + 4, &queue_info) != 0)
-		return false;
+	if (csm_read32(wh, qcb_ptr + 0, &queue_base) != 0 ||
+	    csm_read32(wh, qcb_ptr + 4, &queue_info) != 0) {
+		ret = -EIO;
+		goto out;
+	}
 
 	queue_base += ARC_CSM_BASE;
 	num_entries = queue_info & 0xFF;
 
-	if (!arc_msg_push(&wh->tt, msg, queue_base, num_entries))
-		return false;
+	if (!arc_msg_push(&wh->tt, msg, queue_base, num_entries)) {
+		ret = -ETIMEDOUT;
+		goto out;
+	}
 
 	// Trigger ARC interrupt via IRQ0.
 	arc_misc_cntl = ioread32(regs + ARC_MISC_CNTL_REG);
 	iowrite32(arc_misc_cntl | ARC_MISC_CNTL_IRQ0_MASK, regs + ARC_MISC_CNTL_REG);
 
-	if (!arc_msg_pop(&wh->tt, msg, queue_base, num_entries))
-		return false;
+	if (!arc_msg_pop(&wh->tt, msg, queue_base, num_entries)) {
+		ret = -ETIMEDOUT;
+		goto out;
+	}
 
-	return msg->header == 0;
+	ret = (msg->header == 0) ? 0 : -EREMOTEIO;
+
+out:
+	mutex_unlock(&wh->tt.arc_msg_mutex);
+	return ret;
 }
 
 static bool wormhole_shutdown_firmware(struct pci_dev *pdev, u8 __iomem *reset_unit_regs)
@@ -1127,18 +1143,17 @@ static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct te
 {
 	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
 	struct arc_msg msg = {0};
-	bool ok;
 
 	msg.header = ARC_MSG_TYPE_POWER_SETTING | (power_state->validity << 8) | (power_state->power_flags << 16);
 	BUILD_BUG_ON(sizeof(power_state->power_settings) != sizeof(msg.payload));
 	memcpy(msg.payload, power_state->power_settings, sizeof(msg.payload));
 
-	ok = send_arc_message(wh, &msg);
+	return send_arc_message(wh, &msg);
+}
 
-	if (!ok)
-		return -EINVAL;
-
-	return 0;
+static int wormhole_send_arc_msg(struct tenstorrent_device *tt_dev, struct arc_msg *msg)
+{
+	return send_arc_message(tt_dev_to_wh_dev(tt_dev), msg);
 }
 
 struct tenstorrent_device_class wormhole_class = {
@@ -1167,4 +1182,5 @@ struct tenstorrent_device_class wormhole_class = {
 	.csm_read32 = wormhole_csm_read32,
 	.csm_write32 = wormhole_csm_write32,
 	.set_power_state = wormhole_set_power_state,
+	.send_arc_msg = wormhole_send_arc_msg,
 };

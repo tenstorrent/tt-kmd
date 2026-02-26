@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
 obj-m += tenstorrent.o
-tenstorrent-y := module.o chardev.o enumerate.o interrupt.o wormhole.o blackhole.o pcie.o hwmon.o sg_helpers.o memory.o tlb.o
+tenstorrent-y := module.o chardev.o enumerate.o interrupt.o wormhole.o blackhole.o pcie.o sg_helpers.o memory.o tlb.o telemetry.o
 
 # Capture the module directory at the top level before kernel build system changes context
 MODULE_DIR := $(CURDIR)

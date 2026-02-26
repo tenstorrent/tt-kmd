@@ -19,7 +19,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VERSION=$("${PROJECT_ROOT}/tools/current-version")
 
 # Sanity check: verify dkms.conf matches module.h
-DKMS_VERSION=$(grep -E '^s*PACKAGE_VERSIONs*=' "${PROJECT_ROOT}/dkms.conf" | sed -E 's/.*"([^"]*)".*/\1/')
+DKMS_VERSION=$(grep -E '^\s*PACKAGE_VERSION\s*=' "${PROJECT_ROOT}/dkms.conf" | sed -E 's/.*"([^"]*)".*/\1/')
 if [[ "${VERSION}" != "${DKMS_VERSION}" ]]; then
     echo "Error: Version mismatch!" >&2
     echo "  module.h: ${VERSION}" >&2

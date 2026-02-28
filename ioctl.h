@@ -335,7 +335,7 @@ struct tenstorrent_configure_tlb {
  *
  * A previously registered action can be cleared by setting @enabled to 0.
  *
- * @argsz: Must be sizeof(struct tenstorrent_set_noc_cleanup).
+ * @argsz: Must be at least sizeof(struct tenstorrent_set_noc_cleanup).
  * @flags: Reserved for future use, must be 0.
  * @enabled: Set to 1 to register the action, or 0 to clear it.
  * @x: X coordinate of the NOC tile to write to.
@@ -380,7 +380,7 @@ struct tenstorrent_set_noc_cleanup {
  *   last client closes, the device will return to low power.
  * - If power_policy is disabled, no aggregation is triggered on close.
  *
- * @argsz: Must be sizeof(struct tenstorrent_power_state).
+ * @argsz: Must be at least sizeof(struct tenstorrent_power_state).
  * @flags: Reserved for future use, must be 0.
  * @reserved0: Must be 0.
  * @validity: Defines which flags in power_flags and which entries in

@@ -350,23 +350,31 @@ static long ioctl_lock_ctl(struct chardev_private *priv, struct tenstorrent_lock
 static long ioctl_set_noc_cleanup(struct chardev_private *priv,
 			   struct tenstorrent_set_noc_cleanup __user *arg)
 {
+	const size_t minsz = offsetofend(struct tenstorrent_set_noc_cleanup, data);
 	struct tenstorrent_device *tt_dev = priv->device;
 	struct tenstorrent_set_noc_cleanup data = {0};
+	size_t copysz;
 
-	// First, ensure the underlying device class supports this operation.
 	if (!tt_dev->dev_class->noc_write32)
 		return -EOPNOTSUPP;
 
-	if (copy_from_user(&data, arg, sizeof(data)) != 0)
+	if (get_user(data.argsz, &arg->argsz))
 		return -EFAULT;
 
-	// The `argsz` field allows the kernel to validate that the userspace caller
-	// has the same understanding of the structure size. For this specific
-	// version of the API, we require an exact match.
-	if (data.argsz != sizeof(data))
+	if (data.argsz < minsz)
 		return -EINVAL;
 
-	// Validate reserved fields to ensure future compatibility.
+	copysz = min_t(size_t, data.argsz, sizeof(data));
+
+	if (copy_from_user(&data, arg, copysz))
+		return -EFAULT;
+
+	if (data.argsz > sizeof(data)) {
+		if (check_zeroed_user((char __user *)arg + sizeof(data),
+				      data.argsz - sizeof(data)) <= 0)
+			return -E2BIG;
+	}
+
 	if (data.flags != 0)
 		return -EINVAL;
 
@@ -457,14 +465,27 @@ int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_dev)
 
 static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorrent_power_state __user *arg)
 {
+	const size_t minsz = offsetofend(struct tenstorrent_power_state, power_settings);
 	struct tenstorrent_device *tt_dev = priv->device;
 	struct tenstorrent_power_state data = {0};
+	size_t copysz;
 
-	if (copy_from_user(&data, arg, sizeof(data)) != 0)
+	if (get_user(data.argsz, &arg->argsz))
 		return -EFAULT;
 
-	if (data.argsz != sizeof(data))
+	if (data.argsz < minsz)
 		return -EINVAL;
+
+	copysz = min_t(size_t, data.argsz, sizeof(data));
+
+	if (copy_from_user(&data, arg, copysz))
+		return -EFAULT;
+
+	if (data.argsz > sizeof(data)) {
+		if (check_zeroed_user((char __user *)arg + sizeof(data),
+				      data.argsz - sizeof(data)) <= 0)
+			return -E2BIG;
+	}
 
 	if (data.flags != 0 || data.reserved0 != 0)
 		return -EINVAL;

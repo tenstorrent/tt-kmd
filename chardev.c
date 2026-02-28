@@ -23,6 +23,7 @@
 #include "ioctl.h"
 #include "pcie.h"
 #include "memory.h"
+#include "msgqueue.h"
 #include "module.h"
 #include "tlb.h"
 
@@ -462,6 +463,55 @@ static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorre
 	return tenstorrent_set_aggregated_power_state(tt_dev);
 }
 
+static long ioctl_send_arc_msg(struct chardev_private *priv, struct tenstorrent_send_arc_msg __user *arg)
+{
+	const size_t minsz = sizeof(struct tenstorrent_send_arc_msg);
+	struct tenstorrent_device *tt_dev = priv->device;
+	const struct tenstorrent_device_class *cls = tt_dev->dev_class;
+	struct tenstorrent_send_arc_msg data = {0};
+	struct arc_msg msg;
+	size_t copysz;
+	int ret;
+
+	if (!cls->send_arc_msg)
+		return -EOPNOTSUPP;
+
+	if (get_user(data.argsz, &arg->argsz))
+		return -EFAULT;
+
+	if (data.argsz < minsz)
+		return -EINVAL;
+
+	copysz = min_t(size_t, data.argsz, sizeof(data));
+
+	if (copy_from_user(&data, arg, copysz))
+		return -EFAULT;
+
+	if (data.argsz > sizeof(data)) {
+		if (check_zeroed_user((char __user *)arg + sizeof(data),
+				      data.argsz - sizeof(data)) <= 0)
+			return -E2BIG;
+	}
+
+	if (data.flags != 0)
+		return -EINVAL;
+
+	BUILD_BUG_ON(sizeof(data.message) != sizeof(msg));
+	BUILD_BUG_ON(offsetof(struct arc_msg, payload) != sizeof(u32));
+	memcpy(&msg, data.message, sizeof(msg));
+
+	ret = cls->send_arc_msg(tt_dev, &msg);
+
+	if (ret == 0 || ret == -EREMOTEIO) {
+		memcpy(data.message, &msg, sizeof(msg));
+
+		if (copy_to_user(arg, &data, copysz))
+			return -EFAULT;
+	}
+
+	return ret;
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	struct chardev_private *priv = f->private_data;
@@ -559,6 +609,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_SET_POWER_STATE:
 			ret = ioctl_set_power_state(priv, (struct tenstorrent_power_state __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_SEND_ARC_MSG:
+			ret = ioctl_send_arc_msg(priv, (struct tenstorrent_send_arc_msg __user *)arg);
 			break;
 
 		default:

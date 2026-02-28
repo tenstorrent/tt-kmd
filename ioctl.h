@@ -341,6 +341,7 @@ struct tenstorrent_configure_tlb {
  * @x: X coordinate of the NOC tile to write to.
  * @y: Y coordinate of the NOC tile to write to.
  * @noc: NOC ID to write to; must be 0 or 1.
+ * @reserved0: Must be 0.
  * @addr: NOC address to write to; must be 4-byte aligned.
  * @data: Data to write to the NOC tile; upper 32 bits are ignored.
  */

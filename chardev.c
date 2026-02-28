@@ -375,7 +375,7 @@ static long ioctl_set_noc_cleanup(struct chardev_private *priv,
 			return -E2BIG;
 	}
 
-	if (data.flags != 0)
+	if (data.flags != 0 || data.reserved0 != 0)
 		return -EINVAL;
 
 	// The `enabled` field acts as a boolean; reject other values.

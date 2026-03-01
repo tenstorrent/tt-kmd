@@ -45,6 +45,25 @@ static struct file_operations chardev_fops = {
 	.release = tt_cdev_release,
 };
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
+/* Returns 1 if the userspace buffer is all zeros, 0 if any byte is nonzero,
+ * or -EFAULT on access failure. Same semantics as the kernel's
+ * check_zeroed_user() introduced in v5.4. */
+static int check_zeroed_user(const void __user *from, size_t size)
+{
+	size_t i;
+	u8 val;
+
+	for (i = 0; i < size; i++) {
+		if (get_user(val, (const u8 __user *)from + i))
+			return -EFAULT;
+		if (val)
+			return 0;
+	}
+	return 1;
+}
+#endif
+
 int init_char_driver(unsigned int max_devices)
 {
 	int res;
@@ -331,24 +350,32 @@ static long ioctl_lock_ctl(struct chardev_private *priv, struct tenstorrent_lock
 static long ioctl_set_noc_cleanup(struct chardev_private *priv,
 			   struct tenstorrent_set_noc_cleanup __user *arg)
 {
+	const size_t minsz = offsetofend(struct tenstorrent_set_noc_cleanup, data);
 	struct tenstorrent_device *tt_dev = priv->device;
 	struct tenstorrent_set_noc_cleanup data = {0};
+	size_t copysz;
 
-	// First, ensure the underlying device class supports this operation.
 	if (!tt_dev->dev_class->noc_write32)
 		return -EOPNOTSUPP;
 
-	if (copy_from_user(&data, arg, sizeof(data)) != 0)
+	if (get_user(data.argsz, &arg->argsz))
 		return -EFAULT;
 
-	// The `argsz` field allows the kernel to validate that the userspace caller
-	// has the same understanding of the structure size. For this specific
-	// version of the API, we require an exact match.
-	if (data.argsz != sizeof(data))
+	if (data.argsz < minsz)
 		return -EINVAL;
 
-	// Validate reserved fields to ensure future compatibility.
-	if (data.flags != 0)
+	copysz = min_t(size_t, data.argsz, sizeof(data));
+
+	if (copy_from_user(&data, arg, copysz))
+		return -EFAULT;
+
+	if (data.argsz > sizeof(data)) {
+		if (check_zeroed_user((char __user *)arg + sizeof(data),
+				      data.argsz - sizeof(data)) <= 0)
+			return -E2BIG;
+	}
+
+	if (data.flags != 0 || data.reserved0 != 0)
 		return -EINVAL;
 
 	// The `enabled` field acts as a boolean; reject other values.
@@ -438,14 +465,27 @@ int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_dev)
 
 static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorrent_power_state __user *arg)
 {
+	const size_t minsz = offsetofend(struct tenstorrent_power_state, power_settings);
 	struct tenstorrent_device *tt_dev = priv->device;
 	struct tenstorrent_power_state data = {0};
+	size_t copysz;
 
-	if (copy_from_user(&data, arg, sizeof(data)) != 0)
+	if (get_user(data.argsz, &arg->argsz))
 		return -EFAULT;
 
-	if (data.argsz != sizeof(data))
+	if (data.argsz < minsz)
 		return -EINVAL;
+
+	copysz = min_t(size_t, data.argsz, sizeof(data));
+
+	if (copy_from_user(&data, arg, copysz))
+		return -EFAULT;
+
+	if (data.argsz > sizeof(data)) {
+		if (check_zeroed_user((char __user *)arg + sizeof(data),
+				      data.argsz - sizeof(data)) <= 0)
+			return -E2BIG;
+	}
 
 	if (data.flags != 0 || data.reserved0 != 0)
 		return -EINVAL;

@@ -45,6 +45,25 @@ static struct file_operations chardev_fops = {
 	.release = tt_cdev_release,
 };
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
+/* Returns 1 if the userspace buffer is all zeros, 0 if any byte is nonzero,
+ * or -EFAULT on access failure. Same semantics as the kernel's
+ * check_zeroed_user() introduced in v5.4. */
+static int check_zeroed_user(const void __user *from, size_t size)
+{
+	size_t i;
+	u8 val;
+
+	for (i = 0; i < size; i++) {
+		if (get_user(val, (const u8 __user *)from + i))
+			return -EFAULT;
+		if (val)
+			return 0;
+	}
+	return 1;
+}
+#endif
+
 int init_char_driver(unsigned int max_devices)
 {
 	int res;

@@ -120,8 +120,9 @@ static long ioctl_example(struct chardev_private *priv,
 When you add a new field, you do **not** update `minsz`. It remains pinned
 to the last field of the *original* struct definition. This is what allows
 old userspace to keep working: their smaller `argsz` is still `>= minsz`,
-so they pass the check. The new fields are zero in `data` (from `= {}`),
-and the kernel treats zero as "not specified" and applies a default.
+so they pass the check. The new fields are zero in `data` (from `= {}`).
+The kernel does not use these fields unless the caller sets the
+corresponding flag bit — see [Extending an Existing Ioctl](#extending-an-existing-ioctl).
 
 ### Why `check_zeroed_user`?
 
@@ -146,25 +147,29 @@ To add a field to an existing argsz-style struct:
 1. **Append** the new field to the end of the struct in `ioctl.h`. Never
    reorder, remove, or resize existing fields.
 
-2. **Add a flag bit** if the new field changes behavior. New flag bits are
-   defined in `ioctl.h` alongside the struct. The kernel checks the flag
-   before reading the new field.
+2. **Add a flag bit** for each new input field. The flag declares caller
+   intent: the kernel only reads the new field when the flag is set. This
+   lets the kernel distinguish "caller set the field to zero on purpose"
+   from "caller doesn't know this field exists." New flag bits are defined
+   in `ioctl.h` alongside the struct.
 
 3. **Do not change `minsz`** in the handler. It stays at the original struct
-   size. The handler checks whether the new field was provided by comparing
-   `copysz` against `offsetofend(struct ..., new_field)`:
+   size. The handler checks the flag for intent, then cross-checks `copysz`
+   to confirm the field is actually present (this catches stack garbage in
+   flags from old userspace whose struct is too small to contain the field):
 
    ```c
-   /* New field is present if the caller's struct is large enough. */
-   if (copysz >= offsetofend(struct tenstorrent_example, new_field)) {
+   if (data.flags & TENSTORRENT_EXAMPLE_USE_NEW_FIELD) {
+       if (copysz < offsetofend(struct tenstorrent_example, new_field))
+           return -EINVAL;
        /* use data.new_field */
-   } else {
-       /* default behavior, data.new_field is zero from = {} */
    }
    ```
 
-4. **Zero must be a safe default** for the new field. Old callers won't set
-   it, so the handler will see zero.
+4. **Zero-initialize on the kernel side** (`= {}`). This prevents leaking
+   kernel stack contents and ensures fields not covered by the caller's
+   struct are predictable. The handler must not interpret zero as a
+   sentinel; it reads new fields only when the corresponding flag is set.
 
 5. **Update the doc comment** for the struct in `ioctl.h`.
 
@@ -189,7 +194,8 @@ These apply to all ioctl structs, not just argsz-style ones:
 
 - **Zero-initialize kernel-side structs.** Use `= {}` or `= {0}`. This
   prevents leaking kernel stack contents to userspace (information leak)
-  and provides safe defaults for fields not present in the caller's struct.
+  and ensures fields not present in the caller's struct contain a
+  predictable value rather than garbage.
 
 - **Never write past `argsz`.** Always compute
   `min_t(size_t, argsz, sizeof(data))` and use that as the copy-to-user

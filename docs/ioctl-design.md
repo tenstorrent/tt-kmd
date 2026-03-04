@@ -173,6 +173,14 @@ To add a field to an existing argsz-style struct:
 
 5. **Update the doc comment** for the struct in `ioctl.h`.
 
+### Output-only fields
+
+For a new field that the kernel writes but the caller never sets, no flag
+bit is needed. The kernel populates the field unconditionally in `data`,
+and `copy_to_user` with `copysz` ensures it is only written back if the
+caller's struct is large enough to contain it. Old callers with a smaller
+`argsz` never see the field; new callers get it automatically.
+
 
 ## Rules
 

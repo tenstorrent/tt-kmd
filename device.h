@@ -19,6 +19,7 @@
 
 #define MAX_TLB_KINDS 4
 
+struct arc_msg;
 struct tenstorrent_device_class;
 
 struct tenstorrent_device {
@@ -60,6 +61,8 @@ struct tenstorrent_device {
 
 	struct attribute **telemetry_attrs;
 	struct attribute_group telemetry_group;
+
+	struct mutex arc_msg_mutex;
 };
 
 struct tlb_descriptor;
@@ -92,6 +95,7 @@ struct tenstorrent_device_class {
 	int (*csm_read32)(struct tenstorrent_device *ttdev, u64 addr, u32 *value);
 	int (*csm_write32)(struct tenstorrent_device *ttdev, u64 addr, u32 value);
 	int (*set_power_state)(struct tenstorrent_device *ttdev, struct tenstorrent_power_state *power_state);
+	int (*send_arc_msg)(struct tenstorrent_device *ttdev, struct arc_msg *msg);
 };
 
 void tenstorrent_device_put(struct tenstorrent_device *);

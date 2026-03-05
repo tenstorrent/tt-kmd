@@ -41,9 +41,10 @@ struct tenstorrent_example {
 `argsz` is set by the caller to the size of the struct it was compiled against.
 The kernel uses this to determine which version of the struct the caller has.
 
-`flags` is reserved for future behavioral variations. The kernel rejects
-nonzero values it does not recognize, which prevents callers from accidentally
-relying on ignored flags.
+`flags` is reserved for future behavioral variations. The kernel must
+reject nonzero values it does not recognize. This prevents callers from
+accidentally relying on ignored flags and ensures that old kernels give a
+clear `EINVAL` when new userspace requests a feature they don't support.
 
 The ioctl command number is defined with `_IO()` (no size encoded):
 
@@ -100,7 +101,9 @@ static long ioctl_example(struct chardev_private *priv,
             return -E2BIG;
     }
 
-    /* Step 6: Validate reserved fields. */
+    /* Step 6: Reject unknown flags. Once flag bits are defined for this
+     * ioctl, check only the unknown bits instead:
+     *     if (data.flags & ~KNOWN_FLAGS) return -EINVAL; */
     if (data.flags != 0)
         return -EINVAL;
 
@@ -147,11 +150,15 @@ To add a field to an existing argsz-style struct:
 1. **Append** the new field to the end of the struct in `ioctl.h`. Never
    reorder, remove, or resize existing fields.
 
-2. **Add a flag bit** for each new input field. The flag declares caller
-   intent: the kernel only reads the new field when the flag is set. This
-   lets the kernel distinguish "caller set the field to zero on purpose"
-   from "caller doesn't know this field exists." New flag bits are defined
-   in `ioctl.h` alongside the struct.
+2. **Add a flag bit** for each new field, whether input or output. The
+   flag means "the caller knows about this field." For input fields, the
+   kernel reads the field only when the flag is set, distinguishing
+   "caller set the field to zero on purpose" from "caller doesn't know
+   this field exists." For output fields, the kernel fills the field only
+   when the flag is set. If an old kernel encounters an unknown flag, it
+   rejects the ioctl with `EINVAL`, giving the caller a clear signal
+   that the feature is not supported.
+   New flag bits are defined in `ioctl.h` alongside the struct.
 
 3. **Do not change `minsz`** in the handler. It stays at the original struct
    size. The handler checks the flag for intent, then cross-checks `copysz`
@@ -175,11 +182,23 @@ To add a field to an existing argsz-style struct:
 
 ### Output-only fields
 
-For a new field that the kernel writes but the caller never sets, no flag
-bit is needed. The kernel populates the field unconditionally in `data`,
-and `copy_to_user` with `copysz` ensures it is only written back if the
-caller's struct is large enough to contain it. Old callers with a smaller
-`argsz` never see the field; new callers get it automatically.
+Output fields use the same flag mechanism as input fields. The caller sets
+the flag to request the output; the kernel fills the field if the flag is
+set and `copysz` is large enough:
+
+   ```c
+   if (data.flags & TENSTORRENT_EXAMPLE_GET_NEW_OUTPUT) {
+       if (copysz < offsetofend(struct tenstorrent_example, new_output))
+           return -EINVAL;
+       data.new_output = compute_something();
+   }
+   ```
+
+If the caller sets the flag but the kernel doesn't recognize it, the
+unknown-flags check rejects the ioctl with `EINVAL`. The caller can then fall
+back (retry without the flag) or report a version mismatch. This is unambiguous:
+either the ioctl succeeds and the field is filled, or it fails because the
+kernel doesn't support it.
 
 
 ## Rules
@@ -256,3 +275,4 @@ If a legacy ioctl needs new functionality that cannot be expressed through
 its existing reserved fields, add a new ioctl number with an argsz-style
 struct rather than modifying the existing struct layout. The old ioctl
 stays as-is for compatibility.
+

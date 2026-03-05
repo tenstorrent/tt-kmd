@@ -101,16 +101,18 @@ static long ioctl_example(struct chardev_private *priv,
             return -E2BIG;
     }
 
-    /* Step 6: Reject unknown flags. Once flag bits are defined for this
-     * ioctl, check only the unknown bits instead:
-     *     if (data.flags & ~KNOWN_FLAGS) return -EINVAL; */
+    /* Step 6: Reject unknown flags and nonzero reserved fields.
+     * Once flag bits are defined for this ioctl, check only the
+     * unknown bits: if (data.flags & ~KNOWN_FLAGS) return -EINVAL; */
     if (data.flags != 0)
+        return -EINVAL;
+    if (data.reserved0 != 0)
         return -EINVAL;
 
     /* ... do the work ... */
 
     /* Step 7: Write back only the overlap. Never write past what the
-     * caller allocated. */
+     * caller allocated. Skip this step for input-only ioctls. */
     if (copy_to_user(arg, &data, copysz))
         return -EFAULT;
 
@@ -238,8 +240,9 @@ The older ioctls in tt-kmd use two patterns that predate the argsz approach.
 
 ### The `output_size_bytes` pattern
 
-Used by `GET_DEVICE_INFO`, `GET_DRIVER_INFO`, `RESET_DEVICE`, `PIN_PAGES`.
-`QUERY_MAPPINGS` uses a variant where the caller provides an element count
+Used by `GET_DEVICE_INFO`, `GET_DRIVER_INFO`, `RESET_DEVICE`, `PIN_PAGES`,
+`LOCK_CTL`. `QUERY_MAPPINGS` uses a variant where the caller provides an
+element count
 (`output_mapping_count`) instead of a byte size, but the principle is the
 same.
 
@@ -263,8 +266,8 @@ size negotiation.
 
 ### The fixed-struct pattern
 
-Used by `ALLOCATE_DMA_BUF`, `FREE_DMA_BUF`, `LOCK_CTL`, `MAP_PEER_BAR`,
-`ALLOCATE_TLB`, `FREE_TLB`, `CONFIGURE_TLB`, `UNPIN_PAGES`.
+Used by `ALLOCATE_DMA_BUF`, `FREE_DMA_BUF`, `MAP_PEER_BAR`, `ALLOCATE_TLB`,
+`FREE_TLB`, `CONFIGURE_TLB`, `UNPIN_PAGES`.
 
 No size negotiation. Any struct layout change is an ABI break. Some include
 `reserved` fields that can absorb limited future use.

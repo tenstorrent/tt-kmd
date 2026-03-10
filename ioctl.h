@@ -27,6 +27,7 @@
 #define TENSTORRENT_IOCTL_CONFIGURE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 13)
 #define TENSTORRENT_IOCTL_SET_NOC_CLEANUP		_IO(TENSTORRENT_IOCTL_MAGIC, 14)
 #define TENSTORRENT_IOCTL_SET_POWER_STATE		_IO(TENSTORRENT_IOCTL_MAGIC, 15)
+#define TENSTORRENT_IOCTL_ARC_MSG			_IO(TENSTORRENT_IOCTL_MAGIC, 16)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -406,6 +407,47 @@ struct tenstorrent_power_state {
 #define TT_POWER_FLAG_TENSIX_ENABLE     (1U << 2) /* 1=Enable Tensix, 0=Clock Gate Tensix */
 #define TT_POWER_FLAG_L2CPU_ENABLE      (1U << 3) /* 1=Enable L2CPU,  0=Clock Gate L2CPU */
 	__u16 power_settings[14];
+};
+
+/**
+ * TENSTORRENT_IOCTL_ARC_MSG - Post, poll, or abandon an ARC firmware message
+ *
+ * A single ioctl that handles all ARC message operations, selected by flags.
+ * Each open file descriptor may have at most one message in flight at a time.
+ * If concurrent messaging is needed, open additional file descriptors.
+ *
+ * Supported flag combinations:
+ * - POST:        Submit a new message. data[] carries the request payload.
+ *                Returns -EBUSY if this fd already has a message pending.
+ * - POST | POLL: Submit and immediately check for a response. data[] carries
+ *                the request in; if the response is already available, data[]
+ *                is overwritten with it and msg_flags has COMPLETED set.
+ * - POLL:        Check for a response on a previously posted message.
+ *                If ready, data[] contains the response and msg_flags has
+ *                COMPLETED set. If a reset occurred, msg_flags has RESET set.
+ * - ABANDON:     Cancel a pending message. The fd returns to idle and may
+ *                POST again. If the message was already submitted to FW, the
+ *                driver discards the response when it arrives.
+ *
+ * @argsz:       Must be sizeof(struct tenstorrent_arc_msg).
+ * @flags:       Operation selection (TENSTORRENT_ARC_MSG_POST/POLL/ABANDON).
+ * @queue_index: Identifies the message queue within the chip.
+ * @msg_flags:   Output status bits (TENSTORRENT_ARC_MSG_COMPLETED/RESET).
+ * @target_id:   Reserved for multi-chip, must be 0.
+ * @data:        Message payload. Input for POST, output for POLL.
+ */
+struct tenstorrent_arc_msg {
+	__u32 argsz;
+	__u32 flags;
+#define TENSTORRENT_ARC_MSG_POST	(1U << 0)
+#define TENSTORRENT_ARC_MSG_POLL	(1U << 1)
+#define TENSTORRENT_ARC_MSG_ABANDON	(1U << 2)
+	__u32 queue_index;
+	__u32 msg_flags;
+#define TENSTORRENT_ARC_MSG_COMPLETED	(1U << 0)
+#define TENSTORRENT_ARC_MSG_RESET	(1U << 1)
+	__u64 target_id;
+	__u32 data[8];
 };
 
 #endif

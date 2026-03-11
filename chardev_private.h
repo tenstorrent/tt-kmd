@@ -11,9 +11,26 @@
 #include <linux/refcount.h>
 
 #include "ioctl.h"
+#include "msgqueue.h"
 
 struct file;
 struct tenstorrent_device;
+
+enum arc_msg_state {
+	ARC_MSG_NONE,
+	ARC_MSG_QUEUED,
+	ARC_MSG_IN_FW,
+	ARC_MSG_IN_FW_ABANDONED,
+	ARC_MSG_RESPONSE_READY,
+};
+
+struct chardev_msg {
+	enum arc_msg_state state;
+	struct arc_msg request;
+	struct arc_msg response;
+	u32 queue_index;
+	bool reset_occurred;
+};
 
 enum bar_mapping_type { BAR_MAPPING_UC, BAR_MAPPING_WC };
 enum tenstorrent_vma_type { TT_VMA_BAR, TT_VMA_TLB };
@@ -73,6 +90,9 @@ struct chardev_private {
 
 	struct tenstorrent_set_noc_cleanup noc_cleanup; // NOC write on release action
 	struct tenstorrent_power_state power_state; // Power state for this fd
+
+	struct chardev_msg msg;			// ARC message slot
+	struct list_head msg_queue_node;	// node in tenstorrent_device.msg_queue
 
 	long open_reset_gen; // Reset generation at open time
 };

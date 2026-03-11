@@ -47,6 +47,11 @@ struct tenstorrent_device {
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
 	wait_queue_head_t resource_lock_waitqueue;
 
+	struct mutex msg_mutex;		// Protects msg_queue, msg_fw_busy, and HW queue access
+	struct list_head msg_queue;	// chardev_private nodes with pending messages
+	bool msg_fw_busy;		// A user message is currently in FW
+	wait_queue_head_t msg_waitqueue; // For future interrupt-driven wakeup
+
 	struct tt_hwmon_context hwmon_context;
 	struct device *hwmon_dev;
 

@@ -93,6 +93,8 @@ int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 	char name[16];
 
 	init_waitqueue_head(&tt_dev->resource_lock_waitqueue);
+	init_waitqueue_head(&tt_dev->msg_waitqueue);
+	INIT_LIST_HEAD(&tt_dev->msg_queue);
 
 	device_initialize(&tt_dev->dev);
 	tt_dev->dev.devt = devt;
@@ -643,6 +645,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	INIT_LIST_HEAD(&private_data->peer_mappings);
 	INIT_LIST_HEAD(&private_data->vma_list);
 	mutex_init(&private_data->vma_lock);
+	INIT_LIST_HEAD(&private_data->msg_queue_node);
 
 	kref_get(&tt_dev->kref);
 	private_data->device = tt_dev;

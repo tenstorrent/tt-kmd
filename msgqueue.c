@@ -3,6 +3,7 @@
 
 #include "msgqueue.h"
 
+#include <linux/errno.h>
 #include <linux/jiffies.h>
 #include <linux/delay.h>
 #include <linux/pci.h>
@@ -109,4 +110,44 @@ bool arc_msg_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 que
 		return false;
 
 	return true;
+}
+
+// Returns 1 and fills msg if a response is available, 0 if the response
+// ring is empty, or negative errno on CSM access error.
+int arc_msg_try_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 queue_base, u32 num_entries)
+{
+	const struct tenstorrent_device_class *cls = tt_dev->dev_class;
+	u32 response_base = queue_base + ARC_MSG_QUEUE_HEADER_SIZE + (num_entries * sizeof(struct arc_msg));
+	u32 rptr;
+	u32 wptr;
+	u32 slot;
+	u32 response_offset;
+	int i;
+
+	if (cls->csm_read32(tt_dev, ARC_MSG_QUEUE_RES_RPTR(queue_base), &rptr) != 0)
+		return -EIO;
+
+	if (cls->csm_read32(tt_dev, ARC_MSG_QUEUE_RES_WPTR(queue_base), &wptr) != 0)
+		return -EIO;
+
+	if ((wptr - rptr) % (2 * num_entries) == 0)
+		return 0;
+
+	slot = rptr % num_entries;
+	response_offset = slot * sizeof(struct arc_msg);
+	if (cls->csm_read32(tt_dev, response_base + response_offset, &msg->header) != 0)
+		return -EIO;
+
+	for (i = 0; i < 7; ++i) {
+		u32 addr = response_base + response_offset + ((i + 1) * sizeof(u32));
+
+		if (cls->csm_read32(tt_dev, addr, &msg->payload[i]) != 0)
+			return -EIO;
+	}
+
+	rptr = (rptr + 1) % (2 * num_entries);
+	if (cls->csm_write32(tt_dev, ARC_MSG_QUEUE_RES_RPTR(queue_base), rptr) != 0)
+		return -EIO;
+
+	return 1;
 }

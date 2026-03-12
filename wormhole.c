@@ -290,14 +290,14 @@ static bool send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
 	queue_base += ARC_CSM_BASE;
 	num_entries = queue_info & 0xFF;
 
-	if (!arc_msg_push(&wh->tt, msg, queue_base, num_entries))
+	if (arc_msg_push(&wh->tt, msg, queue_base, num_entries) != 0)
 		return false;
 
 	// Trigger ARC interrupt via IRQ0.
 	arc_misc_cntl = ioread32(regs + ARC_MISC_CNTL_REG);
 	iowrite32(arc_misc_cntl | ARC_MISC_CNTL_IRQ0_MASK, regs + ARC_MISC_CNTL_REG);
 
-	if (!arc_msg_pop(&wh->tt, msg, queue_base, num_entries))
+	if (arc_msg_pop(&wh->tt, msg, queue_base, num_entries) != 0)
 		return false;
 
 	return msg->header == 0;

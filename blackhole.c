@@ -701,13 +701,13 @@ static bool send_arc_message(struct blackhole_device *bh, struct arc_msg *msg)
 
 	num_entries = queue_info & 0xFF;
 
-	if (!arc_msg_push(&bh->tt, msg, queue_base, num_entries))
+	if (arc_msg_push(&bh->tt, msg, queue_base, num_entries) != 0)
 		return false;
 
 	// Trigger ARC interrupt
 	noc_write32(bh, ARC_X, ARC_Y, ARC_MSI_FIFO, 0, 0);
 
-	if (!arc_msg_pop(&bh->tt, msg, queue_base, num_entries))
+	if (arc_msg_pop(&bh->tt, msg, queue_base, num_entries) != 0)
 		return false;
 
 	return msg->header == 0;

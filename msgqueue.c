@@ -10,7 +10,7 @@
 
 #include "device.h"
 
-bool arc_msg_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg, u32 queue_base, u32 num_entries)
+int arc_msg_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg, u32 queue_base, u32 num_entries)
 {
 	const struct tenstorrent_device_class *cls = tt_dev->dev_class;
 	u32 request_base = queue_base + ARC_MSG_QUEUE_HEADER_SIZE;
@@ -21,7 +21,7 @@ bool arc_msg_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg, 
 	int i;
 
 	if (cls->csm_read32(tt_dev, ARC_MSG_QUEUE_REQ_WPTR(queue_base), &wptr) != 0)
-		return false;
+		return -EIO;
 
 	timeout = jiffies + msecs_to_jiffies(ARC_MSG_TIMEOUT_MS);
 	for (;;) {
@@ -29,7 +29,7 @@ bool arc_msg_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg, 
 		u32 num_occupied;
 
 		if (cls->csm_read32(tt_dev, ARC_MSG_QUEUE_REQ_RPTR(queue_base), &rptr) != 0)
-			return false;
+			return -EIO;
 
 		num_occupied = (wptr - rptr) % (2 * num_entries);
 		if (num_occupied < num_entries)
@@ -37,7 +37,7 @@ bool arc_msg_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg, 
 
 		if (time_after(jiffies, timeout)) {
 			dev_err(&tt_dev->pdev->dev, "Timeout waiting for space in ARC message queue\n");
-			return false;
+			return -ETIMEDOUT;
 		}
 
 		usleep_range(100, 200);
@@ -50,17 +50,17 @@ bool arc_msg_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg, 
 		u32 value = (i == 0) ? msg->header : msg->payload[i - 1];
 
 		if (cls->csm_write32(tt_dev, addr, value) != 0)
-			return false;
+			return -EIO;
 	}
 
 	wptr = (wptr + 1) % (2 * num_entries);
 	if (cls->csm_write32(tt_dev, ARC_MSG_QUEUE_REQ_WPTR(queue_base), wptr) != 0)
-		return false;
+		return -EIO;
 
-	return true;
+	return 0;
 }
 
-bool arc_msg_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 queue_base, u32 num_entries)
+int arc_msg_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 queue_base, u32 num_entries)
 {
 	const struct tenstorrent_device_class *cls = tt_dev->dev_class;
 	u32 response_base = queue_base + ARC_MSG_QUEUE_HEADER_SIZE + (num_entries * sizeof(struct arc_msg));
@@ -71,7 +71,7 @@ bool arc_msg_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 que
 	int i;
 
 	if (cls->csm_read32(tt_dev, ARC_MSG_QUEUE_RES_RPTR(queue_base), &rptr) != 0)
-		return false;
+		return -EIO;
 
 	timeout = jiffies + msecs_to_jiffies(ARC_MSG_TIMEOUT_MS);
 	for (;;) {
@@ -79,7 +79,7 @@ bool arc_msg_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 que
 		u32 num_occupied;
 
 		if (cls->csm_read32(tt_dev, ARC_MSG_QUEUE_RES_WPTR(queue_base), &wptr) != 0)
-			return false;
+			return -EIO;
 
 		num_occupied = (wptr - rptr) % (2 * num_entries);
 		if (num_occupied > 0)
@@ -87,7 +87,7 @@ bool arc_msg_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 que
 
 		if (time_after(jiffies, timeout)) {
 			dev_err(&tt_dev->pdev->dev, "Timeout waiting for ARC response\n");
-			return false;
+			return -ETIMEDOUT;
 		}
 
 		usleep_range(100, 200);
@@ -96,20 +96,20 @@ bool arc_msg_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 que
 	slot = rptr % num_entries;
 	response_offset = slot * sizeof(struct arc_msg);
 	if (cls->csm_read32(tt_dev, response_base + response_offset, &msg->header) != 0)
-		return false;
+		return -EIO;
 
 	for (i = 0; i < 7; ++i) {
 		u32 addr = response_base + response_offset + ((i + 1) * sizeof(u32));
 
 		if (cls->csm_read32(tt_dev, addr, &msg->payload[i]) != 0)
-			return false;
+			return -EIO;
 	}
 
 	rptr = (rptr + 1) % (2 * num_entries);
 	if (cls->csm_write32(tt_dev, ARC_MSG_QUEUE_RES_RPTR(queue_base), rptr) != 0)
-		return false;
+		return -EIO;
 
-	return true;
+	return 0;
 }
 
 // Returns 1 and fills msg if a response is available, 0 if the response

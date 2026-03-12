@@ -21,8 +21,8 @@ struct arc_msg {
 #define ARC_MSG_QUEUE_REQ_RPTR(base) ((base) + 0x10)
 #define ARC_MSG_QUEUE_RES_WPTR(base) ((base) + 0x14)
 
-bool arc_msg_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg, u32 queue_base, u32 num_entries);
-bool arc_msg_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 queue_base, u32 num_entries);
+int arc_msg_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg, u32 queue_base, u32 num_entries);
+int arc_msg_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 queue_base, u32 num_entries);
 int arc_msg_try_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 queue_base, u32 num_entries);
 
 #endif

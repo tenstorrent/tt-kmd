@@ -671,44 +671,75 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 	return 0;
 }
 
-static bool send_arc_message(struct blackhole_device *bh, struct arc_msg *msg)
+static int resolve_msg_queue(struct blackhole_device *bh, u32 queue_index, u32 *queue_base_out, u32 *num_entries_out)
 {
 	u32 boot_status;
 	u32 queue_ctrl_addr;
 	u32 queue_base;
 	u32 queue_info;
-	u32 num_entries;
+	u32 num_entries, num_queues, queue_stride;
 	unsigned long timeout = jiffies + msecs_to_jiffies(ARC_MSG_READY_MS);
 
 	do {
 		boot_status = noc_read32(bh, ARC_X, ARC_Y, ARC_BOOT_STATUS, 0);
 		if (boot_status == 0xFFFFFFFFu)
-			return false; // NOC is hung
+			return -EIO; // NOC is hung
 		if (boot_status & ARC_BOOT_STATUS_READY_FOR_MSG)
 			break;
 	} while (time_before(jiffies, timeout));
 
 	if (!(boot_status & ARC_BOOT_STATUS_READY_FOR_MSG))
-		return false;
+		return -ETIMEDOUT;
 
 	queue_ctrl_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_MSG_QCB_PTR, 0);
 
 	if (csm_read32(bh, queue_ctrl_addr + 0, &queue_base) != 0)
-		return false;
+		return -EIO;
 
 	if (csm_read32(bh, queue_ctrl_addr + 4, &queue_info) != 0)
-		return false;
+		return -EIO;
 
 	num_entries = queue_info & 0xFF;
+	num_queues = (queue_info >> 8) & 0xFF;
 
-	if (arc_msg_push(&bh->tt, msg, queue_base, num_entries) != 0)
-		return false;
+	if (queue_index >= num_queues)
+		return -EINVAL;
 
-	// Trigger ARC interrupt
+	queue_stride = ARC_MSG_QUEUE_HEADER_SIZE + 2 * num_entries * sizeof(struct arc_msg);
+	*queue_base_out = queue_base + queue_index * queue_stride;
+	*num_entries_out = num_entries;
+	return 0;
+}
+
+static void trigger_arc_interrupt(struct blackhole_device *bh)
+{
 	noc_write32(bh, ARC_X, ARC_Y, ARC_MSI_FIFO, 0, 0);
+}
 
-	if (arc_msg_pop(&bh->tt, msg, queue_base, num_entries) != 0)
+static bool send_arc_message(struct blackhole_device *bh, struct arc_msg *msg)
+{
+	u32 queue_base, num_entries;
+
+	mutex_lock(&bh->tt.msg_mutex);
+
+	if (resolve_msg_queue(bh, 0, &queue_base, &num_entries) != 0) {
+		mutex_unlock(&bh->tt.msg_mutex);
 		return false;
+	}
+
+	if (arc_msg_push(&bh->tt, msg, queue_base, num_entries) != 0) {
+		mutex_unlock(&bh->tt.msg_mutex);
+		return false;
+	}
+
+	trigger_arc_interrupt(bh);
+
+	if (arc_msg_pop(&bh->tt, msg, queue_base, num_entries) != 0) {
+		mutex_unlock(&bh->tt.msg_mutex);
+		return false;
+	}
+
+	mutex_unlock(&bh->tt.msg_mutex);
 
 	return msg->header == 0;
 }
@@ -989,6 +1020,37 @@ static int blackhole_set_power_state(struct tenstorrent_device *tt_dev, struct t
 	return 0;
 }
 
+static int blackhole_arc_msg_submit(struct tenstorrent_device *tt_dev, const struct arc_msg *msg, u32 queue_index)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	u32 queue_base, num_entries;
+	int ret;
+
+	ret = resolve_msg_queue(bh, queue_index, &queue_base, &num_entries);
+	if (ret != 0)
+		return ret;
+
+	ret = arc_msg_push(&bh->tt, msg, queue_base, num_entries);
+	if (ret != 0)
+		return ret;
+
+	trigger_arc_interrupt(bh);
+	return 0;
+}
+
+static int blackhole_arc_msg_try_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 queue_index)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	u32 queue_base, num_entries;
+	int ret;
+
+	ret = resolve_msg_queue(bh, queue_index, &queue_base, &num_entries);
+	if (ret != 0)
+		return ret;
+
+	return arc_msg_try_pop(&bh->tt, msg, queue_base, num_entries);
+}
+
 struct tenstorrent_device_class blackhole_class = {
 	.name = "Blackhole",
 	.instance_size = sizeof(struct blackhole_device),
@@ -1014,4 +1076,6 @@ struct tenstorrent_device_class blackhole_class = {
 	.csm_read32 = blackhole_csm_read32,
 	.csm_write32 = blackhole_csm_write32,
 	.set_power_state = blackhole_set_power_state,
+	.arc_msg_submit = blackhole_arc_msg_submit,
+	.arc_msg_try_pop = blackhole_arc_msg_try_pop,
 };

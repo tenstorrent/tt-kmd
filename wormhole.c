@@ -252,14 +252,13 @@ static bool wormhole_read_fw_telemetry_offset(u8 __iomem *reset_unit_regs, u32 *
 	return true;
 }
 
-static bool send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
+static int resolve_msg_queue(struct wormhole_device *wh, u32 queue_index, u32 *queue_base_out, u32 *num_entries_out)
 {
 	u8 __iomem *regs = wh->bar4_mapping + RESET_UNIT_START;
 	u32 qcb_ptr;
 	u32 queue_base;
 	u32 queue_info;
-	u32 num_entries;
-	u32 arc_misc_cntl;
+	u32 num_entries, num_queues, queue_stride;
 	unsigned long timeout;
 
 	// Wait for ARC L2 to be running.
@@ -270,35 +269,69 @@ static bool send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
 	} while (time_before(jiffies, timeout));
 
 	if (!arc_l2_is_running(regs))
-		return false;
+		return -ETIMEDOUT;
 
 	// Read QCB pointer from NOC_NODEID_X_1. Zero means FW doesn't support queues.
 	qcb_ptr = ioread32(wh->bar4_mapping + ARC_MSG_QCB_PTR);
 	if (qcb_ptr == 0) {
 		dev_warn_once(&wh->tt.pdev->dev, "ARC message queue not available (this is normal for old FW)\n");
-		return false;
+		return -EOPNOTSUPP;
 	}
 	if (!is_range_within_csm(qcb_ptr, sizeof(u32)))
-		return false;
+		return -EIO;
 
 	if (csm_read32(wh, qcb_ptr + 0, &queue_base) != 0)
-		return false;
+		return -EIO;
 
 	if (csm_read32(wh, qcb_ptr + 4, &queue_info) != 0)
-		return false;
+		return -EIO;
 
-	queue_base += ARC_CSM_BASE;
 	num_entries = queue_info & 0xFF;
+	num_queues = (queue_info >> 8) & 0xFF;
 
-	if (arc_msg_push(&wh->tt, msg, queue_base, num_entries) != 0)
-		return false;
+	if (queue_index >= num_queues)
+		return -EINVAL;
 
-	// Trigger ARC interrupt via IRQ0.
+	queue_stride = ARC_MSG_QUEUE_HEADER_SIZE + 2 * num_entries * sizeof(struct arc_msg);
+	*queue_base_out = queue_base + ARC_CSM_BASE + queue_index * queue_stride;
+	*num_entries_out = num_entries;
+	return 0;
+}
+
+// Trigger ARC interrupt via IRQ0.
+static void trigger_arc_interrupt(struct wormhole_device *wh)
+{
+	u8 __iomem *regs = wh->bar4_mapping + RESET_UNIT_START;
+	u32 arc_misc_cntl;
+
 	arc_misc_cntl = ioread32(regs + ARC_MISC_CNTL_REG);
 	iowrite32(arc_misc_cntl | ARC_MISC_CNTL_IRQ0_MASK, regs + ARC_MISC_CNTL_REG);
+}
 
-	if (arc_msg_pop(&wh->tt, msg, queue_base, num_entries) != 0)
+static bool send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
+{
+	u32 queue_base, num_entries;
+
+	mutex_lock(&wh->tt.msg_mutex);
+
+	if (resolve_msg_queue(wh, 0, &queue_base, &num_entries) != 0) {
+		mutex_unlock(&wh->tt.msg_mutex);
 		return false;
+	}
+
+	if (arc_msg_push(&wh->tt, msg, queue_base, num_entries) != 0) {
+		mutex_unlock(&wh->tt.msg_mutex);
+		return false;
+	}
+
+	trigger_arc_interrupt(wh);
+
+	if (arc_msg_pop(&wh->tt, msg, queue_base, num_entries) != 0) {
+		mutex_unlock(&wh->tt.msg_mutex);
+		return false;
+	}
+
+	mutex_unlock(&wh->tt.msg_mutex);
 
 	return msg->header == 0;
 }
@@ -1141,6 +1174,37 @@ static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct te
 	return 0;
 }
 
+static int wormhole_arc_msg_submit(struct tenstorrent_device *tt_dev, const struct arc_msg *msg, u32 queue_index)
+{
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	u32 queue_base, num_entries;
+	int ret;
+
+	ret = resolve_msg_queue(wh, queue_index, &queue_base, &num_entries);
+	if (ret != 0)
+		return ret;
+
+	ret = arc_msg_push(&wh->tt, msg, queue_base, num_entries);
+	if (ret != 0)
+		return ret;
+
+	trigger_arc_interrupt(wh);
+	return 0;
+}
+
+static int wormhole_arc_msg_try_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 queue_index)
+{
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	u32 queue_base, num_entries;
+	int ret;
+
+	ret = resolve_msg_queue(wh, queue_index, &queue_base, &num_entries);
+	if (ret != 0)
+		return ret;
+
+	return arc_msg_try_pop(&wh->tt, msg, queue_base, num_entries);
+}
+
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
@@ -1167,4 +1231,6 @@ struct tenstorrent_device_class wormhole_class = {
 	.csm_read32 = wormhole_csm_read32,
 	.csm_write32 = wormhole_csm_write32,
 	.set_power_state = wormhole_set_power_state,
+	.arc_msg_submit = wormhole_arc_msg_submit,
+	.arc_msg_try_pop = wormhole_arc_msg_try_pop,
 };

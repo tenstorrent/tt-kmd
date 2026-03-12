@@ -19,6 +19,7 @@
 
 #define MAX_TLB_KINDS 4
 
+struct arc_msg;
 struct tenstorrent_device_class;
 
 struct tenstorrent_device {
@@ -97,6 +98,8 @@ struct tenstorrent_device_class {
 	int (*csm_read32)(struct tenstorrent_device *ttdev, u64 addr, u32 *value);
 	int (*csm_write32)(struct tenstorrent_device *ttdev, u64 addr, u32 value);
 	int (*set_power_state)(struct tenstorrent_device *ttdev, struct tenstorrent_power_state *power_state);
+	int (*arc_msg_submit)(struct tenstorrent_device *ttdev, const struct arc_msg *msg, u32 queue_index);
+	int (*arc_msg_try_pop)(struct tenstorrent_device *ttdev, struct arc_msg *msg, u32 queue_index);
 };
 
 void tenstorrent_device_put(struct tenstorrent_device *);

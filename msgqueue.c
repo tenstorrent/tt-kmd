@@ -11,108 +11,6 @@
 #include "chardev_private.h"
 #include "device.h"
 
-bool arc_msg_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg, u32 queue_base, u32 num_entries)
-{
-	const struct tenstorrent_device_class *cls = tt_dev->dev_class;
-	u32 request_base = queue_base + ARC_MSG_QUEUE_HEADER_SIZE;
-	unsigned long timeout;
-	u32 wptr;
-	u32 slot;
-	u32 req_offset;
-	int i;
-
-	if (cls->csm_read32(tt_dev, ARC_MSG_QUEUE_REQ_WPTR(queue_base), &wptr) != 0)
-		return false;
-
-	timeout = jiffies + msecs_to_jiffies(ARC_MSG_TIMEOUT_MS);
-	for (;;) {
-		u32 rptr;
-		u32 num_occupied;
-
-		if (cls->csm_read32(tt_dev, ARC_MSG_QUEUE_REQ_RPTR(queue_base), &rptr) != 0)
-			return false;
-
-		num_occupied = (wptr - rptr) % (2 * num_entries);
-		if (num_occupied < num_entries)
-			break;
-
-		if (time_after(jiffies, timeout)) {
-			dev_err(&tt_dev->pdev->dev, "Timeout waiting for space in ARC message queue\n");
-			return false;
-		}
-
-		usleep_range(100, 200);
-	}
-
-	slot = wptr % num_entries;
-	req_offset = slot * sizeof(struct arc_msg);
-	for (i = 0; i < 8; ++i) {
-		u32 addr = request_base + req_offset + (i * sizeof(u32));
-		u32 value = (i == 0) ? msg->header : msg->payload[i - 1];
-
-		if (cls->csm_write32(tt_dev, addr, value) != 0)
-			return false;
-	}
-
-	wptr = (wptr + 1) % (2 * num_entries);
-	if (cls->csm_write32(tt_dev, ARC_MSG_QUEUE_REQ_WPTR(queue_base), wptr) != 0)
-		return false;
-
-	return true;
-}
-
-bool arc_msg_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 queue_base, u32 num_entries)
-{
-	const struct tenstorrent_device_class *cls = tt_dev->dev_class;
-	u32 response_base = queue_base + ARC_MSG_QUEUE_HEADER_SIZE + (num_entries * sizeof(struct arc_msg));
-	unsigned long timeout;
-	u32 rptr;
-	u32 slot;
-	u32 response_offset;
-	int i;
-
-	if (cls->csm_read32(tt_dev, ARC_MSG_QUEUE_RES_RPTR(queue_base), &rptr) != 0)
-		return false;
-
-	timeout = jiffies + msecs_to_jiffies(ARC_MSG_TIMEOUT_MS);
-	for (;;) {
-		u32 wptr;
-		u32 num_occupied;
-
-		if (cls->csm_read32(tt_dev, ARC_MSG_QUEUE_RES_WPTR(queue_base), &wptr) != 0)
-			return false;
-
-		num_occupied = (wptr - rptr) % (2 * num_entries);
-		if (num_occupied > 0)
-			break;
-
-		if (time_after(jiffies, timeout)) {
-			dev_err(&tt_dev->pdev->dev, "Timeout waiting for ARC response\n");
-			return false;
-		}
-
-		usleep_range(100, 200);
-	}
-
-	slot = rptr % num_entries;
-	response_offset = slot * sizeof(struct arc_msg);
-	if (cls->csm_read32(tt_dev, response_base + response_offset, &msg->header) != 0)
-		return false;
-
-	for (i = 0; i < 7; ++i) {
-		u32 addr = response_base + response_offset + ((i + 1) * sizeof(u32));
-
-		if (cls->csm_read32(tt_dev, addr, &msg->payload[i]) != 0)
-			return false;
-	}
-
-	rptr = (rptr + 1) % (2 * num_entries);
-	if (cls->csm_write32(tt_dev, ARC_MSG_QUEUE_RES_RPTR(queue_base), rptr) != 0)
-		return false;
-
-	return true;
-}
-
 int arc_msg_try_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg)
 {
 	const struct tenstorrent_device_class *cls = tt_dev->dev_class;
@@ -294,4 +192,92 @@ void arc_msg_pump(struct tenstorrent_device *tt_dev)
 	list_del_init(&next->link);
 	next->state = ARC_MSG_SUBMITTED;
 	tt_dev->arc_msg_inflight = next;
+}
+
+// Synchronous ARC message send for internal kernel callers. Preempts the user
+// SW queue: only waits for the single message currently in the FW queue (if
+// any), then pushes directly. User QUEUED messages are not advanced — the
+// kernel message jumps ahead of them.
+//
+// timeout_ms covers the total wall time including draining any prior inflight
+// message and waiting for the firmware response.
+//
+// Returns 0 on success, -EREMOTEIO if FW returned a nonzero status, -ETIMEDOUT
+// if the deadline expired, or a negative errno from try_push/try_pop on CSM
+// failure.
+int arc_msg_send_sync(struct tenstorrent_device *tt_dev, struct arc_msg *msg, unsigned int timeout_ms)
+{
+	unsigned long deadline = jiffies + msecs_to_jiffies(timeout_ms);
+	struct arc_msg response;
+	int ret;
+
+	if (tt_dev->arc_msg_queue_base == 0)
+		return -EOPNOTSUPP;
+
+	mutex_lock(&tt_dev->arc_msg_mutex);
+
+	// Drain the inflight slot without advancing the SW queue. The mutex is held
+	// for the entire duration (drain + push + response wait) so no user message
+	// can interleave on the FW queue.
+	//
+	// We don't call arc_msg_pump() here because its step 2 would submit the
+	// next user message from the SW queue.
+	while (tt_dev->arc_msg_inflight || tt_dev->arc_msg_inflight_abandoned) {
+		ret = arc_msg_try_pop(tt_dev, &response);
+		if (ret == 0) {
+			struct chardev_msg *inflight = tt_dev->arc_msg_inflight;
+
+			if (tt_dev->arc_msg_inflight_abandoned) {
+				tt_dev->arc_msg_inflight_abandoned = false;
+			} else {
+				inflight->response = response;
+				inflight->state = ARC_MSG_COMPLETED;
+				tt_dev->arc_msg_inflight = NULL;
+			}
+			continue;
+		}
+		if (ret != -EAGAIN)
+			goto out;
+		if (time_after(jiffies, deadline)) {
+			ret = -ETIMEDOUT;
+			goto out;
+		}
+		usleep_range(100, 200);
+	}
+
+	// Push directly to FW, bypassing the SW queue.
+	ret = arc_msg_try_push(tt_dev, msg);
+	if (ret)
+		goto out;
+
+	tt_dev->dev_class->arc_msg_trigger(tt_dev);
+
+	// Poll for the response. The mutex is held throughout so no user message
+	// can interleave and steal our response from the FIFO.
+	//
+	// If we bail without popping (timeout or CSM error), the FW may still write
+	// a response later. Set the abandoned flag so the next caller drains it
+	// before using the queue.
+	for (;;) {
+		ret = arc_msg_try_pop(tt_dev, &response);
+		if (ret == 0)
+			break;
+		if (ret != -EAGAIN) {
+			tt_dev->arc_msg_inflight_abandoned = true;
+			goto out;
+		}
+		if (time_after(jiffies, deadline)) {
+			ret = -ETIMEDOUT;
+			tt_dev->arc_msg_inflight_abandoned = true;
+			goto out;
+		}
+		usleep_range(100, 200);
+	}
+
+	*msg = response;
+	ret = (response.header == 0) ? 0 : -EREMOTEIO;
+
+out:
+	mutex_unlock(&tt_dev->arc_msg_mutex);
+	return ret;
 }

@@ -1027,6 +1027,13 @@ static int blackhole_set_power_state(struct tenstorrent_device *tt_dev, struct t
 	return send_arc_message(bh, &msg);
 }
 
+static void blackhole_arc_msg_trigger(struct tenstorrent_device *tt_dev)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+
+	noc_write32(bh, ARC_X, ARC_Y, ARC_MSI_FIFO, 0, 0);
+}
+
 struct tenstorrent_device_class blackhole_class = {
 	.name = "Blackhole",
 	.instance_size = sizeof(struct blackhole_device),
@@ -1052,4 +1059,5 @@ struct tenstorrent_device_class blackhole_class = {
 	.csm_read32 = blackhole_csm_read32,
 	.csm_write32 = blackhole_csm_write32,
 	.set_power_state = blackhole_set_power_state,
+	.arc_msg_trigger = blackhole_arc_msg_trigger,
 };

@@ -6,6 +6,7 @@
 
 #include <linux/types.h>
 
+struct chardev_msg;
 struct tenstorrent_device;
 
 struct arc_msg {
@@ -26,5 +27,8 @@ bool arc_msg_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 que
 
 int arc_msg_try_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg);
 int arc_msg_try_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg);
+
+void arc_msg_pump(struct tenstorrent_device *tt_dev);
+void arc_msg_abandon(struct tenstorrent_device *tt_dev, struct chardev_msg *msg);
 
 #endif

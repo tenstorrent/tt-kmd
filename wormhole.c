@@ -1074,6 +1074,16 @@ static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct te
 	return 0;
 }
 
+static void wormhole_arc_msg_trigger(struct tenstorrent_device *tt_dev)
+{
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	u8 __iomem *regs = wh->bar4_mapping + RESET_UNIT_START;
+	u32 arc_misc_cntl;
+
+	arc_misc_cntl = ioread32(regs + ARC_MISC_CNTL_REG);
+	iowrite32(arc_misc_cntl | ARC_MISC_CNTL_IRQ0_MASK, regs + ARC_MISC_CNTL_REG);
+}
+
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
@@ -1102,4 +1112,5 @@ struct tenstorrent_device_class wormhole_class = {
 	.csm_read32 = wormhole_csm_read32,
 	.csm_write32 = wormhole_csm_write32,
 	.set_power_state = wormhole_set_power_state,
+	.arc_msg_trigger = wormhole_arc_msg_trigger,
 };

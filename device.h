@@ -105,6 +105,7 @@ struct tenstorrent_device_class {
 	int (*set_power_state)(struct tenstorrent_device *ttdev, struct tenstorrent_power_state *power_state);
 	int (*read_telemetry_tag)(struct tenstorrent_device *ttdev, u16 tag_id, u32 *value);
 	int (*probe_telemetry)(struct tenstorrent_device *ttdev);
+	void (*arc_msg_trigger)(struct tenstorrent_device *ttdev);
 };
 
 void tenstorrent_device_put(struct tenstorrent_device *);

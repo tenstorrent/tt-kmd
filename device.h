@@ -19,6 +19,7 @@
 
 #define MAX_TLB_KINDS 4
 
+struct chardev_msg;
 struct tenstorrent_device_class;
 
 struct tenstorrent_device {
@@ -64,6 +65,9 @@ struct tenstorrent_device {
 	struct mutex arc_msg_mutex;
 	u32 arc_msg_queue_base;		// CSM address of the message queue, 0 = not available
 	u32 arc_msg_num_entries;	// Number of slots per queue
+	struct list_head arc_msg_queue;	// SW queue of chardev_msg in QUEUED state
+	struct chardev_msg *arc_msg_inflight;	// Message currently in FW queue, or NULL
+	bool arc_msg_inflight_abandoned;	// Inflight message was abandoned by user
 };
 
 struct tlb_descriptor;

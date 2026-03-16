@@ -12,6 +12,8 @@
 #include <linux/cdev.h>
 #include <linux/slab.h>
 #include <linux/pci.h>
+#include <linux/delay.h>
+#include <linux/jiffies.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
 #include <linux/debugfs.h>
@@ -21,6 +23,7 @@
 #include "device.h"
 #include "enumerate.h"
 #include "ioctl.h"
+#include "msgqueue.h"
 #include "pcie.h"
 #include "memory.h"
 #include "module.h"
@@ -462,6 +465,138 @@ static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorre
 	return tenstorrent_set_aggregated_power_state(tt_dev);
 }
 
+#define TENSTORRENT_ARC_MSG_OP_MASK (TENSTORRENT_ARC_MSG_POST | TENSTORRENT_ARC_MSG_POLL | TENSTORRENT_ARC_MSG_ABANDON)
+
+static long ioctl_arc_msg(struct chardev_private *priv, struct tenstorrent_arc_msg __user *arg)
+{
+	const size_t minsz = offsetofend(struct tenstorrent_arc_msg, message);
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct chardev_msg *msg = &priv->msg;
+	struct tenstorrent_arc_msg data = {0};
+	size_t copysz;
+	u32 op;
+	long ret;
+
+	// Step 1: read argsz.
+	if (get_user(data.argsz, &arg->argsz))
+		return -EFAULT;
+
+	if (data.argsz < minsz)
+		return -EINVAL;
+
+	// Step 2: copy the overlapping portion.
+	copysz = min_t(size_t, data.argsz, sizeof(data));
+	if (copy_from_user(&data, arg, copysz))
+		return -EFAULT;
+
+	// Step 3: reject unknown trailing bytes.
+	if (data.argsz > sizeof(data)) {
+		if (check_zeroed_user((char __user *)arg + sizeof(data), data.argsz - sizeof(data)) <= 0)
+			return -E2BIG;
+	}
+
+	// Step 4: validate flags — reject unknown bits and invalid combinations.
+	op = data.flags & TENSTORRENT_ARC_MSG_OP_MASK;
+	if (data.flags != op)
+		return -EINVAL;
+
+	if (op == 0)
+		return -EINVAL;
+
+	// ABANDON is mutually exclusive with POST and POLL.
+	if ((op & TENSTORRENT_ARC_MSG_ABANDON) && (op & ~TENSTORRENT_ARC_MSG_ABANDON))
+		return -EINVAL;
+
+	// Step 5: validate reserved fields.
+	if (data.queue_index != 0)
+		return -EINVAL;
+
+	if (data.reserved0 != 0)
+		return -EINVAL;
+
+	// Check that the queue is available.
+	if (tt_dev->arc_msg_queue_base == 0)
+		return -EOPNOTSUPP;
+
+	mutex_lock(&tt_dev->arc_msg_mutex);
+
+	// ABANDON
+	if (op & TENSTORRENT_ARC_MSG_ABANDON) {
+		arc_msg_abandon(tt_dev, msg);
+		mutex_unlock(&tt_dev->arc_msg_mutex);
+		return 0;
+	}
+
+	// POST
+	if (op & TENSTORRENT_ARC_MSG_POST) {
+		if (msg->state != ARC_MSG_IDLE) {
+			mutex_unlock(&tt_dev->arc_msg_mutex);
+			return -EBUSY;
+		}
+
+		BUILD_BUG_ON(sizeof(data.message) != sizeof(msg->request));
+		memcpy(&msg->request, data.message, sizeof(msg->request));
+		msg->state = ARC_MSG_QUEUED;
+		list_add_tail(&msg->link, &tt_dev->arc_msg_queue);
+
+		arc_msg_pump(tt_dev);
+
+		// For POST|POLL, poll for up to the default timeout so fast messages
+		// complete in a single syscall.
+		if (op & TENSTORRENT_ARC_MSG_POLL) {
+			unsigned long deadline = jiffies + msecs_to_jiffies(ARC_MSG_TIMEOUT_MS);
+
+			while (msg->state != ARC_MSG_COMPLETED) {
+				mutex_unlock(&tt_dev->arc_msg_mutex);
+				usleep_range(100, 200);
+				mutex_lock(&tt_dev->arc_msg_mutex);
+				arc_msg_pump(tt_dev);
+				if (time_after(jiffies, deadline))
+					break;
+			}
+		}
+	}
+
+	// POLL (standalone or as part of POST|POLL)
+	if (op & TENSTORRENT_ARC_MSG_POLL) {
+		arc_msg_pump(tt_dev);
+
+		switch (msg->state) {
+		case ARC_MSG_COMPLETED:
+			memcpy(data.message, &msg->response, sizeof(data.message));
+			ret = (msg->response.header == 0) ? 0 : -EREMOTEIO;
+			msg->state = ARC_MSG_IDLE;
+			break;
+		case ARC_MSG_QUEUED:
+		case ARC_MSG_SUBMITTED:
+			ret = -EAGAIN;
+			break;
+		case ARC_MSG_IDLE:
+			// IDLE after standalone POLL means no message was posted.
+			// IDLE after POST|POLL can't happen (POST just set QUEUED).
+			ret = (op & TENSTORRENT_ARC_MSG_POST) ? -EAGAIN : -ESRCH;
+			break;
+		default:
+			ret = -EINVAL;
+			break;
+		}
+
+		mutex_unlock(&tt_dev->arc_msg_mutex);
+
+		// Copy response back on success or EREMOTEIO.
+		if (ret == 0 || ret == -EREMOTEIO) {
+			if (copy_to_user(arg, &data, copysz))
+				return -EFAULT;
+		}
+
+		return ret;
+	}
+
+	// POST-only (no POLL flag) — already done.
+	mutex_unlock(&tt_dev->arc_msg_mutex);
+	return 0;
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	struct chardev_private *priv = f->private_data;
@@ -561,6 +696,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			ret = ioctl_set_power_state(priv, (struct tenstorrent_power_state __user *)arg);
 			break;
 
+		case TENSTORRENT_IOCTL_ARC_MSG:
+			ret = ioctl_arc_msg(priv, (struct tenstorrent_arc_msg __user *)arg);
+			break;
+
 		default:
 			ret = -EINVAL;
 			break;
@@ -642,6 +781,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	INIT_LIST_HEAD(&private_data->pinnings);
 	INIT_LIST_HEAD(&private_data->peer_mappings);
 	INIT_LIST_HEAD(&private_data->vma_list);
+	INIT_LIST_HEAD(&private_data->msg.link);
 	mutex_init(&private_data->vma_lock);
 
 	kref_get(&tt_dev->kref);
@@ -709,6 +849,11 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	// Release all TLBs held by this file descriptor.
 	for_each_set_bit(bitpos, priv->tlbs, TENSTORRENT_MAX_INBOUND_TLBS)
 		tenstorrent_device_free_tlb(tt_dev, bitpos);
+
+	// Abandon any outstanding ARC message before freeing the fd.
+	mutex_lock(&tt_dev->arc_msg_mutex);
+	arc_msg_abandon(tt_dev, &priv->msg);
+	mutex_unlock(&tt_dev->arc_msg_mutex);
 
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_del(&priv->open_fd);

@@ -671,67 +671,8 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 	return 0;
 }
 
-static int send_arc_message(struct blackhole_device *bh, struct arc_msg *msg)
-{
-	u32 boot_status;
-	u32 queue_ctrl_addr;
-	u32 queue_base;
-	u32 queue_info;
-	u32 num_entries;
-	int ret;
-	unsigned long timeout;
-
-	mutex_lock(&bh->tt.arc_msg_mutex);
-
-	timeout = jiffies + msecs_to_jiffies(ARC_MSG_READY_MS);
-	do {
-		boot_status = noc_read32(bh, ARC_X, ARC_Y, ARC_BOOT_STATUS, 0);
-		if (boot_status == 0xFFFFFFFFu) {
-			ret = -EIO; // NOC is hung
-			goto out;
-		}
-		if (boot_status & ARC_BOOT_STATUS_READY_FOR_MSG)
-			break;
-	} while (time_before(jiffies, timeout));
-
-	if (!(boot_status & ARC_BOOT_STATUS_READY_FOR_MSG)) {
-		ret = -ETIMEDOUT;
-		goto out;
-	}
-
-	queue_ctrl_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_MSG_QCB_PTR, 0);
-
-	if (csm_read32(bh, queue_ctrl_addr + 0, &queue_base) != 0 ||
-	    csm_read32(bh, queue_ctrl_addr + 4, &queue_info) != 0) {
-		ret = -EIO;
-		goto out;
-	}
-
-	num_entries = queue_info & 0xFF;
-
-	if (!arc_msg_push(&bh->tt, msg, queue_base, num_entries)) {
-		ret = -ETIMEDOUT;
-		goto out;
-	}
-
-	// Trigger ARC interrupt
-	noc_write32(bh, ARC_X, ARC_Y, ARC_MSI_FIFO, 0, 0);
-
-	if (!arc_msg_pop(&bh->tt, msg, queue_base, num_entries)) {
-		ret = -ETIMEDOUT;
-		goto out;
-	}
-
-	ret = (msg->header == 0) ? 0 : -EREMOTEIO;
-
-out:
-	mutex_unlock(&bh->tt.arc_msg_mutex);
-	return ret;
-}
-
 static bool blackhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 {
-	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	struct pci_dev *pdev = tt_dev->pdev;
 
 	if (reset_flag == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
@@ -739,7 +680,7 @@ static bool blackhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 		u16 reset_arg = 3; // Argument for ASIC + M3 reset
 
 		msg.header = ARC_MSG_TYPE_TEST;
-		if (send_arc_message(bh, &msg) != 0) {
+		if (arc_msg_send_sync(tt_dev, &msg, ARC_MSG_TIMEOUT_MS) != 0) {
 			dev_warn(&tt_dev->pdev->dev, "Couldn't communicate with firmware; NOC is likely hung.\n");
 			return false;
 		}
@@ -749,7 +690,7 @@ static bool blackhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 		memset(&msg, 0, sizeof(msg));
 		msg.header = ARC_MSG_TYPE_TRIGGER_RESET;
 		msg.payload[0] = reset_arg;
-		send_arc_message(bh, &msg);
+		arc_msg_send_sync(tt_dev, &msg, ARC_MSG_TIMEOUT_MS);
 		return true; // Possibly a lie...
 	} else if (reset_flag == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
 		set_reset_marker(pdev);
@@ -848,17 +789,17 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 
 	pcie_set_readrq(pdev, MAX_MRRS);
 
+	blackhole_init_arc_msg_queue(tt_dev);
+
 	msg.header = ARC_MSG_TYPE_ASIC_STATE0;
-	if (send_arc_message(bh, &msg) != 0)
+	if (arc_msg_send_sync(tt_dev, &msg, ARC_MSG_TIMEOUT_MS) != 0)
 		dev_err(&tt_dev->pdev->dev, "Failed to send ARC message for A0 state\n");
 
 	memset(&msg, 0, sizeof(msg));
 	msg.header = ARC_MSG_TYPE_SET_WDT_TIMEOUT;
 	msg.payload[0] = 1000 * auto_reset_timeout; // Convert seconds to milliseconds
-	if (send_arc_message(bh, &msg) != 0)
+	if (arc_msg_send_sync(tt_dev, &msg, ARC_MSG_TIMEOUT_MS) != 0)
 		dev_warn(&tt_dev->pdev->dev, "Failed to set ARC watchdog timeout (this is normal for old FW)\n");
-
-	blackhole_init_arc_msg_queue(tt_dev);
 
 	return true;
 }
@@ -918,14 +859,13 @@ static void blackhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
 
 static void blackhole_cleanup_hardware(struct tenstorrent_device *tt_dev)
 {
-	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	struct arc_msg msg = { 0 };
 
 	if (tt_dev->detached)
 		return;
 
 	msg.header = ARC_MSG_TYPE_ASIC_STATE3;
-	if (send_arc_message(bh, &msg) != 0)
+	if (arc_msg_send_sync(tt_dev, &msg, ARC_MSG_TIMEOUT_MS) != 0)
 		dev_err(&tt_dev->dev, "Failed to send ARC message for A3 state\n");
 }
 
@@ -1017,14 +957,13 @@ static void blackhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 
 
 static int blackhole_set_power_state(struct tenstorrent_device *tt_dev, struct tenstorrent_power_state *power_state)
 {
-	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	struct arc_msg msg = {0};
 
 	msg.header = ARC_MSG_TYPE_POWER_SETTING | (power_state->validity << 8) | (power_state->power_flags << 16);
 	BUILD_BUG_ON(sizeof(power_state->power_settings) != sizeof(msg.payload));
 	memcpy(msg.payload, power_state->power_settings, sizeof(msg.payload));
 
-	return send_arc_message(bh, &msg);
+	return arc_msg_send_sync(tt_dev, &msg, ARC_MSG_TIMEOUT_MS);
 }
 
 static void blackhole_arc_msg_trigger(struct tenstorrent_device *tt_dev)

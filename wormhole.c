@@ -836,6 +836,9 @@ fail_bar2:
 
 static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	u32 qcb_ptr;
+	u32 queue_base;
+	u32 queue_info;
 
 	map_bar4_to_system_registers(wh_dev);
 
@@ -845,6 +848,17 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 		update_device_index(wh_dev);
 		wormhole_complete_pcie_init(&wh_dev->tt, reset_unit_regs(wh_dev));
 		wormhole_send_arc_fw_message_with_args(reset_unit_regs(wh_dev), WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT, auto_reset_timeout, 0, 10000, NULL);
+
+		// Cache the message queue parameters for the async pump.
+		qcb_ptr = ioread32(wh_dev->bar4_mapping + ARC_MSG_QCB_PTR);
+		if (qcb_ptr != 0 && is_range_within_csm(qcb_ptr, sizeof(u32)) &&
+		    csm_read32(wh_dev, qcb_ptr, &queue_base) == 0 &&
+		    csm_read32(wh_dev, qcb_ptr + 4, &queue_info) == 0) {
+			tt_dev->arc_msg_queue_base = queue_base + ARC_CSM_BASE;
+			tt_dev->arc_msg_num_entries = queue_info & 0xFF;
+		} else {
+			dev_warn_once(&tt_dev->pdev->dev, "ARC message queue not available (this is normal for old FW)\n");
+		}
 	}
 
 	return true;

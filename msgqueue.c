@@ -110,3 +110,86 @@ bool arc_msg_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 que
 
 	return true;
 }
+
+int arc_msg_try_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg)
+{
+	const struct tenstorrent_device_class *cls = tt_dev->dev_class;
+	u32 queue_base = tt_dev->arc_msg_queue_base;
+	u32 num_entries = tt_dev->arc_msg_num_entries;
+	u32 request_base = queue_base + ARC_MSG_QUEUE_HEADER_SIZE;
+	u32 wptr, rptr, num_occupied;
+	u32 slot, req_offset;
+	int i, ret;
+
+	if (queue_base == 0)
+		return -EOPNOTSUPP;
+
+	ret = cls->csm_read32(tt_dev, ARC_MSG_QUEUE_REQ_WPTR(queue_base), &wptr);
+	if (ret)
+		return ret;
+
+	ret = cls->csm_read32(tt_dev, ARC_MSG_QUEUE_REQ_RPTR(queue_base), &rptr);
+	if (ret)
+		return ret;
+
+	num_occupied = (wptr - rptr) % (2 * num_entries);
+	if (num_occupied >= num_entries)
+		return -EAGAIN;
+
+	slot = wptr % num_entries;
+	req_offset = slot * sizeof(struct arc_msg);
+	for (i = 0; i < 8; ++i) {
+		u32 addr = request_base + req_offset + (i * sizeof(u32));
+		u32 value = (i == 0) ? msg->header : msg->payload[i - 1];
+
+		ret = cls->csm_write32(tt_dev, addr, value);
+		if (ret)
+			return ret;
+	}
+
+	wptr = (wptr + 1) % (2 * num_entries);
+	return cls->csm_write32(tt_dev, ARC_MSG_QUEUE_REQ_WPTR(queue_base), wptr);
+}
+
+int arc_msg_try_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg)
+{
+	const struct tenstorrent_device_class *cls = tt_dev->dev_class;
+	u32 queue_base = tt_dev->arc_msg_queue_base;
+	u32 num_entries = tt_dev->arc_msg_num_entries;
+	u32 response_base = queue_base + ARC_MSG_QUEUE_HEADER_SIZE + (num_entries * sizeof(struct arc_msg));
+	u32 rptr, wptr, num_occupied;
+	u32 slot, response_offset;
+	int i, ret;
+
+	if (queue_base == 0)
+		return -EOPNOTSUPP;
+
+	ret = cls->csm_read32(tt_dev, ARC_MSG_QUEUE_RES_RPTR(queue_base), &rptr);
+	if (ret)
+		return ret;
+
+	ret = cls->csm_read32(tt_dev, ARC_MSG_QUEUE_RES_WPTR(queue_base), &wptr);
+	if (ret)
+		return ret;
+
+	num_occupied = (wptr - rptr) % (2 * num_entries);
+	if (num_occupied == 0)
+		return -EAGAIN;
+
+	slot = rptr % num_entries;
+	response_offset = slot * sizeof(struct arc_msg);
+	ret = cls->csm_read32(tt_dev, response_base + response_offset, &msg->header);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < 7; ++i) {
+		u32 addr = response_base + response_offset + ((i + 1) * sizeof(u32));
+
+		ret = cls->csm_read32(tt_dev, addr, &msg->payload[i]);
+		if (ret)
+			return ret;
+	}
+
+	rptr = (rptr + 1) % (2 * num_entries);
+	return cls->csm_write32(tt_dev, ARC_MSG_QUEUE_RES_RPTR(queue_base), rptr);
+}

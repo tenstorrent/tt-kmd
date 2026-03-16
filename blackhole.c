@@ -809,9 +809,34 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	return true;
 }
 
-static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
+// Wait for ARC readiness and cache the message queue parameters.
+static void blackhole_init_arc_msg_queue(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	unsigned long timeout = jiffies + msecs_to_jiffies(ARC_MSG_READY_MS);
+	u32 boot_status, queue_ctrl_addr, queue_base, queue_info;
+
+	do {
+		boot_status = noc_read32(bh, ARC_X, ARC_Y, ARC_BOOT_STATUS, 0);
+		if (boot_status == 0xFFFFFFFFu)
+			return; // NOC is hung
+		if (boot_status & ARC_BOOT_STATUS_READY_FOR_MSG)
+			break;
+	} while (time_before(jiffies, timeout));
+
+	if (!(boot_status & ARC_BOOT_STATUS_READY_FOR_MSG))
+		return;
+
+	queue_ctrl_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_MSG_QCB_PTR, 0);
+	if (csm_read32(bh, queue_ctrl_addr, &queue_base) == 0 &&
+	    csm_read32(bh, queue_ctrl_addr + 4, &queue_info) == 0) {
+		tt_dev->arc_msg_queue_base = queue_base;
+		tt_dev->arc_msg_num_entries = queue_info & 0xFF;
+	}
+}
+
+static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
+{
 	struct pci_dev *pdev = tt_dev->pdev;
 	struct arc_msg msg = { 0 };
 	bool is_galaxy = (pdev->subsystem_device == PCI_SUBSYSTEM_DEVICE_GALAXY);
@@ -832,6 +857,8 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 	msg.payload[0] = 1000 * auto_reset_timeout; // Convert seconds to milliseconds
 	if (send_arc_message(bh, &msg) != 0)
 		dev_warn(&tt_dev->pdev->dev, "Failed to set ARC watchdog timeout (this is normal for old FW)\n");
+
+	blackhole_init_arc_msg_queue(tt_dev);
 
 	return true;
 }

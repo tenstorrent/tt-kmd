@@ -62,6 +62,8 @@ struct tenstorrent_device {
 	struct attribute_group telemetry_group;
 
 	struct mutex arc_msg_mutex;
+	u32 arc_msg_queue_base;		// CSM address of the message queue, 0 = not available
+	u32 arc_msg_num_entries;	// Number of slots per queue
 };
 
 struct tlb_descriptor;

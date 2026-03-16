@@ -69,6 +69,8 @@ struct tenstorrent_device {
 	u64 telemetry_tag_cache[TELEM_TAG_CACHE_SIZE];
 
 	struct mutex arc_msg_mutex;
+	u32 arc_msg_queue_base;		// CSM address of the message queue, 0 = not available
+	u32 arc_msg_num_entries;	// Number of slots per queue
 };
 
 struct tlb_descriptor;

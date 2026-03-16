@@ -27,6 +27,7 @@
 #define TENSTORRENT_IOCTL_CONFIGURE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 13)
 #define TENSTORRENT_IOCTL_SET_NOC_CLEANUP		_IO(TENSTORRENT_IOCTL_MAGIC, 14)
 #define TENSTORRENT_IOCTL_SET_POWER_STATE		_IO(TENSTORRENT_IOCTL_MAGIC, 15)
+#define TENSTORRENT_IOCTL_ARC_MSG			_IO(TENSTORRENT_IOCTL_MAGIC, 16)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -406,6 +407,52 @@ struct tenstorrent_power_state {
 #define TT_POWER_FLAG_TENSIX_ENABLE     (1U << 2) /* 1=Enable Tensix, 0=Clock Gate Tensix */
 #define TT_POWER_FLAG_L2CPU_ENABLE      (1U << 3) /* 1=Enable L2CPU,  0=Clock Gate L2CPU */
 	__u16 power_settings[14];
+};
+
+/**
+ * TENSTORRENT_IOCTL_ARC_MSG - Asynchronous ARC firmware messaging
+ *
+ * Asynchronous interface for communicating with the on-chip ARC management
+ * processor via the firmware message queue. Each fd may have at most one
+ * outstanding message. The @flags field selects the operation:
+ *
+ * POST: Submit @message to the firmware queue. Returns -EBUSY if this fd
+ *   already has an outstanding message.
+ *
+ * POLL: Check for a firmware response. On success or -EREMOTEIO, the
+ *   response is written into @message. Returns -EAGAIN if the message is
+ *   still pending, -ESRCH if no message is outstanding.
+ *
+ * POST|POLL: Submit and try to return the response in one call. A brief
+ *   kernel-side wait gives the firmware time to process fast operations.
+ *   Returns -EAGAIN if the response is not yet ready.
+ *
+ * ABANDON: Cancel any outstanding message for this fd. If the message is
+ *   already in the firmware queue, the response will be silently discarded
+ *   when it arrives. Always returns 0.
+ *
+ * On -EREMOTEIO the firmware returned a nonzero status; @message still
+ * contains the response (inspect message[0] for the firmware status code).
+ * On other errors @message is undefined.
+ *
+ * An outstanding message is implicitly abandoned when the fd is closed.
+ *
+ * @argsz: Must be at least sizeof(struct tenstorrent_arc_msg).
+ * @flags: TENSTORRENT_ARC_MSG_POST/POLL/ABANDON, bitwise OR. See above.
+ * @queue_index: Firmware queue to target. Must be 0 (reserved for future
+ *   multi-queue support).
+ * @reserved0: Must be 0.
+ * @message: 8 x u32 request (POST) or response (POLL).
+ */
+struct tenstorrent_arc_msg {
+	__u32 argsz;
+	__u32 flags;
+#define TENSTORRENT_ARC_MSG_POST	(1 << 0)
+#define TENSTORRENT_ARC_MSG_POLL	(1 << 1)
+#define TENSTORRENT_ARC_MSG_ABANDON	(1 << 2)
+	__u32 queue_index;
+	__u32 reserved0;
+	__u32 message[8];
 };
 
 #endif

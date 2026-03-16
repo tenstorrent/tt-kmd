@@ -678,37 +678,55 @@ static int send_arc_message(struct blackhole_device *bh, struct arc_msg *msg)
 	u32 queue_base;
 	u32 queue_info;
 	u32 num_entries;
-	unsigned long timeout = jiffies + msecs_to_jiffies(ARC_MSG_READY_MS);
+	int ret;
+	unsigned long timeout;
 
+	mutex_lock(&bh->tt.arc_msg_mutex);
+
+	timeout = jiffies + msecs_to_jiffies(ARC_MSG_READY_MS);
 	do {
 		boot_status = noc_read32(bh, ARC_X, ARC_Y, ARC_BOOT_STATUS, 0);
-		if (boot_status == 0xFFFFFFFFu)
-			return -EIO;
+		if (boot_status == 0xFFFFFFFFu) {
+			ret = -EIO; // NOC is hung
+			goto out;
+		}
 		if (boot_status & ARC_BOOT_STATUS_READY_FOR_MSG)
 			break;
 	} while (time_before(jiffies, timeout));
 
-	if (!(boot_status & ARC_BOOT_STATUS_READY_FOR_MSG))
-		return -ETIMEDOUT;
+	if (!(boot_status & ARC_BOOT_STATUS_READY_FOR_MSG)) {
+		ret = -ETIMEDOUT;
+		goto out;
+	}
 
 	queue_ctrl_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_MSG_QCB_PTR, 0);
 
 	if (csm_read32(bh, queue_ctrl_addr + 0, &queue_base) != 0 ||
-	    csm_read32(bh, queue_ctrl_addr + 4, &queue_info) != 0)
-		return -EIO;
+	    csm_read32(bh, queue_ctrl_addr + 4, &queue_info) != 0) {
+		ret = -EIO;
+		goto out;
+	}
 
 	num_entries = queue_info & 0xFF;
 
-	if (!arc_msg_push(&bh->tt, msg, queue_base, num_entries))
-		return -ETIMEDOUT;
+	if (!arc_msg_push(&bh->tt, msg, queue_base, num_entries)) {
+		ret = -ETIMEDOUT;
+		goto out;
+	}
 
 	// Trigger ARC interrupt
 	noc_write32(bh, ARC_X, ARC_Y, ARC_MSI_FIFO, 0, 0);
 
-	if (!arc_msg_pop(&bh->tt, msg, queue_base, num_entries))
-		return -ETIMEDOUT;
+	if (!arc_msg_pop(&bh->tt, msg, queue_base, num_entries)) {
+		ret = -ETIMEDOUT;
+		goto out;
+	}
 
-	return (msg->header == 0) ? 0 : -EREMOTEIO;
+	ret = (msg->header == 0) ? 0 : -EREMOTEIO;
+
+out:
+	mutex_unlock(&bh->tt.arc_msg_mutex);
+	return ret;
 }
 
 static bool blackhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)

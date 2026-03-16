@@ -261,6 +261,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	memcpy(tt_dev->tlb_counts, device_class->tlb_counts, sizeof(tt_dev->tlb_counts));
 
 	mutex_init(&tt_dev->chardev_mutex);
+	mutex_init(&tt_dev->arc_msg_mutex);
 	mutex_init(&tt_dev->iatu_mutex);
 
 	// Use dma_address_bits from module parameter or device class for coherent

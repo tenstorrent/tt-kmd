@@ -260,7 +260,10 @@ static int send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
 	u32 queue_info;
 	u32 num_entries;
 	u32 arc_misc_cntl;
+	int ret;
 	unsigned long timeout;
+
+	mutex_lock(&wh->tt.arc_msg_mutex);
 
 	// Wait for ARC L2 to be running.
 	timeout = jiffies + msecs_to_jiffies(ARC_MSG_READY_MS);
@@ -269,36 +272,51 @@ static int send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
 			break;
 	} while (time_before(jiffies, timeout));
 
-	if (!arc_l2_is_running(regs))
-		return -ETIMEDOUT;
+	if (!arc_l2_is_running(regs)) {
+		ret = -ETIMEDOUT;
+		goto out;
+	}
 
 	// Read QCB pointer from NOC_NODEID_X_1. Zero means FW doesn't support queues.
 	qcb_ptr = ioread32(wh->bar4_mapping + ARC_MSG_QCB_PTR);
 	if (qcb_ptr == 0) {
 		dev_warn_once(&wh->tt.pdev->dev, "ARC message queue not available (this is normal for old FW)\n");
-		return -EOPNOTSUPP;
+		ret = -EOPNOTSUPP;
+		goto out;
 	}
-	if (!is_range_within_csm(qcb_ptr, sizeof(u32)))
-		return -EIO;
+	if (!is_range_within_csm(qcb_ptr, sizeof(u32))) {
+		ret = -EIO;
+		goto out;
+	}
 
 	if (csm_read32(wh, qcb_ptr + 0, &queue_base) != 0 ||
-	    csm_read32(wh, qcb_ptr + 4, &queue_info) != 0)
-		return -EIO;
+	    csm_read32(wh, qcb_ptr + 4, &queue_info) != 0) {
+		ret = -EIO;
+		goto out;
+	}
 
 	queue_base += ARC_CSM_BASE;
 	num_entries = queue_info & 0xFF;
 
-	if (!arc_msg_push(&wh->tt, msg, queue_base, num_entries))
-		return -ETIMEDOUT;
+	if (!arc_msg_push(&wh->tt, msg, queue_base, num_entries)) {
+		ret = -ETIMEDOUT;
+		goto out;
+	}
 
 	// Trigger ARC interrupt via IRQ0.
 	arc_misc_cntl = ioread32(regs + ARC_MISC_CNTL_REG);
 	iowrite32(arc_misc_cntl | ARC_MISC_CNTL_IRQ0_MASK, regs + ARC_MISC_CNTL_REG);
 
-	if (!arc_msg_pop(&wh->tt, msg, queue_base, num_entries))
-		return -ETIMEDOUT;
+	if (!arc_msg_pop(&wh->tt, msg, queue_base, num_entries)) {
+		ret = -ETIMEDOUT;
+		goto out;
+	}
 
-	return (msg->header == 0) ? 0 : -EREMOTEIO;
+	ret = (msg->header == 0) ? 0 : -EREMOTEIO;
+
+out:
+	mutex_unlock(&wh->tt.arc_msg_mutex);
+	return ret;
 }
 
 static bool wormhole_shutdown_firmware(struct pci_dev *pdev, u8 __iomem *reset_unit_regs)

@@ -60,6 +60,8 @@ struct tenstorrent_device {
 
 	struct attribute **telemetry_attrs;
 	struct attribute_group telemetry_group;
+
+	struct mutex arc_msg_mutex;
 };
 
 struct tlb_descriptor;

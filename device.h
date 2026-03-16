@@ -67,6 +67,8 @@ struct tenstorrent_device {
 	// The stored value is arch-specific: WH stores a BAR4 sysreg offset,
 	// BH stores a raw CSM address for NOC reads.
 	u64 telemetry_tag_cache[TELEM_TAG_CACHE_SIZE];
+
+	struct mutex arc_msg_mutex;
 };
 
 struct tlb_descriptor;

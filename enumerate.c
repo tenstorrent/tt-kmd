@@ -32,6 +32,49 @@
 
 static DEFINE_XARRAY_ALLOC(tenstorrent_dev_xa);
 
+// Galaxy systems have 32 Tenstorrent chips across 4 boards with 8 chips each.
+// The high nibble of the PCI bus number identifies the board; the low nibble
+// identifies the chip within that board (1-based). These tables map high nibble
+// to board index in physical board order.
+#define GALAXY_CHIPS_PER_UBB 8
+#define GALAXY_NUM_UBBS 4
+
+#define PCI_SUBSYSTEM_ID_GALAXY_WH 0x0035
+#define PCI_SUBSYSTEM_ID_GALAXY_BH 0x0047
+
+static const u8 wh_galaxy_ubb_bus_prefix[GALAXY_NUM_UBBS] = { 0xC, 0x8, 0x0, 0x4 };
+static const u8 bh_galaxy_ubb_bus_prefix[GALAXY_NUM_UBBS] = { 0x0, 0x4, 0xC, 0x8 };
+
+static int galaxy_bdf_to_ordinal(struct pci_dev *pdev)
+{
+	const u8 *ubb_table;
+	u8 bus = pdev->bus->number;
+	u8 high = bus >> 4;
+	u8 low = bus & 0x0F;
+	int ubb;
+
+	switch (pdev->subsystem_device) {
+	case PCI_SUBSYSTEM_ID_GALAXY_WH:
+		ubb_table = wh_galaxy_ubb_bus_prefix;
+		break;
+	case PCI_SUBSYSTEM_ID_GALAXY_BH:
+		ubb_table = bh_galaxy_ubb_bus_prefix;
+		break;
+	default:
+		return -1;
+	}
+
+	if (low < 1 || low > GALAXY_CHIPS_PER_UBB)
+		return -1;
+
+	for (ubb = 0; ubb < GALAXY_NUM_UBBS; ubb++) {
+		if (ubb_table[ubb] == high)
+			return ubb * GALAXY_CHIPS_PER_UBB + (low - 1);
+	}
+
+	return -1;
+}
+
 #if !IS_ENABLED(CONFIG_HWMON)
 struct device *devm_hwmon_device_register_with_info(struct device *,
 	const char *, void *, const struct hwmon_chip_info *, const struct
@@ -211,6 +254,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 {
 	struct tenstorrent_device *tt_dev = NULL;
 	u32 ordinal;
+	int galaxy_ord;
 	int err;
 	const struct tenstorrent_device_class *device_class;
 
@@ -238,7 +282,17 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	if (tt_dev == NULL)
 		return -ENOMEM;
 
-	err = xa_alloc(&tenstorrent_dev_xa, &ordinal, tt_dev, xa_limit_31b, GFP_KERNEL);
+	galaxy_ord = galaxy_bdf_to_ordinal(dev);
+	if (galaxy_ord >= 0) {
+		ordinal = galaxy_ord;
+		err = xa_insert(&tenstorrent_dev_xa, ordinal, tt_dev, GFP_KERNEL);
+		if (err == -EBUSY) {
+			dev_warn(&dev->dev, "Galaxy ordinal %u in use, falling back to dynamic allocation\n", ordinal);
+			err = xa_alloc(&tenstorrent_dev_xa, &ordinal, tt_dev, xa_limit_31b, GFP_KERNEL);
+		}
+	} else {
+		err = xa_alloc(&tenstorrent_dev_xa, &ordinal, tt_dev, xa_limit_31b, GFP_KERNEL);
+	}
 	if (err) {
 		kfree(tt_dev);
 		pci_disable_device(dev);

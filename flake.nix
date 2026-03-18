@@ -48,8 +48,6 @@
                   lib.hasPrefix "linuxPackages_" name && eval.success && eval.value
                 ) pkgs
               );
-
-            legacyPackages = pkgs;
           };
       }
     );

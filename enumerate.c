@@ -350,6 +350,10 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	pci_set_master(dev);
 	pci_enable_pcie_error_reporting(dev);
 
+	// HACK: Suppress hotplug for Galaxy systems.
+	if (dev->subsystem_device == PCI_SUBSYSTEM_ID_GALAXY_WH || dev->subsystem_device == PCI_SUBSYSTEM_ID_GALAXY_BH)
+		pci_ignore_hotplug(dev);
+
 	pci_set_drvdata(dev, tt_dev);
 	dev_set_drvdata(&tt_dev->dev, tt_dev);
 

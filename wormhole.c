@@ -252,57 +252,6 @@ static bool wormhole_read_fw_telemetry_offset(u8 __iomem *reset_unit_regs, u32 *
 	return true;
 }
 
-static bool send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
-{
-	u8 __iomem *regs = wh->bar4_mapping + RESET_UNIT_START;
-	u32 qcb_ptr;
-	u32 queue_base;
-	u32 queue_info;
-	u32 num_entries;
-	u32 arc_misc_cntl;
-	unsigned long timeout;
-
-	// Wait for ARC L2 to be running.
-	timeout = jiffies + msecs_to_jiffies(ARC_MSG_READY_MS);
-	do {
-		if (arc_l2_is_running(regs))
-			break;
-	} while (time_before(jiffies, timeout));
-
-	if (!arc_l2_is_running(regs))
-		return false;
-
-	// Read QCB pointer from NOC_NODEID_X_1. Zero means FW doesn't support queues.
-	qcb_ptr = ioread32(wh->bar4_mapping + ARC_MSG_QCB_PTR);
-	if (qcb_ptr == 0) {
-		dev_warn_once(&wh->tt.pdev->dev, "ARC message queue not available (this is normal for old FW)\n");
-		return false;
-	}
-	if (!is_range_within_csm(qcb_ptr, sizeof(u32)))
-		return false;
-
-	if (csm_read32(wh, qcb_ptr + 0, &queue_base) != 0)
-		return false;
-
-	if (csm_read32(wh, qcb_ptr + 4, &queue_info) != 0)
-		return false;
-
-	queue_base += ARC_CSM_BASE;
-	num_entries = queue_info & 0xFF;
-
-	if (!arc_msg_push(&wh->tt, msg, queue_base, num_entries))
-		return false;
-
-	// Trigger ARC interrupt via IRQ0.
-	arc_misc_cntl = ioread32(regs + ARC_MISC_CNTL_REG);
-	iowrite32(arc_misc_cntl | ARC_MISC_CNTL_IRQ0_MASK, regs + ARC_MISC_CNTL_REG);
-
-	if (!arc_msg_pop(&wh->tt, msg, queue_base, num_entries))
-		return false;
-
-	return msg->header == 0;
-}
-
 static bool wormhole_shutdown_firmware(struct pci_dev *pdev, u8 __iomem *reset_unit_regs)
 {
 	if (is_hardware_hung(pdev, reset_unit_regs))
@@ -820,6 +769,9 @@ fail_bar2:
 
 static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	u32 qcb_ptr;
+	u32 queue_base;
+	u32 queue_info;
 
 	map_bar4_to_system_registers(wh_dev);
 
@@ -829,6 +781,17 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 		update_device_index(wh_dev);
 		wormhole_complete_pcie_init(&wh_dev->tt, reset_unit_regs(wh_dev));
 		wormhole_send_arc_fw_message_with_args(reset_unit_regs(wh_dev), WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT, auto_reset_timeout, 0, 10000, NULL);
+
+		// Cache the message queue parameters for the async pump.
+		qcb_ptr = ioread32(wh_dev->bar4_mapping + ARC_MSG_QCB_PTR);
+		if (qcb_ptr != 0 && is_range_within_csm(qcb_ptr, sizeof(u32)) &&
+		    csm_read32(wh_dev, qcb_ptr, &queue_base) == 0 &&
+		    csm_read32(wh_dev, qcb_ptr + 4, &queue_info) == 0) {
+			tt_dev->arc_msg_queue_base = queue_base + ARC_CSM_BASE;
+			tt_dev->arc_msg_num_entries = queue_info & 0xFF;
+		} else {
+			dev_warn_once(&tt_dev->pdev->dev, "ARC message queue not available (this is normal for old FW)\n");
+		}
 	}
 
 	return true;
@@ -1123,22 +1086,27 @@ static int wormhole_csm_write32(struct tenstorrent_device *tt_dev, u64 addr, u32
 	return csm_write32(tt_dev_to_wh_dev(tt_dev), addr, value);
 }
 
+#define WH_POWER_MSG_TIMEOUT_MS 2500
+
 static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct tenstorrent_power_state *power_state)
 {
-	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
 	struct arc_msg msg = {0};
-	bool ok;
 
 	msg.header = ARC_MSG_TYPE_POWER_SETTING | (power_state->validity << 8) | (power_state->power_flags << 16);
 	BUILD_BUG_ON(sizeof(power_state->power_settings) != sizeof(msg.payload));
 	memcpy(msg.payload, power_state->power_settings, sizeof(msg.payload));
 
-	ok = send_arc_message(wh, &msg);
+	return arc_msg_send_sync(tt_dev, &msg, WH_POWER_MSG_TIMEOUT_MS);
+}
 
-	if (!ok)
-		return -EINVAL;
+static void wormhole_arc_msg_trigger(struct tenstorrent_device *tt_dev)
+{
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	u8 __iomem *regs = wh->bar4_mapping + RESET_UNIT_START;
+	u32 arc_misc_cntl;
 
-	return 0;
+	arc_misc_cntl = ioread32(regs + ARC_MISC_CNTL_REG);
+	iowrite32(arc_misc_cntl | ARC_MISC_CNTL_IRQ0_MASK, regs + ARC_MISC_CNTL_REG);
 }
 
 struct tenstorrent_device_class wormhole_class = {
@@ -1167,4 +1135,5 @@ struct tenstorrent_device_class wormhole_class = {
 	.csm_read32 = wormhole_csm_read32,
 	.csm_write32 = wormhole_csm_write32,
 	.set_power_state = wormhole_set_power_state,
+	.arc_msg_trigger = wormhole_arc_msg_trigger,
 };

@@ -11,6 +11,7 @@
 #include <linux/refcount.h>
 
 #include "ioctl.h"
+#include "msgqueue.h"
 
 struct file;
 struct tenstorrent_device;
@@ -50,6 +51,21 @@ struct dmabuf {
 	int outbound_iatu_region;
 };
 
+enum arc_msg_state {
+	ARC_MSG_IDLE,
+	ARC_MSG_QUEUED,
+	ARC_MSG_SUBMITTED,
+	ARC_MSG_COMPLETED,
+};
+
+// Per-fd async ARC message state. Protected by device->arc_msg_mutex.
+struct chardev_msg {
+	enum arc_msg_state state;
+	struct arc_msg request;
+	struct arc_msg response;
+	struct list_head link;		// node in tenstorrent_device.arc_msg_queue
+};
+
 // This is our device-private data assocated with each open character device fd.
 // Accessed through struct file::private_data.
 struct chardev_private {
@@ -75,6 +91,8 @@ struct chardev_private {
 	struct tenstorrent_power_state power_state; // Power state for this fd
 
 	long open_reset_gen; // Reset generation at open time
+
+	struct chardev_msg msg;		// Async ARC message state
 };
 
 struct chardev_private *get_tenstorrent_priv(struct file *f);

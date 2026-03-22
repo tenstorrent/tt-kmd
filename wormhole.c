@@ -36,6 +36,7 @@
 
 #define TLB_WINDOW_COUNT (TLB_1M_WINDOW_COUNT + TLB_2M_WINDOW_COUNT + TLB_16M_WINDOW_COUNT)
 #define WH_NOC_BITS 36
+#define WH_NOC_COORD_BITS 6
 
 #define WH_FW_MSG_PCIE_INDEX 0x51
 #define WH_FW_MSG_ASTATE0 0xA0
@@ -785,6 +786,8 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev)
 {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 	struct device *dev = &tt_dev->pdev->dev;
+	int pool_indices[TT_IO_TLB_POOL_SIZE];
+	int pool_base;
 	int i;
 
 	INIT_DELAYED_WORK(&wh_dev->fw_ready_work, fw_ready_work_func);
@@ -805,6 +808,17 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev)
 	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
 	mutex_init(&wh_dev->kernel_tlb_mutex);
 
+	pool_base = KERNEL_TLB_INDEX - TT_IO_TLB_POOL_SIZE;
+	for (i = 0; i < TT_IO_TLB_POOL_SIZE; i++) {
+		pool_indices[i] = pool_base + i;
+		set_bit(pool_indices[i], tt_dev->tlbs);
+	}
+
+	if (tlb_pool_init(&wh_dev->io_pool, tt_dev, pool_indices, TT_IO_TLB_POOL_SIZE))
+		goto fail_pool;
+
+	tt_dev->io_tlb_pool = &wh_dev->io_pool;
+
 	for (i = 0; i < ARRAY_SIZE(wh_sysfs_attributes); ++i)
 		tt_dev->telemetry_attrs[i] = &wh_sysfs_attributes[i].attr.attr;
 	tt_dev->telemetry_group.attrs = tt_dev->telemetry_attrs;
@@ -812,6 +826,10 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev)
 
 	return true;
 
+fail_pool:
+	for (i = 0; i < TT_IO_TLB_POOL_SIZE; i++)
+		clear_bit(pool_base + i, tt_dev->tlbs);
+	pci_iounmap(wh_dev->tt.pdev, wh_dev->bar4_mapping);
 fail_bar4:
 	pci_iounmap(wh_dev->tt.pdev, wh_dev->bar2_mapping);
 fail_bar2:
@@ -884,6 +902,9 @@ static void wormhole_cleanup_hardware(struct tenstorrent_device *tt_dev) {
 
 static void wormhole_cleanup(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+
+	tt_dev->io_tlb_pool = NULL;
+	tlb_pool_destroy(&wh_dev->io_pool);
 
 	if (wh_dev->bar2_mapping != NULL)
 		pci_iounmap(wh_dev->tt.pdev, wh_dev->bar2_mapping);
@@ -1141,6 +1162,19 @@ static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct te
 	return 0;
 }
 
+static int wormhole_decode_io_offset(struct tenstorrent_device *tt_dev, loff_t offset,
+				     u32 *x, u32 *y, u64 *noc_addr)
+{
+	if ((u64)offset >> (WH_NOC_BITS + 2 * WH_NOC_COORD_BITS))
+		return -EINVAL;
+
+	*noc_addr = offset & ((1ULL << WH_NOC_BITS) - 1);
+	*y = (offset >> WH_NOC_BITS) & ((1U << WH_NOC_COORD_BITS) - 1);
+	*x = (offset >> (WH_NOC_BITS + WH_NOC_COORD_BITS)) & ((1U << WH_NOC_COORD_BITS) - 1);
+
+	return 0;
+}
+
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
@@ -1167,4 +1201,5 @@ struct tenstorrent_device_class wormhole_class = {
 	.csm_read32 = wormhole_csm_read32,
 	.csm_write32 = wormhole_csm_write32,
 	.set_power_state = wormhole_set_power_state,
+	.decode_io_offset = wormhole_decode_io_offset,
 };

@@ -6,6 +6,7 @@
 
 #include <linux/types.h>
 #include "device.h"
+#include "tlb.h"
 
 struct wormhole_device {
 	struct tenstorrent_device tt;
@@ -13,6 +14,8 @@ struct wormhole_device {
 
 	u8 __iomem *bar2_mapping;
 	u8 __iomem *bar4_mapping;
+
+	struct tlb_pool io_pool;
 
 	u8 saved_mps;
 

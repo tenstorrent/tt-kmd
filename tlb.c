@@ -82,3 +82,106 @@ int tenstorrent_device_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
 
 	return -EINVAL;
 }
+
+int tlb_pool_init(struct tlb_pool *pool, struct tenstorrent_device *tt_dev, const int *tlb_indices, unsigned int count)
+{
+	struct pci_dev *pdev = tt_dev->pdev;
+	struct tlb_descriptor desc;
+	unsigned int i;
+	int ret;
+
+	if (count > TT_IO_TLB_POOL_SIZE)
+		return -EINVAL;
+
+	if (!tt_dev->dev_class->describe_tlb)
+		return -EOPNOTSUPP;
+
+	mutex_init(&pool->lock);
+	INIT_LIST_HEAD(&pool->lru_list);
+	pool->tt_dev = tt_dev;
+	pool->count = 0;
+	pool->window_size = 0;
+
+	for (i = 0; i < count; i++) {
+		struct tlb_pool_entry *entry = &pool->entries[i];
+
+		ret = tt_dev->dev_class->describe_tlb(tt_dev, tlb_indices[i], &desc);
+		if (ret)
+			goto fail;
+
+		entry->io_base = pci_iomap_range(pdev, desc.bar, desc.bar_offset, desc.size);
+		if (!entry->io_base) {
+			ret = -ENOMEM;
+			goto fail;
+		}
+
+		if (pool->window_size == 0)
+			pool->window_size = desc.size;
+
+		entry->tlb_index = tlb_indices[i];
+		entry->valid = false;
+		pool->count++;
+		list_add_tail(&entry->lru_node, &pool->lru_list);
+	}
+
+	return 0;
+
+fail:
+	tlb_pool_destroy(pool);
+	return ret;
+}
+
+void tlb_pool_destroy(struct tlb_pool *pool)
+{
+	struct pci_dev *pdev = pool->tt_dev->pdev;
+	unsigned int i;
+
+	for (i = 0; i < pool->count; i++) {
+		if (pool->entries[i].io_base)
+			pci_iounmap(pdev, pool->entries[i].io_base);
+	}
+
+	pool->count = 0;
+}
+
+// Caller must hold pool->lock.
+int tlb_pool_acquire(struct tlb_pool *pool, u32 x, u32 y, u64 addr, struct tlb_pool_window *window)
+{
+	struct tlb_pool_entry *entry;
+	struct tlb_pool_entry *victim;
+	struct tenstorrent_noc_tlb_config config = { 0 };
+	u64 aligned_addr = addr & ~(pool->window_size - 1);
+	u64 offset_in_window = addr & (pool->window_size - 1);
+	int ret;
+
+	list_for_each_entry(entry, &pool->lru_list, lru_node) {
+		if (entry->valid && entry->x == x && entry->y == y && entry->aligned_addr == aligned_addr) {
+			list_move(&entry->lru_node, &pool->lru_list);
+			window->io_addr = entry->io_base + offset_in_window;
+			window->remaining = pool->window_size - offset_in_window;
+			return 0;
+		}
+	}
+
+	victim = list_last_entry(&pool->lru_list, struct tlb_pool_entry, lru_node);
+
+	config.addr = aligned_addr;
+	config.x_end = x;
+	config.y_end = y;
+	config.ordering = 1;
+
+	ret = tenstorrent_device_configure_tlb(pool->tt_dev, victim->tlb_index, &config);
+	if (ret)
+		return ret;
+
+	victim->valid = true;
+	victim->x = x;
+	victim->y = y;
+	victim->aligned_addr = aligned_addr;
+
+	list_move(&victim->lru_node, &pool->lru_list);
+
+	window->io_addr = victim->io_base + offset_in_window;
+	window->remaining = pool->window_size - offset_in_window;
+	return 0;
+}

@@ -60,9 +60,12 @@ struct tenstorrent_device {
 
 	struct attribute **telemetry_attrs;
 	struct attribute_group telemetry_group;
+
+	struct tlb_pool *io_tlb_pool;
 };
 
 struct tlb_descriptor;
+struct tlb_pool;
 
 struct tenstorrent_device_class {
 	const char *name;
@@ -92,6 +95,7 @@ struct tenstorrent_device_class {
 	int (*csm_read32)(struct tenstorrent_device *ttdev, u64 addr, u32 *value);
 	int (*csm_write32)(struct tenstorrent_device *ttdev, u64 addr, u32 value);
 	int (*set_power_state)(struct tenstorrent_device *ttdev, struct tenstorrent_power_state *power_state);
+	int (*decode_io_offset)(struct tenstorrent_device *ttdev, loff_t offset, u32 *x, u32 *y, u64 *noc_addr);
 };
 
 void tenstorrent_device_put(struct tenstorrent_device *);

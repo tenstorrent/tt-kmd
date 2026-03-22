@@ -13,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/pci.h>
 #include <linux/uaccess.h>
+#include <linux/uio.h>
 #include <linux/version.h>
 #include <linux/debugfs.h>
 #include <linux/proc_fs.h>
@@ -36,6 +37,8 @@ static long tt_cdev_ioctl(struct file *, unsigned int, unsigned long);
 static int tt_cdev_mmap(struct file *, struct vm_area_struct *);
 static int tt_cdev_open(struct inode *, struct file *);
 static int tt_cdev_release(struct inode *, struct file *);
+static ssize_t tt_cdev_read_iter(struct kiocb *, struct iov_iter *);
+static ssize_t tt_cdev_write_iter(struct kiocb *, struct iov_iter *);
 
 static struct file_operations chardev_fops = {
 	.owner = THIS_MODULE,
@@ -43,6 +46,9 @@ static struct file_operations chardev_fops = {
 	.mmap = tt_cdev_mmap,
 	.open = tt_cdev_open,
 	.release = tt_cdev_release,
+	.read_iter = tt_cdev_read_iter,
+	.write_iter = tt_cdev_write_iter,
+	.llseek = default_llseek,
 };
 
 int init_char_driver(unsigned int max_devices)
@@ -573,6 +579,140 @@ out:
 		up_read(&tt_dev->reset_rwsem);
 
 	return ret;
+}
+
+#define TT_IO_BOUNCE_WORDS 64
+#define TT_IO_BOUNCE_SIZE (TT_IO_BOUNCE_WORDS * sizeof(u32))
+
+static ssize_t tt_cdev_read_iter(struct kiocb *iocb, struct iov_iter *iter)
+{
+	struct chardev_private *priv = iocb->ki_filp->private_data;
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tlb_pool *pool = tt_dev->io_tlb_pool;
+	u32 buf[TT_IO_BOUNCE_WORDS];
+	struct tlb_pool_window window;
+	size_t total = iov_iter_count(iter);
+	loff_t pos = iocb->ki_pos;
+	ssize_t done = 0;
+	u32 x, y;
+	u64 noc_addr;
+	size_t chunk;
+	size_t i;
+	int ret = 0;
+
+	if (!pool || !tt_dev->dev_class->decode_io_offset)
+		return -EOPNOTSUPP;
+
+	if ((pos & 3) || (total & 3))
+		return -EINVAL;
+
+	down_read(&tt_dev->reset_rwsem);
+
+	if (tt_dev->detached || atomic_long_read(&tt_dev->reset_gen) != priv->open_reset_gen ||
+	    tt_dev->needs_hw_init) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	while (done < total) {
+		ret = tt_dev->dev_class->decode_io_offset(tt_dev, pos, &x, &y, &noc_addr);
+		if (ret)
+			break;
+
+		mutex_lock(&pool->lock);
+		ret = tlb_pool_acquire(pool, x, y, noc_addr, &window);
+		if (ret) {
+			mutex_unlock(&pool->lock);
+			break;
+		}
+
+		chunk = min_t(size_t, total - done, window.remaining);
+		chunk = min_t(size_t, chunk, TT_IO_BOUNCE_SIZE);
+
+		for (i = 0; i < chunk; i += 4)
+			buf[i / 4] = ioread32(window.io_addr + i);
+
+		mutex_unlock(&pool->lock);
+
+		if (copy_to_iter(buf, chunk, iter) != chunk) {
+			ret = -EFAULT;
+			break;
+		}
+
+		done += chunk;
+		pos += chunk;
+	}
+
+out:
+	up_read(&tt_dev->reset_rwsem);
+	iocb->ki_pos = pos;
+	return done > 0 ? done : ret;
+}
+
+static ssize_t tt_cdev_write_iter(struct kiocb *iocb, struct iov_iter *iter)
+{
+	struct chardev_private *priv = iocb->ki_filp->private_data;
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tlb_pool *pool = tt_dev->io_tlb_pool;
+	u32 buf[TT_IO_BOUNCE_WORDS];
+	struct tlb_pool_window window;
+	size_t total = iov_iter_count(iter);
+	loff_t pos = iocb->ki_pos;
+	ssize_t done = 0;
+	u32 x, y;
+	u64 noc_addr;
+	size_t chunk;
+	size_t i;
+	int ret = 0;
+
+	if (!pool || !tt_dev->dev_class->decode_io_offset)
+		return -EOPNOTSUPP;
+
+	if ((pos & 3) || (total & 3))
+		return -EINVAL;
+
+	down_read(&tt_dev->reset_rwsem);
+
+	if (tt_dev->detached || atomic_long_read(&tt_dev->reset_gen) != priv->open_reset_gen ||
+	    tt_dev->needs_hw_init) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	while (done < total) {
+		ret = tt_dev->dev_class->decode_io_offset(tt_dev, pos, &x, &y, &noc_addr);
+		if (ret)
+			break;
+
+		mutex_lock(&pool->lock);
+		ret = tlb_pool_acquire(pool, x, y, noc_addr, &window);
+		if (ret) {
+			mutex_unlock(&pool->lock);
+			break;
+		}
+
+		chunk = min_t(size_t, total - done, window.remaining);
+		chunk = min_t(size_t, chunk, TT_IO_BOUNCE_SIZE);
+
+		if (copy_from_iter(buf, chunk, iter) != chunk) {
+			mutex_unlock(&pool->lock);
+			ret = -EFAULT;
+			break;
+		}
+
+		for (i = 0; i < chunk; i += 4)
+			iowrite32(buf[i / 4], window.io_addr + i);
+
+		mutex_unlock(&pool->lock);
+
+		done += chunk;
+		pos += chunk;
+	}
+
+out:
+	up_read(&tt_dev->reset_rwsem);
+	iocb->ki_pos = pos;
+	return done > 0 ? done : ret;
 }
 
 static int tt_cdev_mmap(struct file *file, struct vm_area_struct *vma)

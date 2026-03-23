@@ -62,6 +62,7 @@ bool pcie_hot_reset_and_restore_state(struct pci_dev *pdev) {
 	struct pci_dev *bridge_dev = pci_upstream_bridge(pdev);
 	u16 bridge_ctrl;
 	bool result;
+	bool saved_ignore_hotplug = pdev->ignore_hotplug;
 
 	if (!bridge_dev)
 		return false;
@@ -78,10 +79,12 @@ bool pcie_hot_reset_and_restore_state(struct pci_dev *pdev) {
 
 	result = poll_pcie_link_up(pdev, 10000) && safe_pci_restore_state(pdev);
 
-	// Re-enable hotplug events. There is no pci_unignore_hotplug(), but the
-	// flag is just a struct member we can clear directly.
-	pdev->ignore_hotplug = 0;
-	bridge_dev->ignore_hotplug = 0;
+	if (!saved_ignore_hotplug) {
+		// There is no pci_unignore_hotplug(), but the flag is just a struct
+		// member we can clear directly.
+		pdev->ignore_hotplug = 0;
+		bridge_dev->ignore_hotplug = 0;
+	}
 
 	return result;
 }

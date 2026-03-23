@@ -252,7 +252,7 @@ static bool wormhole_read_fw_telemetry_offset(u8 __iomem *reset_unit_regs, u32 *
 	return true;
 }
 
-static bool send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
+static bool __maybe_unused send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
 {
 	u8 __iomem *regs = wh->bar4_mapping + RESET_UNIT_START;
 	u32 qcb_ptr;
@@ -1125,6 +1125,10 @@ static int wormhole_csm_write32(struct tenstorrent_device *tt_dev, u64 addr, u32
 
 static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct tenstorrent_power_state *power_state)
 {
+	// WH firmware can take over a second to process power state changes,
+	// blocking open() and close().
+	// TODO: fix FW latency or move the message off the calling thread.
+#if 0
 	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
 	struct arc_msg msg = {0};
 	bool ok;
@@ -1137,6 +1141,7 @@ static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct te
 
 	if (!ok)
 		return -EINVAL;
+#endif
 
 	return 0;
 }

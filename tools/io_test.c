@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <linux/types.h>
 
@@ -79,6 +80,42 @@ static int noc_write32(int fd, uint8_t x, uint8_t y, uint64_t addr, uint32_t val
 	io.y = y;
 	io.addr = addr;
 	io.data = value;
+
+	if (ioctl(fd, TENSTORRENT_IOCTL_NOC_IO, &io) < 0)
+		return -errno;
+
+	return 0;
+}
+
+static int noc_block_write(int fd, uint8_t x, uint8_t y, uint64_t addr, const void *buf, size_t len)
+{
+	struct tenstorrent_noc_io io = {0};
+
+	io.argsz = sizeof(io);
+	io.flags = TENSTORRENT_NOC_IO_WRITE | TENSTORRENT_NOC_IO_BLOCK;
+	io.x = x;
+	io.y = y;
+	io.addr = addr;
+	io.data_ptr = (uint64_t)(uintptr_t)buf;
+	io.data_len = len;
+
+	if (ioctl(fd, TENSTORRENT_IOCTL_NOC_IO, &io) < 0)
+		return -errno;
+
+	return 0;
+}
+
+static int noc_block_read(int fd, uint8_t x, uint8_t y, uint64_t addr, void *buf, size_t len)
+{
+	struct tenstorrent_noc_io io = {0};
+
+	io.argsz = sizeof(io);
+	io.flags = TENSTORRENT_NOC_IO_BLOCK;
+	io.x = x;
+	io.y = y;
+	io.addr = addr;
+	io.data_ptr = (uint64_t)(uintptr_t)buf;
+	io.data_len = len;
 
 	if (ioctl(fd, TENSTORRENT_IOCTL_NOC_IO, &io) < 0)
 		return -errno;
@@ -216,6 +253,149 @@ static int noc_sanity(int fd, uint16_t device_id)
 	return -1;
 }
 
+/*
+ * L1 write/readback test.
+ *
+ * Write a pattern to Tensix L1 memory, read it back, verify. Uses a
+ * single tile that was already validated by the NOC sanity test. The
+ * L1 offset is chosen to avoid the bottom of the address space where
+ * firmware-reserved structures may live.
+ *
+ * Assumes NOC coordinate translation is enabled (normal production
+ * configuration). The translated coordinate (1, 2) maps to a Tensix
+ * tile present on all Blackhole SKUs (p100 and p150).
+ */
+#define L1_TEST_OFFSET  0x4000
+#define L1_TEST_WORDS   256
+#define L1_TEST_SEED    0xCAFEBABE
+
+static int l1_write_readback(int fd, uint8_t x, uint8_t y)
+{
+	uint32_t written[L1_TEST_WORDS];
+	uint32_t readback;
+	uint32_t i;
+	int ret;
+
+	for (i = 0; i < L1_TEST_WORDS; i++)
+		written[i] = L1_TEST_SEED ^ i;
+
+	for (i = 0; i < L1_TEST_WORDS; i++) {
+		uint64_t addr = L1_TEST_OFFSET + i * sizeof(uint32_t);
+
+		ret = noc_write32(fd, x, y, addr, written[i]);
+		if (ret) {
+			fprintf(stderr, "L1 write failed at offset 0x%lx: %s\n",
+				(unsigned long)addr, strerror(-ret));
+			return -1;
+		}
+	}
+
+	for (i = 0; i < L1_TEST_WORDS; i++) {
+		uint64_t addr = L1_TEST_OFFSET + i * sizeof(uint32_t);
+
+		ret = noc_read32(fd, x, y, addr, &readback);
+		if (ret) {
+			fprintf(stderr, "L1 read failed at offset 0x%lx: %s\n",
+				(unsigned long)addr, strerror(-ret));
+			return -1;
+		}
+
+		if (readback != written[i]) {
+			fprintf(stderr, "FAIL: L1[0x%lx] = 0x%08x, "
+				"expected 0x%08x\n",
+				(unsigned long)addr, readback, written[i]);
+			return -1;
+		}
+	}
+
+	printf("L1 write/readback (%u, %u): PASS (%u words at 0x%x)\n",
+	       x, y, L1_TEST_WORDS, L1_TEST_OFFSET);
+	return 0;
+}
+
+static int l1_test(int fd, uint16_t device_id)
+{
+	if (device_id == PCI_DEVICE_ID_BLACKHOLE)
+		return l1_write_readback(fd, 1, 2);
+	else if (device_id == PCI_DEVICE_ID_WORMHOLE)
+		return l1_write_readback(fd, 1, 1);
+
+	fprintf(stderr, "Unknown device ID 0x%04x for L1 test\n", device_id);
+	return -1;
+}
+
+#define L1_BLOCK_TEST_OFFSET 0x10000
+#define L1_BLOCK_TEST_SIZE   (64 * 1024)
+#define L1_BLOCK_TEST_SEED   0xDEAD0000
+
+static int l1_block_write_readback(int fd, uint8_t x, uint8_t y)
+{
+	size_t nwords = L1_BLOCK_TEST_SIZE / sizeof(uint32_t);
+	uint32_t *write_buf = NULL;
+	uint32_t *read_buf = NULL;
+	size_t i;
+	int ret;
+
+	write_buf = mmap(NULL, L1_BLOCK_TEST_SIZE, PROT_READ | PROT_WRITE,
+			 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	read_buf = mmap(NULL, L1_BLOCK_TEST_SIZE, PROT_READ | PROT_WRITE,
+			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (write_buf == MAP_FAILED || read_buf == MAP_FAILED) {
+		fprintf(stderr, "mmap failed: %s\n", strerror(errno));
+		ret = -1;
+		goto out;
+	}
+
+	for (i = 0; i < nwords; i++)
+		write_buf[i] = L1_BLOCK_TEST_SEED ^ (uint32_t)i;
+
+	ret = noc_block_write(fd, x, y, L1_BLOCK_TEST_OFFSET, write_buf, L1_BLOCK_TEST_SIZE);
+	if (ret) {
+		fprintf(stderr, "L1 block write failed: %s\n", strerror(-ret));
+		goto out;
+	}
+
+	memset(read_buf, 0, L1_BLOCK_TEST_SIZE);
+
+	ret = noc_block_read(fd, x, y, L1_BLOCK_TEST_OFFSET, read_buf, L1_BLOCK_TEST_SIZE);
+	if (ret) {
+		fprintf(stderr, "L1 block read failed: %s\n", strerror(-ret));
+		goto out;
+	}
+
+	for (i = 0; i < nwords; i++) {
+		if (read_buf[i] != write_buf[i]) {
+			fprintf(stderr, "FAIL: L1 block [0x%lx] = 0x%08x, expected 0x%08x\n",
+				(unsigned long)(L1_BLOCK_TEST_OFFSET + i * sizeof(uint32_t)),
+				read_buf[i], write_buf[i]);
+			ret = -1;
+			goto out;
+		}
+	}
+
+	printf("L1 block write/readback (%u, %u): PASS (%u KiB at 0x%x)\n",
+	       x, y, L1_BLOCK_TEST_SIZE / 1024, L1_BLOCK_TEST_OFFSET);
+	ret = 0;
+
+out:
+	if (write_buf != MAP_FAILED)
+		munmap(write_buf, L1_BLOCK_TEST_SIZE);
+	if (read_buf != MAP_FAILED)
+		munmap(read_buf, L1_BLOCK_TEST_SIZE);
+	return ret;
+}
+
+static int l1_block_test(int fd, uint16_t device_id)
+{
+	if (device_id == PCI_DEVICE_ID_BLACKHOLE)
+		return l1_block_write_readback(fd, 1, 2);
+	else if (device_id == PCI_DEVICE_ID_WORMHOLE)
+		return l1_block_write_readback(fd, 1, 1);
+
+	fprintf(stderr, "Unknown device ID 0x%04x for L1 block test\n", device_id);
+	return -1;
+}
+
 int main(int argc, char *argv[])
 {
 	struct tenstorrent_get_device_info info;
@@ -251,6 +431,12 @@ int main(int argc, char *argv[])
 	       info.out.device_id);
 
 	if (noc_sanity(fd, info.out.device_id) != 0)
+		ret = 1;
+
+	if (ret == 0 && l1_test(fd, info.out.device_id) != 0)
+		ret = 1;
+
+	if (ret == 0 && l1_block_test(fd, info.out.device_id) != 0)
 		ret = 1;
 
 	close(fd);

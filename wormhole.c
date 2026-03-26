@@ -1119,6 +1119,88 @@ static void wormhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y
 	noc_write32(wh_dev, x, y, addr, data, noc);
 }
 
+static ssize_t wormhole_noc_block_read(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr,
+				       struct page **pages, unsigned int first_page_offset, size_t len)
+{
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	size_t transferred = 0;
+	unsigned int page_idx = 0;
+	unsigned int page_off = first_page_offset;
+
+	mutex_lock(&wh->kernel_tlb_mutex);
+
+	while (transferred < len) {
+		u8 __iomem *tlb_window = wh_configure_kernel_tlb(wh, x, y, addr, 0);
+		size_t tlb_remaining = TLB_16M_WINDOW_SIZE - (addr & TLB_16M_WINDOW_MASK);
+		size_t xfer_remaining = len - transferred;
+		size_t tlb_chunk = min(tlb_remaining, xfer_remaining);
+		size_t tlb_done = 0;
+
+		while (tlb_done < tlb_chunk) {
+			size_t page_remaining = PAGE_SIZE - page_off;
+			size_t chunk = min(page_remaining, tlb_chunk - tlb_done);
+			void *kaddr = page_address(pages[page_idx]) + page_off;
+
+			memcpy_fromio(kaddr, tlb_window + tlb_done, chunk);
+
+			tlb_done += chunk;
+			page_off += chunk;
+			if (page_off >= PAGE_SIZE) {
+				page_off = 0;
+				page_idx++;
+			}
+		}
+
+		transferred += tlb_chunk;
+		addr += tlb_chunk;
+	}
+
+	mutex_unlock(&wh->kernel_tlb_mutex);
+
+	return transferred;
+}
+
+static ssize_t wormhole_noc_block_write(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr,
+					struct page **pages, unsigned int first_page_offset, size_t len)
+{
+	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
+	size_t transferred = 0;
+	unsigned int page_idx = 0;
+	unsigned int page_off = first_page_offset;
+
+	mutex_lock(&wh->kernel_tlb_mutex);
+
+	while (transferred < len) {
+		u8 __iomem *tlb_window = wh_configure_kernel_tlb(wh, x, y, addr, 0);
+		size_t tlb_remaining = TLB_16M_WINDOW_SIZE - (addr & TLB_16M_WINDOW_MASK);
+		size_t xfer_remaining = len - transferred;
+		size_t tlb_chunk = min(tlb_remaining, xfer_remaining);
+		size_t tlb_done = 0;
+
+		while (tlb_done < tlb_chunk) {
+			size_t page_remaining = PAGE_SIZE - page_off;
+			size_t chunk = min(page_remaining, tlb_chunk - tlb_done);
+			const void *kaddr = page_address(pages[page_idx]) + page_off;
+
+			memcpy_toio(tlb_window + tlb_done, kaddr, chunk);
+
+			tlb_done += chunk;
+			page_off += chunk;
+			if (page_off >= PAGE_SIZE) {
+				page_off = 0;
+				page_idx++;
+			}
+		}
+
+		transferred += tlb_chunk;
+		addr += tlb_chunk;
+	}
+
+	mutex_unlock(&wh->kernel_tlb_mutex);
+
+	return transferred;
+}
+
 static int wormhole_csm_read32(struct tenstorrent_device *tt_dev, u64 addr, u32 *value)
 {
 	return csm_read32(tt_dev_to_wh_dev(tt_dev), addr, value);
@@ -1171,6 +1253,8 @@ struct tenstorrent_device_class wormhole_class = {
 	.configure_outbound_atu = wormhole_configure_outbound_atu,
 	.noc_read32 = wormhole_noc_read32,
 	.noc_write32 = wormhole_noc_write32,
+	.noc_block_read = wormhole_noc_block_read,
+	.noc_block_write = wormhole_noc_block_write,
 	.csm_read32 = wormhole_csm_read32,
 	.csm_write32 = wormhole_csm_write32,
 	.set_power_state = wormhole_set_power_state,

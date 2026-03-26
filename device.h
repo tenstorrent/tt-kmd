@@ -90,6 +90,10 @@ struct tenstorrent_device_class {
 	int (*configure_outbound_atu)(struct tenstorrent_device *ttdev, u32 region, u64 base, u64 limit, u64 target);
 	u32 (*noc_read32)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, int noc);
 	void (*noc_write32)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, u32 data, int noc);
+	ssize_t (*noc_block_read)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr,
+				  struct page **pages, unsigned int first_page_offset, size_t len);
+	ssize_t (*noc_block_write)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr,
+				   struct page **pages, unsigned int first_page_offset, size_t len);
 	int (*csm_read32)(struct tenstorrent_device *ttdev, u64 addr, u32 *value);
 	int (*csm_write32)(struct tenstorrent_device *ttdev, u64 addr, u32 value);
 	int (*set_power_state)(struct tenstorrent_device *ttdev, struct tenstorrent_power_state *power_state);

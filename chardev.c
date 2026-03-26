@@ -12,6 +12,7 @@
 #include <linux/cdev.h>
 #include <linux/slab.h>
 #include <linux/pci.h>
+#include <linux/mm.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
 #include <linux/debugfs.h>
@@ -506,8 +507,57 @@ static long ioctl_noc_io(struct chardev_private *priv,
 	is_block = data.flags & TENSTORRENT_NOC_IO_BLOCK;
 
 	if (is_block) {
-		/* Block transfers not yet implemented. */
-		return -EOPNOTSUPP;
+		void __user *uptr = u64_to_user_ptr(data.data_ptr);
+		unsigned long user_addr = (unsigned long)uptr;
+		unsigned int first_page_offset = user_addr & ~PAGE_MASK;
+		unsigned long npages;
+		struct page **pages;
+		ssize_t result;
+		unsigned int gup_flags;
+
+		if (data.data_len == 0 || (data.data_len & 0x3))
+			return -EINVAL;
+
+		if (!access_ok(uptr, data.data_len))
+			return -EFAULT;
+
+		npages = DIV_ROUND_UP(first_page_offset + data.data_len, PAGE_SIZE);
+
+		pages = kvmalloc_array(npages, sizeof(struct page *), GFP_KERNEL);
+		if (!pages)
+			return -ENOMEM;
+
+		gup_flags = is_write ? 0 : FOLL_WRITE;
+		result = pin_user_pages_fast(user_addr & PAGE_MASK, npages, gup_flags, pages);
+		if (result != npages) {
+			if (result > 0)
+				unpin_user_pages(pages, result);
+			kvfree(pages);
+			return -EFAULT;
+		}
+
+		if (is_write) {
+			if (!dev_class->noc_block_write) {
+				unpin_user_pages(pages, npages);
+				kvfree(pages);
+				return -EOPNOTSUPP;
+			}
+			result = dev_class->noc_block_write(tt_dev, data.x, data.y, data.addr,
+							    pages, first_page_offset, data.data_len);
+		} else {
+			if (!dev_class->noc_block_read) {
+				unpin_user_pages(pages, npages);
+				kvfree(pages);
+				return -EOPNOTSUPP;
+			}
+			result = dev_class->noc_block_read(tt_dev, data.x, data.y, data.addr,
+							   pages, first_page_offset, data.data_len);
+		}
+
+		unpin_user_pages(pages, npages);
+		kvfree(pages);
+
+		return (result == data.data_len) ? 0 : -EIO;
 	}
 
 	if (is_write) {

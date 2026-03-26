@@ -960,6 +960,12 @@ static int blackhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u
 	return 0;
 }
 
+static u32 blackhole_noc_read32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, int noc)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	return noc_read32(bh, x, y, addr, noc);
+}
+
 static void blackhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, u32 data, int noc)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
@@ -1004,6 +1010,7 @@ struct tenstorrent_device_class blackhole_class = {
 	.save_reset_state = blackhole_save_reset_state,
 	.restore_reset_state = blackhole_restore_reset_state,
 	.configure_outbound_atu = blackhole_configure_outbound_atu,
+	.noc_read32 = blackhole_noc_read32,
 	.noc_write32 = blackhole_noc_write32,
 	.csm_read32 = blackhole_csm_read32,
 	.csm_write32 = blackhole_csm_write32,

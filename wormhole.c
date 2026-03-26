@@ -1107,6 +1107,12 @@ static int wormhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u3
 	return 0;
 }
 
+static u32 wormhole_noc_read32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, int noc)
+{
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	return noc_read32(wh_dev, x, y, addr, noc);
+}
+
 static void wormhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, u32 data, int noc)
 {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
@@ -1163,6 +1169,7 @@ struct tenstorrent_device_class wormhole_class = {
 	.save_reset_state = wormhole_save_reset_state,
 	.restore_reset_state = wormhole_restore_reset_state,
 	.configure_outbound_atu = wormhole_configure_outbound_atu,
+	.noc_read32 = wormhole_noc_read32,
 	.noc_write32 = wormhole_noc_write32,
 	.csm_read32 = wormhole_csm_read32,
 	.csm_write32 = wormhole_csm_write32,

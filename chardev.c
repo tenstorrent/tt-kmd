@@ -462,6 +462,74 @@ static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorre
 	return tenstorrent_set_aggregated_power_state(tt_dev);
 }
 
+static long ioctl_noc_io(struct chardev_private *priv,
+			 struct tenstorrent_noc_io __user *arg)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	const struct tenstorrent_device_class *dev_class = tt_dev->dev_class;
+	const size_t minsz = offsetofend(struct tenstorrent_noc_io, data_len);
+	struct tenstorrent_noc_io data = {};
+	size_t copysz;
+	bool is_write;
+	bool is_block;
+
+	if (get_user(data.argsz, &arg->argsz))
+		return -EFAULT;
+
+	if (data.argsz < minsz)
+		return -EINVAL;
+
+	copysz = min_t(size_t, data.argsz, sizeof(data));
+
+	if (copy_from_user(&data, arg, copysz))
+		return -EFAULT;
+
+	if (data.argsz > sizeof(data)) {
+		if (check_zeroed_user((char __user *)arg + sizeof(data),
+				      data.argsz - sizeof(data)) <= 0)
+			return -E2BIG;
+	}
+
+	if (data.flags & ~(TENSTORRENT_NOC_IO_WRITE | TENSTORRENT_NOC_IO_BLOCK))
+		return -EINVAL;
+
+	if (data.reserved0[0] != 0 || data.reserved0[1] != 0)
+		return -EINVAL;
+
+	if (data.reserved1 != 0)
+		return -EINVAL;
+
+	if (data.addr & 0x3)
+		return -EINVAL;
+
+	is_write = data.flags & TENSTORRENT_NOC_IO_WRITE;
+	is_block = data.flags & TENSTORRENT_NOC_IO_BLOCK;
+
+	if (is_block) {
+		/* Block transfers not yet implemented. */
+		return -EOPNOTSUPP;
+	}
+
+	if (is_write) {
+		if (!dev_class->noc_write32)
+			return -EOPNOTSUPP;
+
+		dev_class->noc_write32(tt_dev, data.x, data.y,
+				       data.addr, (u32)data.data, 0);
+	} else {
+		if (!dev_class->noc_read32)
+			return -EOPNOTSUPP;
+
+		data.data = dev_class->noc_read32(tt_dev, data.x, data.y,
+						  data.addr, 0);
+
+		if (copy_to_user(arg, &data, copysz))
+			return -EFAULT;
+	}
+
+	return 0;
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	struct chardev_private *priv = f->private_data;
@@ -559,6 +627,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_SET_POWER_STATE:
 			ret = ioctl_set_power_state(priv, (struct tenstorrent_power_state __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_NOC_IO:
+			ret = ioctl_noc_io(priv, (struct tenstorrent_noc_io __user *)arg);
 			break;
 
 		default:

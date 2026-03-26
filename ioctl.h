@@ -27,6 +27,7 @@
 #define TENSTORRENT_IOCTL_CONFIGURE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 13)
 #define TENSTORRENT_IOCTL_SET_NOC_CLEANUP		_IO(TENSTORRENT_IOCTL_MAGIC, 14)
 #define TENSTORRENT_IOCTL_SET_POWER_STATE		_IO(TENSTORRENT_IOCTL_MAGIC, 15)
+#define TENSTORRENT_IOCTL_NOC_IO			_IO(TENSTORRENT_IOCTL_MAGIC, 16)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -406,6 +407,47 @@ struct tenstorrent_power_state {
 #define TT_POWER_FLAG_TENSIX_ENABLE     (1U << 2) /* 1=Enable Tensix, 0=Clock Gate Tensix */
 #define TT_POWER_FLAG_L2CPU_ENABLE      (1U << 3) /* 1=Enable L2CPU,  0=Clock Gate L2CPU */
 	__u16 power_settings[14];
+};
+
+/**
+ * TENSTORRENT_IOCTL_NOC_IO - Read or write device NOC addresses
+ *
+ * Performs I/O to the device's Network on Chip. The kernel manages TLB
+ * configuration internally; userspace provides only the target coordinates
+ * and address. NOC 0 is used for all operations.
+ *
+ * The flags field selects the operation:
+ * - Neither WRITE nor BLOCK: read 32 bits, result returned in @data.
+ * - WRITE only: write 32 bits from @data.
+ * - BLOCK only: block read into userspace buffer at @data_ptr.
+ * - WRITE | BLOCK: block write from userspace buffer at @data_ptr.
+ *
+ * For 32-bit operations, @addr must be 4-byte aligned.
+ * For block operations, @addr and @data_len must be 4-byte aligned.
+ *
+ * @argsz: Size of this struct as seen by the caller.
+ * @flags: Operation flags; see TENSTORRENT_NOC_IO_*.
+ * @x: NOC x-coordinate of the target tile.
+ * @y: NOC y-coordinate of the target tile.
+ * @addr: NOC address within the target tile.
+ * @data: Inline data for 32-bit operations.
+ * @data_ptr: Userspace buffer address for block operations.
+ * @data_len: Byte count for block operations.
+ */
+#define TENSTORRENT_NOC_IO_WRITE	(1 << 0)
+#define TENSTORRENT_NOC_IO_BLOCK	(1 << 1)
+
+struct tenstorrent_noc_io {
+	__u32 argsz;
+	__u32 flags;
+	__u8  x;
+	__u8  y;
+	__u8  reserved0[2];
+	__u32 reserved1;
+	__u64 addr;
+	__u64 data;
+	__u64 data_ptr;
+	__u64 data_len;
 };
 
 #endif

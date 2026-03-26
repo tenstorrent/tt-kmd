@@ -10,9 +10,10 @@
 struct blackhole_device {
 	struct tenstorrent_device tt;
 
-	struct mutex kernel_tlb_mutex;	// Guards access to kernel_tlb
-	u8 __iomem *tlb_regs;   // All TLB registers
-	u8 __iomem *kernel_tlb; // Topmost 2M window, reserved for kernel
+	struct mutex kernel_tlb_mutex;
+	u8 __iomem *tlb_regs;
+	u8 __iomem *kernel_tlb;    // UC-mapped 2M window for reads and 32-bit ops
+	u8 __iomem *kernel_tlb_wc; // WC-mapped 2M window for block writes
 	u8 __iomem *noc2axi_cfg;
 	u8 __iomem *bar2_mapping;
 

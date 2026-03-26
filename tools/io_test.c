@@ -45,7 +45,6 @@ struct tenstorrent_noc_io {
 	__u8  reserved0[2];
 	__u32 reserved1;
 	__u64 addr;
-	__u64 data;
 	__u64 data_ptr;
 	__u64 data_len;
 };
@@ -62,11 +61,12 @@ static int noc_read32(int fd, uint8_t x, uint8_t y, uint64_t addr, uint32_t *val
 	io.x = x;
 	io.y = y;
 	io.addr = addr;
+	io.data_ptr = (uint64_t)(uintptr_t)value;
+	io.data_len = 4;
 
 	if (ioctl(fd, TENSTORRENT_IOCTL_NOC_IO, &io) < 0)
 		return -errno;
 
-	*value = (uint32_t)io.data;
 	return 0;
 }
 
@@ -79,7 +79,8 @@ static int noc_write32(int fd, uint8_t x, uint8_t y, uint64_t addr, uint32_t val
 	io.x = x;
 	io.y = y;
 	io.addr = addr;
-	io.data = value;
+	io.data_ptr = (uint64_t)(uintptr_t)&value;
+	io.data_len = 4;
 
 	if (ioctl(fd, TENSTORRENT_IOCTL_NOC_IO, &io) < 0)
 		return -errno;

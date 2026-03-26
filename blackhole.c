@@ -37,9 +37,13 @@
 #define TLB_STRIDED_REG_SIZE 4
 #define TLB_STRIDED_REGS_OFFSET (TLB_TOTAL_WINDOW_COUNT * TLB_REG_SIZE)
 
-#define KERNEL_TLB_INDEX (TLB_2M_WINDOW_COUNT - 1)	// Last 2M window is ours
+#define KERNEL_TLB_INDEX (TLB_2M_WINDOW_COUNT - 1)
 #define KERNEL_TLB_START (KERNEL_TLB_INDEX * TLB_2M_WINDOW_SIZE)
 #define KERNEL_TLB_LEN TLB_2M_WINDOW_SIZE
+
+#define KERNEL_TLB_WC_INDEX (TLB_2M_WINDOW_COUNT - 2)
+#define KERNEL_TLB_WC_START (KERNEL_TLB_WC_INDEX * TLB_2M_WINDOW_SIZE)
+#define KERNEL_TLB_WC_LEN TLB_2M_WINDOW_SIZE
 
 #define NOC2AXI_CFG_START 0x1FD00000
 #define NOC2AXI_CFG_LEN 0x00100000
@@ -238,6 +242,20 @@ static u8 __iomem *bh_configure_kernel_tlb(struct blackhole_device *bh, u32 x, u
 
 	blackhole_configure_tlb_2M(bh, KERNEL_TLB_INDEX, &config);
 	return bh->kernel_tlb + offset;
+}
+
+static u8 __iomem *bh_configure_kernel_tlb_wc(struct blackhole_device *bh, u32 x, u32 y, u64 addr, int noc)
+{
+	struct tenstorrent_noc_tlb_config config = { 0 };
+	u64 offset = addr & TLB_2M_WINDOW_MASK;
+
+	config.addr = addr & ~TLB_2M_WINDOW_MASK;
+	config.x_end = x;
+	config.y_end = y;
+	config.noc = noc;
+
+	blackhole_configure_tlb_2M(bh, KERNEL_TLB_WC_INDEX, &config);
+	return bh->kernel_tlb_wc + offset;
 }
 
 static u32 noc_read32(struct blackhole_device *bh, u32 x, u32 y, u64 addr, int noc)
@@ -762,15 +780,20 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 
 	bh->tlb_regs = pci_iomap_range(bh->tt.pdev, 0, TLB_REGS_START, TLB_REGS_LEN);
 	bh->kernel_tlb = pci_iomap_range(bh->tt.pdev, 0, KERNEL_TLB_START, KERNEL_TLB_LEN);
+	bh->kernel_tlb_wc = ioremap_wc(pci_resource_start(bh->tt.pdev, 0) + KERNEL_TLB_WC_START,
+					KERNEL_TLB_WC_LEN);
 	bh->noc2axi_cfg = pci_iomap_range(bh->tt.pdev, 0, NOC2AXI_CFG_START, NOC2AXI_CFG_LEN);
 	bh->bar2_mapping = pci_iomap(bh->tt.pdev, 2, 0);
 
-	if (!bh->tlb_regs || !bh->kernel_tlb || !bh->noc2axi_cfg) {
+	if (!bh->tlb_regs || !bh->kernel_tlb || !bh->kernel_tlb_wc || !bh->noc2axi_cfg) {
 		if (bh->tlb_regs)
 			pci_iounmap(bh->tt.pdev, bh->tlb_regs);
 
 		if (bh->kernel_tlb)
 			pci_iounmap(bh->tt.pdev, bh->kernel_tlb);
+
+		if (bh->kernel_tlb_wc)
+			iounmap(bh->kernel_tlb_wc);
 
 		if (bh->noc2axi_cfg)
 			pci_iounmap(bh->tt.pdev, bh->noc2axi_cfg);
@@ -781,8 +804,8 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 		return false;
 	}
 
-	// Claim the topmost 2M window for kernel use.
 	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
+	set_bit(KERNEL_TLB_WC_INDEX, tt_dev->tlbs);
 	mutex_init(&bh->kernel_tlb_mutex);
 
 	for (i = 0; i < ARRAY_SIZE(bh_sysfs_attributes); ++i)
@@ -888,6 +911,8 @@ static void blackhole_cleanup(struct tenstorrent_device *tt_dev)
 		pci_iounmap(tt_dev->pdev, bh->tlb_regs);
 	if (bh->kernel_tlb)
 		pci_iounmap(tt_dev->pdev, bh->kernel_tlb);
+	if (bh->kernel_tlb_wc)
+		iounmap(bh->kernel_tlb_wc);
 	if (bh->noc2axi_cfg)
 		pci_iounmap(tt_dev->pdev, bh->noc2axi_cfg);
 	if (bh->bar2_mapping)
@@ -1024,7 +1049,7 @@ static ssize_t blackhole_noc_block_write(struct tenstorrent_device *tt_dev, u32 
 	mutex_lock(&bh->kernel_tlb_mutex);
 
 	while (transferred < len) {
-		u8 __iomem *tlb_window = bh_configure_kernel_tlb(bh, x, y, addr, 0);
+		u8 __iomem *tlb_window = bh_configure_kernel_tlb_wc(bh, x, y, addr, 0);
 		size_t tlb_remaining = TLB_2M_WINDOW_SIZE - (addr & TLB_2M_WINDOW_MASK);
 		size_t xfer_remaining = len - transferred;
 		size_t tlb_chunk = min(tlb_remaining, xfer_remaining);

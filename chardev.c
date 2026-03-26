@@ -12,6 +12,7 @@
 #include <linux/cdev.h>
 #include <linux/slab.h>
 #include <linux/pci.h>
+#include <linux/io_uring/cmd.h>
 #include <linux/mm.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
@@ -34,6 +35,9 @@ static struct class *tt_dev_class;
 static unsigned int tt_max_devices;
 
 static long tt_cdev_ioctl(struct file *, unsigned int, unsigned long);
+#if defined(CONFIG_IO_URING)
+static int tt_cdev_uring_cmd(struct io_uring_cmd *, unsigned int);
+#endif
 static int tt_cdev_mmap(struct file *, struct vm_area_struct *);
 static int tt_cdev_open(struct inode *, struct file *);
 static int tt_cdev_release(struct inode *, struct file *);
@@ -41,6 +45,9 @@ static int tt_cdev_release(struct inode *, struct file *);
 static struct file_operations chardev_fops = {
 	.owner = THIS_MODULE,
 	.unlocked_ioctl = tt_cdev_ioctl,
+#if defined(CONFIG_IO_URING)
+	.uring_cmd = tt_cdev_uring_cmd,
+#endif
 	.mmap = tt_cdev_mmap,
 	.open = tt_cdev_open,
 	.release = tt_cdev_release,
@@ -463,51 +470,32 @@ static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorre
 	return tenstorrent_set_aggregated_power_state(tt_dev);
 }
 
-static long ioctl_noc_io(struct chardev_private *priv,
-			 struct tenstorrent_noc_io __user *arg)
+static long do_noc_io(struct tenstorrent_device *tt_dev, const struct tenstorrent_noc_io *data)
 {
-	struct tenstorrent_device *tt_dev = priv->device;
 	const struct tenstorrent_device_class *dev_class = tt_dev->dev_class;
-	const size_t minsz = offsetofend(struct tenstorrent_noc_io, data_len);
-	struct tenstorrent_noc_io data = {};
-	size_t copysz;
-	bool is_write;
-	bool is_block;
+	void __user *uptr = u64_to_user_ptr(data->data_ptr);
+	bool is_write = data->flags & TENSTORRENT_NOC_IO_WRITE;
+	bool is_block = data->flags & TENSTORRENT_NOC_IO_BLOCK;
 
-	if (get_user(data.argsz, &arg->argsz))
+	if (data->flags & ~(TENSTORRENT_NOC_IO_WRITE | TENSTORRENT_NOC_IO_BLOCK))
+		return -EINVAL;
+
+	if (data->reserved0[0] != 0 || data->reserved0[1] != 0)
+		return -EINVAL;
+
+	if (data->reserved1 != 0)
+		return -EINVAL;
+
+	if (data->addr & 0x3)
+		return -EINVAL;
+
+	if (data->data_len == 0 || (data->data_len & 0x3))
+		return -EINVAL;
+
+	if (!access_ok(uptr, data->data_len))
 		return -EFAULT;
-
-	if (data.argsz < minsz)
-		return -EINVAL;
-
-	copysz = min_t(size_t, data.argsz, sizeof(data));
-
-	if (copy_from_user(&data, arg, copysz))
-		return -EFAULT;
-
-	if (data.argsz > sizeof(data)) {
-		if (check_zeroed_user((char __user *)arg + sizeof(data),
-				      data.argsz - sizeof(data)) <= 0)
-			return -E2BIG;
-	}
-
-	if (data.flags & ~(TENSTORRENT_NOC_IO_WRITE | TENSTORRENT_NOC_IO_BLOCK))
-		return -EINVAL;
-
-	if (data.reserved0[0] != 0 || data.reserved0[1] != 0)
-		return -EINVAL;
-
-	if (data.reserved1 != 0)
-		return -EINVAL;
-
-	if (data.addr & 0x3)
-		return -EINVAL;
-
-	is_write = data.flags & TENSTORRENT_NOC_IO_WRITE;
-	is_block = data.flags & TENSTORRENT_NOC_IO_BLOCK;
 
 	if (is_block) {
-		void __user *uptr = u64_to_user_ptr(data.data_ptr);
 		unsigned long user_addr = (unsigned long)uptr;
 		unsigned int first_page_offset = user_addr & ~PAGE_MASK;
 		unsigned long npages;
@@ -515,13 +503,7 @@ static long ioctl_noc_io(struct chardev_private *priv,
 		ssize_t result;
 		unsigned int gup_flags;
 
-		if (data.data_len == 0 || (data.data_len & 0x3))
-			return -EINVAL;
-
-		if (!access_ok(uptr, data.data_len))
-			return -EFAULT;
-
-		npages = DIV_ROUND_UP(first_page_offset + data.data_len, PAGE_SIZE);
+		npages = DIV_ROUND_UP(first_page_offset + data->data_len, PAGE_SIZE);
 
 		pages = kvmalloc_array(npages, sizeof(struct page *), GFP_KERNEL);
 		if (!pages)
@@ -542,43 +524,109 @@ static long ioctl_noc_io(struct chardev_private *priv,
 				kvfree(pages);
 				return -EOPNOTSUPP;
 			}
-			result = dev_class->noc_block_write(tt_dev, data.x, data.y, data.addr,
-							    pages, first_page_offset, data.data_len);
+			result = dev_class->noc_block_write(tt_dev, data->x, data->y, data->addr,
+							    pages, first_page_offset, data->data_len);
 		} else {
 			if (!dev_class->noc_block_read) {
 				unpin_user_pages(pages, npages);
 				kvfree(pages);
 				return -EOPNOTSUPP;
 			}
-			result = dev_class->noc_block_read(tt_dev, data.x, data.y, data.addr,
-							   pages, first_page_offset, data.data_len);
+			result = dev_class->noc_block_read(tt_dev, data->x, data->y, data->addr,
+							   pages, first_page_offset, data->data_len);
 		}
 
 		unpin_user_pages(pages, npages);
 		kvfree(pages);
 
-		return (result == data.data_len) ? 0 : -EIO;
+		return (result == data->data_len) ? 0 : -EIO;
 	}
 
+	if (data->data_len != 4)
+		return -EINVAL;
+
 	if (is_write) {
+		u32 val;
+
 		if (!dev_class->noc_write32)
 			return -EOPNOTSUPP;
 
-		dev_class->noc_write32(tt_dev, data.x, data.y,
-				       data.addr, (u32)data.data, 0);
+		if (get_user(val, (u32 __user *)uptr))
+			return -EFAULT;
+
+		dev_class->noc_write32(tt_dev, data->x, data->y, data->addr, val, 0);
 	} else {
+		u32 val;
+
 		if (!dev_class->noc_read32)
 			return -EOPNOTSUPP;
 
-		data.data = dev_class->noc_read32(tt_dev, data.x, data.y,
-						  data.addr, 0);
+		val = dev_class->noc_read32(tt_dev, data->x, data->y, data->addr, 0);
 
-		if (copy_to_user(arg, &data, copysz))
+		if (put_user(val, (u32 __user *)uptr))
 			return -EFAULT;
 	}
 
 	return 0;
 }
+
+static long ioctl_noc_io(struct chardev_private *priv,
+			 struct tenstorrent_noc_io __user *arg)
+{
+	const size_t minsz = offsetofend(struct tenstorrent_noc_io, data_len);
+	struct tenstorrent_noc_io data = {};
+	size_t copysz;
+
+	if (get_user(data.argsz, &arg->argsz))
+		return -EFAULT;
+
+	if (data.argsz < minsz)
+		return -EINVAL;
+
+	copysz = min_t(size_t, data.argsz, sizeof(data));
+
+	if (copy_from_user(&data, arg, copysz))
+		return -EFAULT;
+
+	if (data.argsz > sizeof(data)) {
+		if (check_zeroed_user((char __user *)arg + sizeof(data),
+				      data.argsz - sizeof(data)) <= 0)
+			return -E2BIG;
+	}
+
+	return do_noc_io(priv->device, &data);
+}
+
+#if defined(CONFIG_IO_URING)
+static int tt_cdev_uring_cmd(struct io_uring_cmd *ioucmd, unsigned int issue_flags)
+{
+	struct file *f = ioucmd->file;
+	struct chardev_private *priv = f->private_data;
+	struct tenstorrent_device *tt_dev = priv->device;
+	const struct tenstorrent_noc_io *data;
+	long ret;
+
+	if (ioucmd->cmd_op != 0)
+		return -EINVAL;
+
+	data = io_uring_sqe_cmd(ioucmd->sqe);
+
+	if (!down_read_trylock(&tt_dev->reset_rwsem))
+		return -ENODEV;
+
+	if (tt_dev->detached || atomic_long_read(&tt_dev->reset_gen) != priv->open_reset_gen ||
+	    tt_dev->needs_hw_init) {
+		ret = -ENODEV;
+	} else {
+		ret = do_noc_io(tt_dev, data);
+	}
+
+	up_read(&tt_dev->reset_rwsem);
+
+	io_uring_cmd_done(ioucmd, ret, 0, issue_flags);
+	return -EIOCBQUEUED;
+}
+#endif
 
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {

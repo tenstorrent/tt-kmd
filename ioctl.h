@@ -416,23 +416,23 @@ struct tenstorrent_power_state {
  * configuration internally; userspace provides only the target coordinates
  * and address. NOC 0 is used for all operations.
  *
- * The flags field selects the operation:
- * - Neither WRITE nor BLOCK: read 32 bits, result returned in @data.
- * - WRITE only: write 32 bits from @data.
- * - BLOCK only: block read into userspace buffer at @data_ptr.
- * - WRITE | BLOCK: block write from userspace buffer at @data_ptr.
+ * Data is always transferred through the userspace buffer at @data_ptr:
+ * - Read without BLOCK: reads 4 bytes, writes result to @data_ptr.
+ * - Write without BLOCK: writes 4 bytes read from @data_ptr.
+ * - Read with BLOCK: bulk read into @data_ptr.
+ * - Write with BLOCK: bulk write from @data_ptr.
  *
- * For 32-bit operations, @addr must be 4-byte aligned.
- * For block operations, @addr and @data_len must be 4-byte aligned.
+ * For 32-bit operations, @addr must be 4-byte aligned and @data_len must
+ * be 4. For block operations, both @addr and @data_len must be 4-byte
+ * aligned.
  *
  * @argsz: Size of this struct as seen by the caller.
  * @flags: Operation flags; see TENSTORRENT_NOC_IO_*.
  * @x: NOC x-coordinate of the target tile.
  * @y: NOC y-coordinate of the target tile.
  * @addr: NOC address within the target tile.
- * @data: Inline data for 32-bit operations.
- * @data_ptr: Userspace buffer address for block operations.
- * @data_len: Byte count for block operations.
+ * @data_ptr: Userspace buffer for data transfer.
+ * @data_len: Byte count (4 for 32-bit operations).
  */
 #define TENSTORRENT_NOC_IO_WRITE	(1 << 0)
 #define TENSTORRENT_NOC_IO_BLOCK	(1 << 1)
@@ -445,7 +445,6 @@ struct tenstorrent_noc_io {
 	__u8  reserved0[2];
 	__u32 reserved1;
 	__u64 addr;
-	__u64 data;
 	__u64 data_ptr;
 	__u64 data_len;
 };

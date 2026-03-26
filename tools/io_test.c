@@ -396,6 +396,220 @@ static int l1_block_test(int fd, uint16_t device_id)
 	return -1;
 }
 
+/*
+ * GDDR write/readback test.
+ *
+ * Block write a pattern to GDDR, read it back, verify. Kept small
+ * because MMIO reads from DRAM are slow.
+ */
+#define GDDR_TEST_OFFSET 0x0
+#define GDDR_TEST_SIZE   (1024 * 1024)
+#define GDDR_TEST_SEED   0xABCD0000
+
+static int gddr_write_readback(int fd, uint8_t x, uint8_t y)
+{
+	size_t nwords = GDDR_TEST_SIZE / sizeof(uint32_t);
+	uint32_t *write_buf = NULL;
+	uint32_t *read_buf = NULL;
+	size_t i;
+	int ret;
+
+	write_buf = mmap(NULL, GDDR_TEST_SIZE, PROT_READ | PROT_WRITE,
+			 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	read_buf = mmap(NULL, GDDR_TEST_SIZE, PROT_READ | PROT_WRITE,
+			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (write_buf == MAP_FAILED || read_buf == MAP_FAILED) {
+		fprintf(stderr, "mmap failed: %s\n", strerror(errno));
+		ret = -1;
+		goto out;
+	}
+
+	for (i = 0; i < nwords; i++)
+		write_buf[i] = GDDR_TEST_SEED ^ (uint32_t)i;
+
+	ret = noc_block_write(fd, x, y, GDDR_TEST_OFFSET, write_buf, GDDR_TEST_SIZE);
+	if (ret) {
+		fprintf(stderr, "GDDR block write failed: %s\n", strerror(-ret));
+		goto out;
+	}
+
+	memset(read_buf, 0, GDDR_TEST_SIZE);
+
+	ret = noc_block_read(fd, x, y, GDDR_TEST_OFFSET, read_buf, GDDR_TEST_SIZE);
+	if (ret) {
+		fprintf(stderr, "GDDR block read failed: %s\n", strerror(-ret));
+		goto out;
+	}
+
+	for (i = 0; i < nwords; i++) {
+		if (read_buf[i] != write_buf[i]) {
+			fprintf(stderr, "FAIL: GDDR [0x%lx] = 0x%08x, expected 0x%08x\n",
+				(unsigned long)(GDDR_TEST_OFFSET + i * sizeof(uint32_t)),
+				read_buf[i], write_buf[i]);
+			ret = -1;
+			goto out;
+		}
+	}
+
+	printf("GDDR write/readback (%u, %u): PASS (%u KiB at 0x%x)\n",
+	       x, y, GDDR_TEST_SIZE / 1024, GDDR_TEST_OFFSET);
+	ret = 0;
+
+out:
+	if (write_buf != MAP_FAILED)
+		munmap(write_buf, GDDR_TEST_SIZE);
+	if (read_buf != MAP_FAILED)
+		munmap(read_buf, GDDR_TEST_SIZE);
+	return ret;
+}
+
+static int gddr_test(int fd, uint16_t device_id)
+{
+	if (device_id == PCI_DEVICE_ID_BLACKHOLE)
+		return gddr_write_readback(fd, 17, 12);
+	else if (device_id == PCI_DEVICE_ID_WORMHOLE)
+		return gddr_write_readback(fd, 0, 0);
+
+	fprintf(stderr, "Unknown device ID 0x%04x for GDDR test\n", device_id);
+	return -1;
+}
+
+/*
+ * Loopback DMA test.
+ *
+ * Pin a host buffer with NOC_DMA to get a NOC address, then use
+ * NOC_IO to write a pattern through the PCIe tile to that address.
+ * The data traverses: host CPU -> kernel TLB -> NOC -> PCIe tile ->
+ * iATU -> back into the pinned host buffer. Verify the host buffer.
+ */
+#define TENSTORRENT_IOCTL_PIN_PAGES   _IO(TENSTORRENT_IOCTL_MAGIC, 7)
+#define TENSTORRENT_IOCTL_UNPIN_PAGES _IO(TENSTORRENT_IOCTL_MAGIC, 10)
+
+#define TENSTORRENT_PIN_PAGES_NOC_DMA 2
+
+struct tenstorrent_pin_pages_in {
+	__u32 output_size_bytes;
+	__u32 flags;
+	__u64 virtual_address;
+	__u64 size;
+};
+
+struct tenstorrent_pin_pages_out_extended {
+	__u64 physical_address;
+	__u64 noc_address;
+};
+
+struct tenstorrent_unpin_pages_in {
+	__u64 virtual_address;
+	__u64 size;
+	__u64 reserved;
+};
+
+struct tenstorrent_unpin_pages_out {
+};
+
+struct tenstorrent_unpin_pages {
+	struct tenstorrent_unpin_pages_in in;
+	struct tenstorrent_unpin_pages_out out;
+};
+
+#define LOOPBACK_TEST_SIZE  (1024 * 1024)
+#define LOOPBACK_TEST_SEED  0xFEED0000
+
+static int loopback_dma_test(int fd, uint8_t pcie_x, uint8_t pcie_y)
+{
+	size_t nwords = LOOPBACK_TEST_SIZE / sizeof(uint32_t);
+	void *buf = MAP_FAILED;
+	uint64_t noc_addr;
+	uint32_t *write_data = NULL;
+	size_t i;
+	int ret;
+
+	struct {
+		struct tenstorrent_pin_pages_in in;
+		struct tenstorrent_pin_pages_out_extended out;
+	} pin = {0};
+
+	struct tenstorrent_unpin_pages unpin = {0};
+
+	buf = mmap(NULL, LOOPBACK_TEST_SIZE, PROT_READ | PROT_WRITE,
+		   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (buf == MAP_FAILED) {
+		fprintf(stderr, "mmap failed: %s\n", strerror(errno));
+		return -1;
+	}
+
+	memset(buf, 0, LOOPBACK_TEST_SIZE);
+
+	pin.in.output_size_bytes = sizeof(pin.out);
+	pin.in.flags = TENSTORRENT_PIN_PAGES_NOC_DMA;
+	pin.in.virtual_address = (uint64_t)(uintptr_t)buf;
+	pin.in.size = LOOPBACK_TEST_SIZE;
+
+	if (ioctl(fd, TENSTORRENT_IOCTL_PIN_PAGES, &pin) < 0) {
+		fprintf(stderr, "PIN_PAGES failed: %s\n", strerror(errno));
+		munmap(buf, LOOPBACK_TEST_SIZE);
+		return -1;
+	}
+
+	noc_addr = pin.out.noc_address;
+
+	write_data = malloc(LOOPBACK_TEST_SIZE);
+	if (!write_data) {
+		ret = -1;
+		goto unpin;
+	}
+
+	for (i = 0; i < nwords; i++)
+		write_data[i] = LOOPBACK_TEST_SEED ^ (uint32_t)i;
+
+	ret = noc_block_write(fd, pcie_x, pcie_y, noc_addr, write_data, LOOPBACK_TEST_SIZE);
+	if (ret) {
+		fprintf(stderr, "Loopback write failed: %s\n", strerror(-ret));
+		goto unpin;
+	}
+
+	/* Read back through the PCIe tile to flush visibility. */
+	{
+		uint32_t dummy;
+		noc_read32(fd, pcie_x, pcie_y, noc_addr, &dummy);
+	}
+
+	for (i = 0; i < nwords; i++) {
+		uint32_t got = ((uint32_t *)buf)[i];
+
+		if (got != write_data[i]) {
+			fprintf(stderr, "FAIL: loopback [%zu] = 0x%08x, expected 0x%08x\n",
+				i, got, write_data[i]);
+			ret = -1;
+			goto unpin;
+		}
+	}
+
+	printf("Loopback DMA (%u, %u): PASS (%u bytes via noc_addr 0x%llx)\n",
+	       pcie_x, pcie_y, LOOPBACK_TEST_SIZE, (unsigned long long)noc_addr);
+	ret = 0;
+
+unpin:
+	free(write_data);
+	unpin.in.virtual_address = (uint64_t)(uintptr_t)buf;
+	unpin.in.size = LOOPBACK_TEST_SIZE;
+	ioctl(fd, TENSTORRENT_IOCTL_UNPIN_PAGES, &unpin);
+	munmap(buf, LOOPBACK_TEST_SIZE);
+	return ret;
+}
+
+static int loopback_test(int fd, uint16_t device_id)
+{
+	if (device_id == PCI_DEVICE_ID_BLACKHOLE)
+		return loopback_dma_test(fd, 19, 24);
+	else if (device_id == PCI_DEVICE_ID_WORMHOLE)
+		return loopback_dma_test(fd, 0, 3);
+
+	fprintf(stderr, "Unknown device ID 0x%04x for loopback test\n", device_id);
+	return -1;
+}
+
 int main(int argc, char *argv[])
 {
 	struct tenstorrent_get_device_info info;
@@ -437,6 +651,12 @@ int main(int argc, char *argv[])
 		ret = 1;
 
 	if (ret == 0 && l1_block_test(fd, info.out.device_id) != 0)
+		ret = 1;
+
+	if (ret == 0 && gddr_test(fd, info.out.device_id) != 0)
+		ret = 1;
+
+	if (ret == 0 && loopback_test(fd, info.out.device_id) != 0)
 		ret = 1;
 
 	close(fd);

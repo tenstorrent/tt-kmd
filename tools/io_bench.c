@@ -23,6 +23,10 @@
 
 #define TENSTORRENT_IOCTL_MAGIC 0xFA
 #define TENSTORRENT_IOCTL_GET_DEVICE_INFO _IO(TENSTORRENT_IOCTL_MAGIC, 0)
+#define TENSTORRENT_IOCTL_QUERY_MAPPINGS  _IO(TENSTORRENT_IOCTL_MAGIC, 2)
+#define TENSTORRENT_IOCTL_ALLOCATE_TLB    _IO(TENSTORRENT_IOCTL_MAGIC, 11)
+#define TENSTORRENT_IOCTL_FREE_TLB        _IO(TENSTORRENT_IOCTL_MAGIC, 12)
+#define TENSTORRENT_IOCTL_CONFIGURE_TLB   _IO(TENSTORRENT_IOCTL_MAGIC, 13)
 #define TENSTORRENT_IOCTL_NOC_IO          _IO(TENSTORRENT_IOCTL_MAGIC, 16)
 
 struct tenstorrent_get_device_info {
@@ -50,8 +54,34 @@ struct tenstorrent_noc_io {
 	__u64 data_len;
 };
 
+struct tenstorrent_allocate_tlb {
+	struct { __u64 size; __u64 reserved; } in;
+	struct { __u32 id; __u32 reserved0; __u64 mmap_offset_uc; __u64 mmap_offset_wc; __u64 reserved1; } out;
+};
+
+struct tenstorrent_free_tlb {
+	struct { __u32 id; } in;
+	struct { } out;
+};
+
+struct tenstorrent_noc_tlb_config {
+	__u64 addr;
+	__u16 x_end, y_end, x_start, y_start;
+	__u8 noc, mcast, ordering, linked, static_vc;
+	__u8 reserved0[3];
+	__u32 reserved1[2];
+};
+
+struct tenstorrent_configure_tlb {
+	struct { __u32 id; __u32 reserved; struct tenstorrent_noc_tlb_config config; } in;
+	struct { __u64 reserved; } out;
+};
+
 #define PCI_DEVICE_ID_BLACKHOLE 0xb140
 #define PCI_DEVICE_ID_WORMHOLE  0x401e
+
+#define TLB_2M_SIZE (1 << 21)
+#define TLB_2M_MASK (TLB_2M_SIZE - 1)
 
 static uint64_t now_ns(void)
 {
@@ -129,6 +159,143 @@ static int noc_block_read(int fd, uint8_t x, uint8_t y, uint64_t addr, void *buf
 		return -errno;
 
 	return 0;
+}
+
+struct mmio_window {
+	int fd;
+	uint32_t tlb_id;
+	volatile uint32_t *base;
+	size_t size;
+};
+
+static int mmio_window_open(struct mmio_window *w, int fd, uint8_t x, uint8_t y,
+			    uint64_t addr, int use_wc)
+{
+	struct tenstorrent_allocate_tlb alloc = {};
+	struct tenstorrent_configure_tlb conf = {};
+
+	alloc.in.size = TLB_2M_SIZE;
+	if (ioctl(fd, TENSTORRENT_IOCTL_ALLOCATE_TLB, &alloc) < 0)
+		return -errno;
+
+	conf.in.id = alloc.out.id;
+	conf.in.config.addr = addr & ~(uint64_t)TLB_2M_MASK;
+	conf.in.config.x_end = x;
+	conf.in.config.y_end = y;
+	conf.in.config.ordering = use_wc ? 0 : 1;
+	if (ioctl(fd, TENSTORRENT_IOCTL_CONFIGURE_TLB, &conf) < 0) {
+		struct tenstorrent_free_tlb fr = {};
+		fr.in.id = alloc.out.id;
+		ioctl(fd, TENSTORRENT_IOCTL_FREE_TLB, &fr);
+		return -errno;
+	}
+
+	uint64_t offset = use_wc ? alloc.out.mmap_offset_wc : alloc.out.mmap_offset_uc;
+	void *map = mmap(NULL, TLB_2M_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset);
+	if (map == MAP_FAILED) {
+		struct tenstorrent_free_tlb fr = {};
+		fr.in.id = alloc.out.id;
+		ioctl(fd, TENSTORRENT_IOCTL_FREE_TLB, &fr);
+		return -errno;
+	}
+
+	w->fd = fd;
+	w->tlb_id = alloc.out.id;
+	w->base = (volatile uint32_t *)map;
+	w->size = TLB_2M_SIZE;
+	return 0;
+}
+
+static void mmio_window_close(struct mmio_window *w)
+{
+	struct tenstorrent_free_tlb fr = {};
+
+	munmap((void *)w->base, w->size);
+	fr.in.id = w->tlb_id;
+	ioctl(w->fd, TENSTORRENT_IOCTL_FREE_TLB, &fr);
+}
+
+static void bench_mmio_read32(struct mmio_window *w, uint64_t addr, int iterations)
+{
+	uint32_t offset_words = (addr & TLB_2M_MASK) / sizeof(uint32_t);
+	volatile uint32_t *ptr = w->base + offset_words;
+	uint32_t dummy;
+	uint64_t start, elapsed;
+	int i;
+
+	for (i = 0; i < 100; i++)
+		dummy = *ptr;
+	(void)dummy;
+
+	start = now_ns();
+	for (i = 0; i < iterations; i++)
+		dummy = *ptr;
+	elapsed = now_ns() - start;
+
+	printf("  mmio read32:   %d ops, %.0f ns/op\n",
+	       iterations, (double)elapsed / iterations);
+}
+
+static void bench_mmio_write32(struct mmio_window *w, uint64_t addr, int iterations)
+{
+	uint32_t offset_words = (addr & TLB_2M_MASK) / sizeof(uint32_t);
+	volatile uint32_t *ptr = w->base + offset_words;
+	uint64_t start, elapsed;
+	int i;
+
+	for (i = 0; i < 100; i++)
+		*ptr = 0;
+
+	start = now_ns();
+	for (i = 0; i < iterations; i++)
+		*ptr = (uint32_t)i;
+	elapsed = now_ns() - start;
+
+	printf("  mmio write32:  %d ops, %.0f ns/op\n",
+	       iterations, (double)elapsed / iterations);
+}
+
+static void bench_mmio_block_write_u32(struct mmio_window *w, uint64_t addr,
+				       size_t size, int iterations, const char *label)
+{
+	uint32_t offset = addr & TLB_2M_MASK;
+	volatile uint32_t *dst = (volatile uint32_t *)((volatile char *)w->base + offset);
+	size_t nwords = size / sizeof(uint32_t);
+	uint32_t *buf;
+	uint64_t start, elapsed, total_bytes;
+	double mbps;
+	int i;
+	size_t j;
+
+	if (offset + size > w->size) {
+		printf("  mmio %s %7zu: SKIP (crosses TLB boundary)\n", label, size);
+		return;
+	}
+
+	buf = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (buf == MAP_FAILED)
+		return;
+	for (j = 0; j < nwords; j++)
+		buf[j] = 0xAA;
+
+	for (i = 0; i < 3; i++)
+		for (j = 0; j < nwords; j++)
+			dst[j] = buf[j];
+
+	start = now_ns();
+	for (i = 0; i < iterations; i++)
+		for (j = 0; j < nwords; j++)
+			dst[j] = buf[j];
+	elapsed = now_ns() - start;
+
+	total_bytes = (uint64_t)size * iterations;
+	mbps = (double)total_bytes / elapsed * 1000.0;
+
+	printf("  mmio %s %7zu: %d ops, %.1f MB/s, %.0f us/op\n",
+	       label, size, iterations, mbps,
+	       (double)elapsed / iterations / 1000.0);
+
+	munmap(buf, size);
 }
 
 static void bench_read32(int fd, uint8_t x, uint8_t y, uint64_t addr, int iterations)
@@ -275,20 +442,94 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	printf("Device: %s (ID 0x%04x), target tile (%u, %u)\n\n",
-	       dev_path, info.out.device_id, tensix_x, tensix_y);
+	uint8_t dram_x, dram_y;
 
-	printf("32-bit operations (L1 @ 0x4000):\n");
+	if (info.out.device_id == PCI_DEVICE_ID_BLACKHOLE) {
+		dram_x = 17; dram_y = 12;
+	} else {
+		dram_x = 0; dram_y = 0;
+	}
+
+	printf("Device: %s (ID 0x%04x), tensix (%u, %u), dram (%u, %u)\n\n",
+	       dev_path, info.out.device_id, tensix_x, tensix_y, dram_x, dram_y);
+
+	{
+		struct mmio_window uc_win = {}, wc_win = {};
+		int have_uc = mmio_window_open(&uc_win, fd, tensix_x, tensix_y, 0x0, 0) == 0;
+		int have_wc = mmio_window_open(&wc_win, fd, tensix_x, tensix_y, 0x0, 1) == 0;
+
+		if (have_uc) {
+			printf("Direct MMIO baseline (UC, L1 @ 0x4000):\n");
+			bench_mmio_read32(&uc_win, 0x4000, 10000);
+			bench_mmio_write32(&uc_win, 0x4000, 10000);
+			mmio_window_close(&uc_win);
+		} else {
+			printf("Direct MMIO baseline: SKIP (TLB alloc failed)\n");
+		}
+
+		if (have_uc) {
+			have_uc = mmio_window_open(&uc_win, fd, tensix_x, tensix_y, 0x0, 0) == 0;
+		}
+		if (have_uc) {
+			#if 0
+			printf("\nDirect MMIO block write — UC memcpy (L1 @ 0x10000):\n");
+			bench_mmio_block_write(&uc_win, 0x10000, 4096, 1000, "uc_memcpy");
+			bench_mmio_block_write(&uc_win, 0x10000, 65536, 200, "uc_memcpy");
+			bench_mmio_block_write(&uc_win, 0x10000, 262144, 50, "uc_memcpy");
+			bench_mmio_block_write(&uc_win, 0x10000, 1048576, 20, "uc_memcpy");
+
+			printf("\nDirect MMIO block write — UC u32 loop (L1 @ 0x10000):\n");
+			bench_mmio_block_write_u32(&uc_win, 0x10000, 4096, 1000, "uc_u32  ");
+			bench_mmio_block_write_u32(&uc_win, 0x10000, 65536, 200, "uc_u32  ");
+			bench_mmio_block_write_u32(&uc_win, 0x10000, 262144, 50, "uc_u32  ");
+			bench_mmio_block_write_u32(&uc_win, 0x10000, 1048576, 20, "uc_u32  ");
+			mmio_window_close(&uc_win);
+			#endif
+		}
+
+		if (have_wc) {
+			printf("\nDirect MMIO block write — WC u32 loop (L1 @ 0x10000):\n");
+			bench_mmio_block_write_u32(&wc_win, 0x10000, 4096, 1000, "wc_u32  ");
+			bench_mmio_block_write_u32(&wc_win, 0x10000, 65536, 200, "wc_u32  ");
+			bench_mmio_block_write_u32(&wc_win, 0x10000, 262144, 50, "wc_u32  ");
+			bench_mmio_block_write_u32(&wc_win, 0x10000, 1048576, 20, "wc_u32  ");
+			mmio_window_close(&wc_win);
+		} else {
+			printf("\nDirect MMIO block write (WC): SKIP (TLB alloc failed)\n");
+		}
+	}
+
+	{
+		struct mmio_window dram_wc = {};
+		int have_dram_wc = mmio_window_open(&dram_wc, fd, dram_x, dram_y, 0x0, 1) == 0;
+
+		if (have_dram_wc) {
+			printf("\nDirect MMIO block write — WC u32 loop (DRAM @ 0x0):\n");
+			bench_mmio_block_write_u32(&dram_wc, 0x0, 4096, 1000, "wc_u32  ");
+			bench_mmio_block_write_u32(&dram_wc, 0x0, 65536, 200, "wc_u32  ");
+			bench_mmio_block_write_u32(&dram_wc, 0x0, 262144, 50, "wc_u32  ");
+			bench_mmio_block_write_u32(&dram_wc, 0x0, 1048576, 20, "wc_u32  ");
+			mmio_window_close(&dram_wc);
+		}
+	}
+
+	printf("\nioctl 32-bit operations (L1 @ 0x4000):\n");
 	bench_read32(fd, tensix_x, tensix_y, 0x4000, 10000);
 	bench_write32(fd, tensix_x, tensix_y, 0x4000, 10000);
 
-	printf("\nBlock write to L1 @ 0x10000:\n");
+	printf("\nioctl block write to L1 @ 0x10000:\n");
 	bench_block_write(fd, tensix_x, tensix_y, 0x10000, 4096, 1000);
 	bench_block_write(fd, tensix_x, tensix_y, 0x10000, 64 * 1024, 200);
 	bench_block_write(fd, tensix_x, tensix_y, 0x10000, 256 * 1024, 50);
 	bench_block_write(fd, tensix_x, tensix_y, 0x10000, 1024 * 1024, 20);
 
-	printf("\nBlock read from L1 @ 0x10000:\n");
+	printf("\nioctl block write to DRAM @ 0x0:\n");
+	bench_block_write(fd, dram_x, dram_y, 0x0, 4096, 1000);
+	bench_block_write(fd, dram_x, dram_y, 0x0, 64 * 1024, 200);
+	bench_block_write(fd, dram_x, dram_y, 0x0, 256 * 1024, 50);
+	bench_block_write(fd, dram_x, dram_y, 0x0, 1024 * 1024, 20);
+
+	printf("\nioctl block read from L1 @ 0x10000:\n");
 	bench_block_read(fd, tensix_x, tensix_y, 0x10000, 4096, 1000);
 	bench_block_read(fd, tensix_x, tensix_y, 0x10000, 64 * 1024, 200);
 	bench_block_read(fd, tensix_x, tensix_y, 0x10000, 256 * 1024, 50);

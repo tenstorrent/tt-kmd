@@ -100,6 +100,9 @@ struct io_uring_cqe {
 
 #define TENSTORRENT_IOCTL_MAGIC 0xFA
 #define TENSTORRENT_IOCTL_GET_DEVICE_INFO _IO(TENSTORRENT_IOCTL_MAGIC, 0)
+#define TENSTORRENT_IOCTL_ALLOCATE_TLB    _IO(TENSTORRENT_IOCTL_MAGIC, 11)
+#define TENSTORRENT_IOCTL_FREE_TLB        _IO(TENSTORRENT_IOCTL_MAGIC, 12)
+#define TENSTORRENT_IOCTL_CONFIGURE_TLB   _IO(TENSTORRENT_IOCTL_MAGIC, 13)
 #define TENSTORRENT_IOCTL_NOC_IO          _IO(TENSTORRENT_IOCTL_MAGIC, 16)
 
 struct tenstorrent_get_device_info {
@@ -127,14 +130,136 @@ struct tenstorrent_noc_io {
 	__u64 data_len;
 };
 
+struct tenstorrent_allocate_tlb {
+	struct { __u64 size; __u64 reserved; } in;
+	struct { __u32 id; __u32 reserved0; __u64 mmap_offset_uc; __u64 mmap_offset_wc; __u64 reserved1; } out;
+};
+
+struct tenstorrent_free_tlb {
+	struct { __u32 id; } in;
+	struct { } out;
+};
+
+struct tenstorrent_noc_tlb_config {
+	__u64 addr;
+	__u16 x_end, y_end, x_start, y_start;
+	__u8 noc, mcast, ordering, linked, static_vc;
+	__u8 reserved0[3];
+	__u32 reserved1[2];
+};
+
+struct tenstorrent_configure_tlb {
+	struct { __u32 id; __u32 reserved; struct tenstorrent_noc_tlb_config config; } in;
+	struct { __u64 reserved; } out;
+};
+
 #define PCI_DEVICE_ID_BLACKHOLE 0xb140
 #define PCI_DEVICE_ID_WORMHOLE  0x401e
+
+#define TLB_2M_SIZE (1 << 21)
+#define TLB_2M_MASK (TLB_2M_SIZE - 1)
 
 static uint64_t now_ns(void)
 {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
+struct mmio_window {
+	int fd;
+	uint32_t tlb_id;
+	volatile uint32_t *base;
+	size_t size;
+};
+
+static int mmio_window_open(struct mmio_window *w, int fd, uint8_t x, uint8_t y,
+			    uint64_t addr, int use_wc)
+{
+	struct tenstorrent_allocate_tlb alloc = {};
+	struct tenstorrent_configure_tlb conf = {};
+	uint64_t offset;
+	void *map;
+
+	alloc.in.size = TLB_2M_SIZE;
+	if (ioctl(fd, TENSTORRENT_IOCTL_ALLOCATE_TLB, &alloc) < 0)
+		return -errno;
+
+	conf.in.id = alloc.out.id;
+	conf.in.config.addr = addr & ~(uint64_t)TLB_2M_MASK;
+	conf.in.config.x_end = x;
+	conf.in.config.y_end = y;
+	conf.in.config.ordering = use_wc ? 0 : 1;
+	if (ioctl(fd, TENSTORRENT_IOCTL_CONFIGURE_TLB, &conf) < 0) {
+		struct tenstorrent_free_tlb fr = {};
+		fr.in.id = alloc.out.id;
+		ioctl(fd, TENSTORRENT_IOCTL_FREE_TLB, &fr);
+		return -errno;
+	}
+
+	offset = use_wc ? alloc.out.mmap_offset_wc : alloc.out.mmap_offset_uc;
+	map = mmap(NULL, TLB_2M_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset);
+	if (map == MAP_FAILED) {
+		struct tenstorrent_free_tlb fr = {};
+		fr.in.id = alloc.out.id;
+		ioctl(fd, TENSTORRENT_IOCTL_FREE_TLB, &fr);
+		return -errno;
+	}
+
+	w->fd = fd;
+	w->tlb_id = alloc.out.id;
+	w->base = (volatile uint32_t *)map;
+	w->size = TLB_2M_SIZE;
+	return 0;
+}
+
+static void mmio_window_close(struct mmio_window *w)
+{
+	struct tenstorrent_free_tlb fr = {};
+
+	munmap((void *)w->base, w->size);
+	fr.in.id = w->tlb_id;
+	ioctl(w->fd, TENSTORRENT_IOCTL_FREE_TLB, &fr);
+}
+
+static void bench_mmio_read32(struct mmio_window *w, uint64_t addr, int iterations)
+{
+	uint32_t offset_words = (addr & TLB_2M_MASK) / sizeof(uint32_t);
+	volatile uint32_t *ptr = w->base + offset_words;
+	uint32_t dummy;
+	uint64_t start, elapsed;
+	int i;
+
+	for (i = 0; i < 100; i++)
+		dummy = *ptr;
+	(void)dummy;
+
+	start = now_ns();
+	for (i = 0; i < iterations; i++)
+		dummy = *ptr;
+	elapsed = now_ns() - start;
+
+	printf("  mmio read32:       %d ops, %.0f ns/op\n",
+	       iterations, (double)elapsed / iterations);
+}
+
+static void bench_mmio_write32(struct mmio_window *w, uint64_t addr, int iterations)
+{
+	uint32_t offset_words = (addr & TLB_2M_MASK) / sizeof(uint32_t);
+	volatile uint32_t *ptr = w->base + offset_words;
+	uint64_t start, elapsed;
+	int i;
+
+	for (i = 0; i < 100; i++)
+		*ptr = 0;
+
+	start = now_ns();
+	for (i = 0; i < iterations; i++)
+		*ptr = (uint32_t)i;
+	elapsed = now_ns() - start;
+
+	printf("  mmio write32:      %d ops, %.0f ns/op\n",
+	       iterations, (double)elapsed / iterations);
 }
 
 static int sys_io_uring_setup(unsigned entries, struct io_uring_params *p)
@@ -478,7 +603,19 @@ int main(int argc, char *argv[])
 	printf("Device: %s (ID 0x%04x), target tile (%u, %u)\n\n",
 	       dev_path, info.out.device_id, x, y);
 
-	printf("=== ioctl baseline ===\n");
+	printf("=== direct MMIO baseline (UC, L1 @ 0x4000) ===\n");
+	{
+		struct mmio_window uc_win = {};
+		if (mmio_window_open(&uc_win, fd, x, y, 0x0, 0) == 0) {
+			bench_mmio_read32(&uc_win, 0x4000, 10000);
+			bench_mmio_write32(&uc_win, 0x4000, 10000);
+			mmio_window_close(&uc_win);
+		} else {
+			printf("  SKIP (TLB alloc failed)\n");
+		}
+	}
+
+	printf("\n=== ioctl baseline ===\n");
 	bench_ioctl_read32(fd, x, y, 0x4000, 10000);
 	bench_ioctl_write32(fd, x, y, 0x4000, 10000);
 

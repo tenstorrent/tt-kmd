@@ -7,15 +7,19 @@
 #include <linux/types.h>
 #include "device.h"
 
+struct bh_tlb_pool;
+
 struct blackhole_device {
 	struct tenstorrent_device tt;
 
 	struct mutex kernel_tlb_mutex;
 	u8 __iomem *tlb_regs;
-	u8 __iomem *kernel_tlb;    // UC-mapped 2M window for reads and 32-bit ops
-	u8 __iomem *kernel_tlb_wc; // WC-mapped 2M window for block writes
+	u8 __iomem *kernel_tlb;
 	u8 __iomem *noc2axi_cfg;
 	u8 __iomem *bar2_mapping;
+
+	struct bh_tlb_pool *uc_pool;
+	struct bh_tlb_pool *wc_pool;
 
 	u64 *hwmon_attr_addrs;
 	u64 *sysfs_attr_addrs;

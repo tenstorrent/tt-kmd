@@ -41,9 +41,10 @@
 #define KERNEL_TLB_START (KERNEL_TLB_INDEX * TLB_2M_WINDOW_SIZE)
 #define KERNEL_TLB_LEN TLB_2M_WINDOW_SIZE
 
-#define KERNEL_TLB_WC_INDEX (TLB_2M_WINDOW_COUNT - 2)
-#define KERNEL_TLB_WC_START (KERNEL_TLB_WC_INDEX * TLB_2M_WINDOW_SIZE)
-#define KERNEL_TLB_WC_LEN TLB_2M_WINDOW_SIZE
+#define BH_UC_POOL_SIZE 4
+#define BH_WC_POOL_SIZE 4
+#define BH_POOL_TOTAL (BH_UC_POOL_SIZE + BH_WC_POOL_SIZE)
+#define BH_POOL_BASE_INDEX (KERNEL_TLB_INDEX - BH_POOL_TOTAL)
 
 #define NOC2AXI_CFG_START 0x1FD00000
 #define NOC2AXI_CFG_LEN 0x00100000
@@ -229,6 +230,180 @@ static int blackhole_configure_tlb_4G(struct blackhole_device *bh, int tlb,
 	return 0;
 }
 
+struct bh_pool_entry {
+	struct mutex lock;
+	int tlb_index;
+	u8 __iomem *window;
+	struct TLB_2M_REG cached;
+	unsigned long last_used;
+};
+
+struct bh_tlb_pool {
+	spinlock_t pool_lock;
+	unsigned int count;
+	struct bh_pool_entry entries[];
+};
+
+static void bh_build_tlb_reg(struct TLB_2M_REG *reg, u32 x, u32 y, u64 addr, int noc, int ordering)
+{
+	memset(reg, 0, sizeof(*reg));
+	reg->address = addr >> TLB_2M_SHIFT;
+	reg->x_end = x;
+	reg->y_end = y;
+	reg->noc = noc;
+	reg->ordering = ordering;
+}
+
+static bool bh_pool_entry_matches(struct bh_pool_entry *entry, struct TLB_2M_REG *desired)
+{
+	return entry->cached.low32 == desired->low32 &&
+	       entry->cached.mid32 == desired->mid32;
+}
+
+static u8 __iomem *bh_pool_configure(struct bh_pool_entry *entry, struct blackhole_device *bh,
+				      struct TLB_2M_REG *desired, u64 addr)
+{
+	u8 __iomem *regs = bh->tlb_regs + (entry->tlb_index * TLB_REG_SIZE);
+
+	if (desired->low32 != entry->cached.low32) {
+		iowrite32(desired->low32, regs + 0);
+		entry->cached.low32 = desired->low32;
+	}
+	if (desired->mid32 != entry->cached.mid32) {
+		iowrite32(desired->mid32, regs + 4);
+		entry->cached.mid32 = desired->mid32;
+	}
+	if (desired->high32 != entry->cached.high32) {
+		iowrite32(desired->high32, regs + 8);
+		entry->cached.high32 = desired->high32;
+	}
+
+	return entry->window + (addr & TLB_2M_WINDOW_MASK);
+}
+
+static struct bh_pool_entry *bh_pool_acquire(struct bh_tlb_pool *pool, struct TLB_2M_REG *desired)
+{
+	struct bh_pool_entry *lru = NULL;
+	struct bh_pool_entry *fallback = NULL;
+	unsigned int i;
+
+	spin_lock(&pool->pool_lock);
+
+	for (i = 0; i < pool->count; i++) {
+		struct bh_pool_entry *e = &pool->entries[i];
+
+		if (!fallback || time_before(e->last_used, fallback->last_used))
+			fallback = e;
+
+		if (!mutex_trylock(&e->lock))
+			continue;
+
+		if (bh_pool_entry_matches(e, desired)) {
+			if (lru)
+				mutex_unlock(&lru->lock);
+			e->last_used = jiffies;
+			spin_unlock(&pool->pool_lock);
+			return e;
+		}
+
+		if (!lru || time_before(e->last_used, lru->last_used)) {
+			if (lru)
+				mutex_unlock(&lru->lock);
+			lru = e;
+		} else {
+			mutex_unlock(&e->lock);
+		}
+	}
+
+	if (lru) {
+		lru->last_used = jiffies;
+		spin_unlock(&pool->pool_lock);
+		return lru;
+	}
+
+	spin_unlock(&pool->pool_lock);
+	mutex_lock(&fallback->lock);
+	fallback->last_used = jiffies;
+	return fallback;
+}
+
+static void bh_pool_release(struct bh_pool_entry *entry)
+{
+	mutex_unlock(&entry->lock);
+}
+
+static struct bh_tlb_pool *bh_tlb_pool_create(struct blackhole_device *bh,
+					       unsigned int base_index,
+					       unsigned int count, bool wc)
+{
+	struct pci_dev *pdev = bh->tt.pdev;
+	struct bh_tlb_pool *pool;
+	unsigned int i;
+
+	pool = kzalloc(struct_size(pool, entries, count), GFP_KERNEL);
+	if (!pool)
+		return NULL;
+
+	spin_lock_init(&pool->pool_lock);
+	pool->count = count;
+
+	for (i = 0; i < count; i++) {
+		struct bh_pool_entry *entry = &pool->entries[i];
+		int tlb_index = base_index + i;
+		resource_size_t bar0_start = pci_resource_start(pdev, 0);
+		resource_size_t offset = (resource_size_t)tlb_index * TLB_2M_WINDOW_SIZE;
+
+		entry->tlb_index = tlb_index;
+		mutex_init(&entry->lock);
+		entry->cached.low32 = ~0U;
+		entry->cached.mid32 = ~0U;
+		entry->cached.high32 = ~0U;
+
+		if (wc)
+			entry->window = ioremap_wc(bar0_start + offset, TLB_2M_WINDOW_SIZE);
+		else
+			entry->window = pci_iomap_range(pdev, 0, offset, TLB_2M_WINDOW_SIZE);
+
+		if (!entry->window)
+			goto fail;
+
+		set_bit(tlb_index, bh->tt.tlbs);
+	}
+
+	return pool;
+
+fail:
+	while (i-- > 0) {
+		struct bh_pool_entry *entry = &pool->entries[i];
+		clear_bit(entry->tlb_index, bh->tt.tlbs);
+		if (wc)
+			iounmap(entry->window);
+		else
+			pci_iounmap(pdev, entry->window);
+	}
+	kfree(pool);
+	return NULL;
+}
+
+static void bh_tlb_pool_destroy(struct blackhole_device *bh, struct bh_tlb_pool *pool, bool wc)
+{
+	struct pci_dev *pdev = bh->tt.pdev;
+	unsigned int i;
+
+	if (!pool)
+		return;
+
+	for (i = 0; i < pool->count; i++) {
+		struct bh_pool_entry *entry = &pool->entries[i];
+		clear_bit(entry->tlb_index, bh->tt.tlbs);
+		if (wc)
+			iounmap(entry->window);
+		else
+			pci_iounmap(pdev, entry->window);
+	}
+	kfree(pool);
+}
+
 static u8 __iomem *bh_configure_kernel_tlb(struct blackhole_device *bh, u32 x, u32 y, u64 addr, int noc)
 {
 	struct tenstorrent_noc_tlb_config config = { 0 };
@@ -244,19 +419,6 @@ static u8 __iomem *bh_configure_kernel_tlb(struct blackhole_device *bh, u32 x, u
 	return bh->kernel_tlb + offset;
 }
 
-static u8 __iomem *bh_configure_kernel_tlb_wc(struct blackhole_device *bh, u32 x, u32 y, u64 addr, int noc)
-{
-	struct tenstorrent_noc_tlb_config config = { 0 };
-	u64 offset = addr & TLB_2M_WINDOW_MASK;
-
-	config.addr = addr & ~TLB_2M_WINDOW_MASK;
-	config.x_end = x;
-	config.y_end = y;
-	config.noc = noc;
-
-	blackhole_configure_tlb_2M(bh, KERNEL_TLB_WC_INDEX, &config);
-	return bh->kernel_tlb_wc + offset;
-}
 
 static u32 noc_read32(struct blackhole_device *bh, u32 x, u32 y, u64 addr, int noc)
 {
@@ -780,20 +942,15 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 
 	bh->tlb_regs = pci_iomap_range(bh->tt.pdev, 0, TLB_REGS_START, TLB_REGS_LEN);
 	bh->kernel_tlb = pci_iomap_range(bh->tt.pdev, 0, KERNEL_TLB_START, KERNEL_TLB_LEN);
-	bh->kernel_tlb_wc = ioremap_wc(pci_resource_start(bh->tt.pdev, 0) + KERNEL_TLB_WC_START,
-					KERNEL_TLB_WC_LEN);
 	bh->noc2axi_cfg = pci_iomap_range(bh->tt.pdev, 0, NOC2AXI_CFG_START, NOC2AXI_CFG_LEN);
 	bh->bar2_mapping = pci_iomap(bh->tt.pdev, 2, 0);
 
-	if (!bh->tlb_regs || !bh->kernel_tlb || !bh->kernel_tlb_wc || !bh->noc2axi_cfg) {
+	if (!bh->tlb_regs || !bh->kernel_tlb || !bh->noc2axi_cfg) {
 		if (bh->tlb_regs)
 			pci_iounmap(bh->tt.pdev, bh->tlb_regs);
 
 		if (bh->kernel_tlb)
 			pci_iounmap(bh->tt.pdev, bh->kernel_tlb);
-
-		if (bh->kernel_tlb_wc)
-			iounmap(bh->kernel_tlb_wc);
 
 		if (bh->noc2axi_cfg)
 			pci_iounmap(bh->tt.pdev, bh->noc2axi_cfg);
@@ -805,8 +962,21 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	}
 
 	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
-	set_bit(KERNEL_TLB_WC_INDEX, tt_dev->tlbs);
 	mutex_init(&bh->kernel_tlb_mutex);
+
+	bh->wc_pool = bh_tlb_pool_create(bh, BH_POOL_BASE_INDEX, BH_WC_POOL_SIZE, true);
+	bh->uc_pool = bh_tlb_pool_create(bh, BH_POOL_BASE_INDEX + BH_WC_POOL_SIZE, BH_UC_POOL_SIZE, false);
+
+	if (!bh->uc_pool || !bh->wc_pool) {
+		bh_tlb_pool_destroy(bh, bh->uc_pool, false);
+		bh_tlb_pool_destroy(bh, bh->wc_pool, true);
+		pci_iounmap(bh->tt.pdev, bh->tlb_regs);
+		pci_iounmap(bh->tt.pdev, bh->kernel_tlb);
+		pci_iounmap(bh->tt.pdev, bh->noc2axi_cfg);
+		if (bh->bar2_mapping)
+			pci_iounmap(bh->tt.pdev, bh->bar2_mapping);
+		return false;
+	}
 
 	for (i = 0; i < ARRAY_SIZE(bh_sysfs_attributes); ++i)
 		tt_dev->telemetry_attrs[i] = &bh_sysfs_attributes[i].attr.attr;
@@ -907,12 +1077,13 @@ static void blackhole_cleanup(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 
+	bh_tlb_pool_destroy(bh, bh->uc_pool, false);
+	bh_tlb_pool_destroy(bh, bh->wc_pool, true);
+
 	if (bh->tlb_regs)
 		pci_iounmap(tt_dev->pdev, bh->tlb_regs);
 	if (bh->kernel_tlb)
 		pci_iounmap(tt_dev->pdev, bh->kernel_tlb);
-	if (bh->kernel_tlb_wc)
-		iounmap(bh->kernel_tlb_wc);
 	if (bh->noc2axi_cfg)
 		pci_iounmap(tt_dev->pdev, bh->noc2axi_cfg);
 	if (bh->bar2_mapping)
@@ -988,31 +1159,58 @@ static int blackhole_configure_outbound_atu(struct tenstorrent_device *tt_dev, u
 static u32 blackhole_noc_read32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, int noc)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-	return noc_read32(bh, x, y, addr, noc);
+	struct TLB_2M_REG desired;
+	struct bh_pool_entry *entry;
+	u8 __iomem *window;
+	u32 val;
+
+	bh_build_tlb_reg(&desired, x, y, addr, noc, 1);
+	entry = bh_pool_acquire(bh->uc_pool, &desired);
+	window = bh_pool_configure(entry, bh, &desired, addr);
+	val = ioread32(window);
+	bh_pool_release(entry);
+
+	return val;
 }
 
 static void blackhole_noc_write32(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr, u32 data, int noc)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-	noc_write32(bh, x, y, addr, data, noc);
+	struct TLB_2M_REG desired;
+	struct bh_pool_entry *entry;
+	u8 __iomem *window;
+
+	bh_build_tlb_reg(&desired, x, y, addr, noc, 1);
+	entry = bh_pool_acquire(bh->uc_pool, &desired);
+	window = bh_pool_configure(entry, bh, &desired, addr);
+	iowrite32(data, window);
+	bh_pool_release(entry);
 }
 
 static ssize_t blackhole_noc_block_read(struct tenstorrent_device *tt_dev, u32 x, u32 y, u64 addr,
 					struct page **pages, unsigned int first_page_offset, size_t len)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	struct TLB_2M_REG desired;
+	struct bh_pool_entry *entry;
 	size_t transferred = 0;
 	unsigned int page_idx = 0;
 	unsigned int page_off = first_page_offset;
 
-	mutex_lock(&bh->kernel_tlb_mutex);
+	bh_build_tlb_reg(&desired, x, y, addr, 0, 1);
+	entry = bh_pool_acquire(bh->uc_pool, &desired);
 
 	while (transferred < len) {
-		u8 __iomem *tlb_window = bh_configure_kernel_tlb(bh, x, y, addr, 0);
-		size_t tlb_remaining = TLB_2M_WINDOW_SIZE - (addr & TLB_2M_WINDOW_MASK);
+		u8 __iomem *tlb_window;
+		size_t tlb_remaining;
 		size_t xfer_remaining = len - transferred;
-		size_t tlb_chunk = min(tlb_remaining, xfer_remaining);
+		size_t tlb_chunk;
 		size_t tlb_done = 0;
+
+		bh_build_tlb_reg(&desired, x, y, addr, 0, 1);
+		tlb_window = bh_pool_configure(entry, bh, &desired, addr);
+		tlb_remaining = TLB_2M_WINDOW_SIZE - (addr & TLB_2M_WINDOW_MASK);
+		tlb_chunk = min(tlb_remaining, xfer_remaining);
 
 		while (tlb_done < tlb_chunk) {
 			size_t page_remaining = PAGE_SIZE - page_off;
@@ -1033,7 +1231,7 @@ static ssize_t blackhole_noc_block_read(struct tenstorrent_device *tt_dev, u32 x
 		addr += tlb_chunk;
 	}
 
-	mutex_unlock(&bh->kernel_tlb_mutex);
+	bh_pool_release(entry);
 
 	return transferred;
 }
@@ -1042,18 +1240,26 @@ static ssize_t blackhole_noc_block_write(struct tenstorrent_device *tt_dev, u32 
 					 struct page **pages, unsigned int first_page_offset, size_t len)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	struct TLB_2M_REG desired;
+	struct bh_pool_entry *entry;
 	size_t transferred = 0;
 	unsigned int page_idx = 0;
 	unsigned int page_off = first_page_offset;
 
-	mutex_lock(&bh->kernel_tlb_mutex);
+	bh_build_tlb_reg(&desired, x, y, addr, 0, 0);
+	entry = bh_pool_acquire(bh->wc_pool, &desired);
 
 	while (transferred < len) {
-		u8 __iomem *tlb_window = bh_configure_kernel_tlb_wc(bh, x, y, addr, 0);
-		size_t tlb_remaining = TLB_2M_WINDOW_SIZE - (addr & TLB_2M_WINDOW_MASK);
+		u8 __iomem *tlb_window;
+		size_t tlb_remaining;
 		size_t xfer_remaining = len - transferred;
-		size_t tlb_chunk = min(tlb_remaining, xfer_remaining);
+		size_t tlb_chunk;
 		size_t tlb_done = 0;
+
+		bh_build_tlb_reg(&desired, x, y, addr, 0, 0);
+		tlb_window = bh_pool_configure(entry, bh, &desired, addr);
+		tlb_remaining = TLB_2M_WINDOW_SIZE - (addr & TLB_2M_WINDOW_MASK);
+		tlb_chunk = min(tlb_remaining, xfer_remaining);
 
 		while (tlb_done < tlb_chunk) {
 			size_t page_remaining = PAGE_SIZE - page_off;
@@ -1074,7 +1280,7 @@ static ssize_t blackhole_noc_block_write(struct tenstorrent_device *tt_dev, u32 
 		addr += tlb_chunk;
 	}
 
-	mutex_unlock(&bh->kernel_tlb_mutex);
+	bh_pool_release(entry);
 
 	return transferred;
 }

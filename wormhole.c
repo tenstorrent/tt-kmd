@@ -7,8 +7,10 @@
 #include <linux/kernel.h>
 #include <linux/sysfs.h>
 #include <linux/delay.h>
+#include <linux/ktime.h>
 #include <linux/pci.h>
 
+#include "ioctl.h"
 #include "wormhole.h"
 #include "pcie.h"
 #include "module.h"
@@ -119,7 +121,7 @@
 
 // ARC message queue. FW publishes the QCB pointer in NOC_NODEID_X_1.
 #define ARC_MSG_QCB_PTR (RESET_UNIT_START + 0x01D8)
-#define ARC_MSG_READY_MS 500
+#define ARC_MSG_READY_MS 2500
 #define ARC_MSG_TYPE_POWER_SETTING 0xBF
 
 #define WRITE_IATU_REG(wh_dev, direction, region, reg, value) \
@@ -254,6 +256,7 @@ static bool wormhole_read_fw_telemetry_offset(u8 __iomem *reset_unit_regs, u32 *
 
 static bool send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
 {
+	struct pci_dev *pdev = wh->tt.pdev;
 	u8 __iomem *regs = wh->bar4_mapping + RESET_UNIT_START;
 	u32 qcb_ptr;
 	u32 queue_base;
@@ -269,38 +272,57 @@ static bool send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
 			break;
 	} while (time_before(jiffies, timeout));
 
-	if (!arc_l2_is_running(regs))
+	if (!arc_l2_is_running(regs)) {
+		dev_err(&pdev->dev, "send_arc_message: ARC L2 not running after %d ms\n",
+			ARC_MSG_READY_MS);
 		return false;
+	}
 
 	// Read QCB pointer from NOC_NODEID_X_1. Zero means FW doesn't support queues.
 	qcb_ptr = ioread32(wh->bar4_mapping + ARC_MSG_QCB_PTR);
 	if (qcb_ptr == 0) {
-		dev_warn_once(&wh->tt.pdev->dev, "ARC message queue not available (this is normal for old FW)\n");
+		dev_warn_once(&pdev->dev, "ARC message queue not available (this is normal for old FW)\n");
 		return false;
 	}
-	if (!is_range_within_csm(qcb_ptr, sizeof(u32)))
+	if (!is_range_within_csm(qcb_ptr, sizeof(u32))) {
+		dev_err(&pdev->dev, "send_arc_message: QCB ptr 0x%08x outside CSM range\n", qcb_ptr);
 		return false;
+	}
 
-	if (csm_read32(wh, qcb_ptr + 0, &queue_base) != 0)
+	if (csm_read32(wh, qcb_ptr + 0, &queue_base) != 0) {
+		dev_err(&pdev->dev, "send_arc_message: failed to read queue_base from QCB\n");
 		return false;
+	}
 
-	if (csm_read32(wh, qcb_ptr + 4, &queue_info) != 0)
+	if (csm_read32(wh, qcb_ptr + 4, &queue_info) != 0) {
+		dev_err(&pdev->dev, "send_arc_message: failed to read queue_info from QCB\n");
 		return false;
+	}
 
 	queue_base += ARC_CSM_BASE;
 	num_entries = queue_info & 0xFF;
 
-	if (!arc_msg_push(&wh->tt, msg, queue_base, num_entries))
+	if (!arc_msg_push(&wh->tt, msg, queue_base, num_entries)) {
+		dev_err(&pdev->dev, "send_arc_message: arc_msg_push failed (base=0x%x entries=%u)\n",
+			queue_base, num_entries);
 		return false;
+	}
 
 	// Trigger ARC interrupt via IRQ0.
 	arc_misc_cntl = ioread32(regs + ARC_MISC_CNTL_REG);
 	iowrite32(arc_misc_cntl | ARC_MISC_CNTL_IRQ0_MASK, regs + ARC_MISC_CNTL_REG);
 
-	if (!arc_msg_pop(&wh->tt, msg, queue_base, num_entries))
+	if (!arc_msg_pop(&wh->tt, msg, queue_base, num_entries)) {
+		dev_err(&pdev->dev, "send_arc_message: arc_msg_pop failed (timeout waiting for FW response)\n");
 		return false;
+	}
 
-	return msg->header == 0;
+	if (msg->header != 0) {
+		dev_err(&pdev->dev, "send_arc_message: FW returned error header 0x%08x\n", msg->header);
+		return false;
+	}
+
+	return true;
 }
 
 static bool wormhole_shutdown_firmware(struct pci_dev *pdev, u8 __iomem *reset_unit_regs)
@@ -1128,12 +1150,37 @@ static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct te
 	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
 	struct arc_msg msg = {0};
 	bool ok;
+	ktime_t start;
+	u8 validity = power_state->validity;
+	u8 num_valid_flags = validity & 0xF;
+	u16 flags = power_state->power_flags;
 
-	msg.header = ARC_MSG_TYPE_POWER_SETTING | (power_state->validity << 8) | (power_state->power_flags << 16);
+	// HACK: don't let us or userspace turn off GDDR or turn down PCIe gen.
+	if (num_valid_flags >= 2)
+		flags |= TT_POWER_FLAG_MRISC_PHY_WAKEUP;
+	if (num_valid_flags >= 5)
+		flags |= TT_POWER_FLAG_PCIE_MAX_SPEED;
+
+	dev_info(&tt_dev->pdev->dev,
+		 "set_power_state: validity=0x%02x (num_flags=%u) power_flags=0x%04x [%s%s%s%s%s]\n",
+		 validity, num_valid_flags, flags,
+		 (flags & TT_POWER_FLAG_MAX_AI_CLK)       ? "MAX_AI_CLK "       : "min_ai_clk ",
+		 (flags & TT_POWER_FLAG_MRISC_PHY_WAKEUP) ? "PHY_WAKEUP "      : "phy_powerdown ",
+		 (flags & TT_POWER_FLAG_TENSIX_ENABLE)     ? "TENSIX_EN "       : "tensix_gate ",
+		 (flags & TT_POWER_FLAG_L2CPU_ENABLE)      ? "L2CPU_EN "        : "l2cpu_gate ",
+		 (flags & TT_POWER_FLAG_PCIE_MAX_SPEED)    ? "PCIE_MAX"         : "pcie_gen1");
+
+	msg.header = ARC_MSG_TYPE_POWER_SETTING | (validity << 8) | (flags << 16);
 	BUILD_BUG_ON(sizeof(power_state->power_settings) != sizeof(msg.payload));
 	memcpy(msg.payload, power_state->power_settings, sizeof(msg.payload));
 
+	start = ktime_get();
 	ok = send_arc_message(wh, &msg);
+
+	dev_info(&tt_dev->pdev->dev,
+		 "set_power_state: %s in %lld ms\n",
+		 ok ? "completed" : "FAILED",
+		 ktime_ms_delta(ktime_get(), start));
 
 	if (!ok)
 		return -EINVAL;

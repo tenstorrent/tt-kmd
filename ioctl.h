@@ -405,6 +405,7 @@ struct tenstorrent_power_state {
 #define TT_POWER_FLAG_MRISC_PHY_WAKEUP  (1U << 1) /* 1=PHY Wakeup,    0=PHY Powerdown */
 #define TT_POWER_FLAG_TENSIX_ENABLE     (1U << 2) /* 1=Enable Tensix, 0=Clock Gate Tensix */
 #define TT_POWER_FLAG_L2CPU_ENABLE      (1U << 3) /* 1=Enable L2CPU,  0=Clock Gate L2CPU */
+#define TT_POWER_FLAG_PCIE_MAX_SPEED	(1U << 4) /* 1=Max PCIe Gen,  0=Gen1 */
 	__u16 power_settings[14];
 };
 

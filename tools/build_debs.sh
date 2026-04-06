@@ -29,15 +29,20 @@ if [[ "${VERSION}" != "${DKMS_VERSION}" ]]; then
     exit 1
 fi
 
-echo "Building ${PACKAGE_NAME} version ${VERSION}"
+# Debian uses ~ for prerelease sorting (2.7.0~rc1 sorts before 2.7.0).
+DEB_VERSION="${VERSION//-/\~}"
+
+echo "Building ${PACKAGE_NAME}"
+echo "  Source version: ${VERSION}"
+echo "  Deb version:    ${DEB_VERSION}"
 
 # Create temporary build directory
 BUILD_DIR=$(mktemp -d --tmpdir)
 trap 'rm -rf "${BUILD_DIR}"' EXIT
 
-PACKAGE_DIR="${BUILD_DIR}/${PACKAGE_NAME}_${VERSION}_all"
+PACKAGE_DIR="${BUILD_DIR}/${PACKAGE_NAME}_${DEB_VERSION}_all"
 DEBIAN_DIR="${PACKAGE_DIR}/DEBIAN"
-SRC_DIR="${PACKAGE_DIR}/usr/src/${MODULE_NAME}-${VERSION}"
+SRC_DIR="${PACKAGE_DIR}/usr/src/${MODULE_NAME}-${DEB_VERSION}"
 
 mkdir -p "${DEBIAN_DIR}"
 mkdir -p "${SRC_DIR}"
@@ -53,7 +58,7 @@ chmod 755 "${SRC_DIR}/dkms-post-install"
 # Create control file
 cat > "${DEBIAN_DIR}/control" << EOF
 Package: ${PACKAGE_NAME}
-Version: ${VERSION}
+Version: ${DEB_VERSION}
 Section: misc
 Priority: optional
 Architecture: all
@@ -87,7 +92,7 @@ exit 0
 EOF
 
 # Replace version placeholder
-sed -i "s/__VERSION__/${VERSION}/g" "${DEBIAN_DIR}/postinst"
+sed -i "s/__VERSION__/${DEB_VERSION}/g" "${DEBIAN_DIR}/postinst"
 chmod 755 "${DEBIAN_DIR}/postinst"
 
 # Create prerm script
@@ -105,7 +110,7 @@ exit 0
 EOF
 
 # Replace version placeholder
-sed -i "s/__VERSION__/${VERSION}/g" "${DEBIAN_DIR}/prerm"
+sed -i "s/__VERSION__/${DEB_VERSION}/g" "${DEBIAN_DIR}/prerm"
 chmod 755 "${DEBIAN_DIR}/prerm"
 
 # Build the .deb package
@@ -118,7 +123,7 @@ if [[ -n "${DEB_OUTPUT_DIR:-}" ]]; then
     OUTPUT_DIR="${DEB_OUTPUT_DIR}"
 fi
 
-DEB_FILE="${PACKAGE_NAME}_${VERSION}_all.deb"
+DEB_FILE="${PACKAGE_NAME}_${DEB_VERSION}_all.deb"
 mv "${BUILD_DIR}/${DEB_FILE}" "${OUTPUT_DIR}/"
 
 echo ""

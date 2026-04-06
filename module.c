@@ -7,11 +7,16 @@
 #include <linux/pci.h>
 #include <linux/debugfs.h>
 #include <linux/proc_fs.h>
+#include <linux/version.h>
 
 #include "chardev.h"
 #include "enumerate.h"
 
 #include "module.h"
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
+#error "tt-kmd requires Linux 5.4 or later"
+#endif
 
 #define TENSTORRENT_DRIVER_VERSION_STRING \
 	__stringify(TENSTORRENT_DRIVER_VERSION_MAJOR) "." \

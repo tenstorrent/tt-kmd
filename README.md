@@ -10,6 +10,10 @@
 
 The driver registers device files named `/dev/tenstorrent/%d`, one for each enumerated device.
 
+## Supported kernels:
+
+Linux 5.4 or later. The driver is build-tested against mainline kernel versions from 5.4 through 6.18.
+
 ### To install:
 
 Pre-built `.deb` packages for Debian and Ubuntu are available at [https://github.com/tenstorrent/tt-kmd/releases](https://github.com/tenstorrent/tt-kmd/releases)

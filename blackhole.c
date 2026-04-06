@@ -622,12 +622,6 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	struct pci_dev *pdev = tt_dev->pdev;
 	struct arc_msg msg = { 0 };
-	bool is_galaxy = (pdev->subsystem_device == PCI_SUBSYSTEM_DEVICE_GALAXY);
-
-	// Workaround for kernels where pcie_failed_link_retrain() may have
-	// forced the link to Gen1. Retrain to full speed. Only needed on Galaxy.
-	if (is_galaxy)
-		pcie_retrain_link_to_max_speed(pdev);
 
 	pcie_set_readrq(pdev, MAX_MRRS);
 

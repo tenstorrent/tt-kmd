@@ -5,6 +5,8 @@
 #include <linux/bitfield.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/sort.h>
 #include <linux/jiffies.h>
 #include <linux/delay.h>
 
@@ -440,12 +442,8 @@ static const struct hwmon_chip_info bh_hwmon_chip_info = {
 static int blackhole_read_telemetry_tag(struct tenstorrent_device *tt_dev, u16 tag_id, u32 *value)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-	u64 addr;
+	u64 addr = telem_cache_lookup(tt_dev, tag_id);
 
-	if (tag_id >= TELEM_TAG_CACHE_SIZE)
-		return -EINVAL;
-
-	addr = tt_dev->telemetry_tag_cache[tag_id];
 	if (addr == 0)
 		return -ENODATA;
 
@@ -455,13 +453,17 @@ static int blackhole_read_telemetry_tag(struct tenstorrent_device *tt_dev, u16 t
 static int telemetry_probe(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	struct telem_cache_entry *cache;
 	u32 base_addr, data_addr;
 	u32 version, major_ver, minor_ver, patch_ver;
 	u32 tags_addr;
 	u32 num_entries;
 	u32 i;
+	u16 count = 0;
 
-	memset(tt_dev->telemetry_tag_cache, 0, sizeof(tt_dev->telemetry_tag_cache));
+	kfree(tt_dev->telemetry_cache);
+	tt_dev->telemetry_cache = NULL;
+	tt_dev->telemetry_cache_count = 0;
 
 	base_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_PTR, 0);
 	data_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_DATA, 0);
@@ -483,6 +485,14 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 	}
 
 	num_entries = noc_read32(bh, ARC_X, ARC_Y, base_addr + 4, 0);
+	if (num_entries == 0) {
+		dev_warn(&tt_dev->pdev->dev, "No telemetry entries found.\n");
+		return 0;
+	}
+
+	cache = kcalloc(num_entries, sizeof(*cache), GFP_KERNEL);
+	if (!cache)
+		return -ENOMEM;
 
 	for (i = 0; i < num_entries; ++i) {
 		u32 tag_entry = noc_read32(bh, ARC_X, ARC_Y, tags_addr + (i * 4), 0);
@@ -490,9 +500,27 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 		u16 offset = (tag_entry >> 16) & 0xFFFF;
 		u32 addr = data_addr + (offset * 4);
 
-		if (tag_id < TELEM_TAG_CACHE_SIZE)
-			tt_dev->telemetry_tag_cache[tag_id] = addr;
+		if (!telem_tag_is_wanted(tt_dev, tag_id))
+			continue;
+
+		cache[count].tag_id = tag_id;
+		cache[count].address = addr;
+		count++;
 	}
+
+	sort(cache, count, sizeof(*cache), telem_cache_entry_cmp, NULL);
+
+	if (count == 0) {
+		kfree(cache);
+		cache = NULL;
+	} else if (count < num_entries) {
+		struct telem_cache_entry *new_cache = krealloc(cache, count * sizeof(*cache), GFP_KERNEL);
+		if (new_cache)
+			cache = new_cache;
+	}
+
+	tt_dev->telemetry_cache = count > 0 ? cache : NULL;
+	tt_dev->telemetry_cache_count = count;
 
 	return 0;
 }
@@ -609,6 +637,11 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
 	mutex_init(&bh->kernel_tlb_mutex);
 
+	tt_dev->hwmon_attributes = bh_hwmon_attrs;
+	tt_dev->hwmon_labels = bh_hwmon_labels;
+	tt_dev->telemetry_sysfs = bh_sysfs_attributes;
+	tt_dev->telemetry_sysfs_count = ARRAY_SIZE(bh_sysfs_attributes);
+
 	for (i = 0; i < ARRAY_SIZE(bh_sysfs_attributes); ++i)
 		tt_dev->telemetry_attrs[i] = &bh_sysfs_attributes[i].attr.attr;
 	tt_dev->telemetry_group.attrs = tt_dev->telemetry_attrs;
@@ -658,9 +691,6 @@ static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
 		if (!r)
 			bh->telemetry_group_registered = true;
 
-		tt_dev->hwmon_attributes = bh_hwmon_attrs;
-		tt_dev->hwmon_labels = bh_hwmon_labels;
-
 		hwmon_device = hwmon_device_register_with_info(dev, "blackhole", tt_dev, &bh_hwmon_chip_info, NULL);
 		if (IS_ERR(hwmon_device))
 			return false;
@@ -692,6 +722,10 @@ static void blackhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
 		device_remove_group(&tt_dev->dev, &bh_pcie_perf_counters_group);
 		bh->pcie_perf_group_registered = false;
 	}
+
+	kfree(tt_dev->telemetry_cache);
+	tt_dev->telemetry_cache = NULL;
+	tt_dev->telemetry_cache_count = 0;
 }
 
 static void blackhole_cleanup_hardware(struct tenstorrent_device *tt_dev)

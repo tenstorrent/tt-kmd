@@ -29,8 +29,8 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - fedora:41
           - fedora:42
+          - fedora:43
           - almalinux:10
     runs-on: ubuntu-latest
     container:

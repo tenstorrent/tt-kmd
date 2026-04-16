@@ -14,7 +14,7 @@ struct arc_msg {
 };
 
 #define ARC_MSG_QUEUE_HEADER_SIZE 32
-#define ARC_MSG_TIMEOUT_MS        100
+#define ARC_MSG_TIMEOUT_MS        1000
 
 #define ARC_MSG_QUEUE_REQ_WPTR(base) ((base) + 0x00)
 #define ARC_MSG_QUEUE_RES_RPTR(base) ((base) + 0x04)

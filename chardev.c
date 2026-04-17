@@ -442,10 +442,16 @@ int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_dev)
 }
 
 // Delayed work: send the aggregated idle power-down message after the
-// grace period elapsed with no open fds.  Body added in a later change;
-// this stub is present so teardown can cancel the work unconditionally.
+// grace period elapses with no open fds.  Nothing arms this work yet;
+// a subsequent change adds arming in the release path and the teardown
+// ordering in pci_remove that makes this handler safe to call unguarded.
 void tenstorrent_power_down_work_func(struct work_struct *work)
 {
+	struct tenstorrent_device *tt_dev = container_of(to_delayed_work(work),
+							 struct tenstorrent_device,
+							 power_down_work);
+
+	tenstorrent_set_aggregated_power_state(tt_dev);
 }
 
 static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorrent_power_state __user *arg)

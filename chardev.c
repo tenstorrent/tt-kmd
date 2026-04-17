@@ -441,6 +441,13 @@ int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_dev)
 	return ret;
 }
 
+// Delayed work: send the aggregated idle power-down message after the
+// grace period elapsed with no open fds.  Body added in a later change;
+// this stub is present so teardown can cancel the work unconditionally.
+void tenstorrent_power_down_work_func(struct work_struct *work)
+{
+}
+
 static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorrent_power_state __user *arg)
 {
 	struct tenstorrent_device *tt_dev = priv->device;

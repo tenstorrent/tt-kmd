@@ -316,6 +316,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	mutex_init(&tt_dev->chardev_mutex);
 	mutex_init(&tt_dev->iatu_mutex);
+	INIT_DELAYED_WORK(&tt_dev->power_down_work, tenstorrent_power_down_work_func);
 
 	// Use dma_address_bits from module parameter or device class for coherent
 	// DMA mask, but use a 64-bit mask for streaming mappings. The problem this
@@ -410,6 +411,8 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 		cancel_delayed_work_sync(&wh->fw_ready_work);
 	}
 
+	cancel_delayed_work_sync(&tt_dev->power_down_work);
+
 	// In a hotplug scenario, the device may not be accessible anymore. Check
 	// if it is still accessible by reading the vendor ID. If it is not, skip
 	// cleanup_hardware (which requires device access).
@@ -467,6 +470,8 @@ void tenstorrent_device_put(struct tenstorrent_device *tt_dev) {
 static int tenstorrent_suspend(struct device *dev) {
 	struct pci_dev *pdev = to_pci_dev(dev);
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(pdev);
+
+	cancel_delayed_work_sync(&tt_dev->power_down_work);
 
 	tt_dev->dev_class->cleanup_hardware(tt_dev);
 

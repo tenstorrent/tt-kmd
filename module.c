@@ -51,6 +51,14 @@ bool power_policy = true;
 module_param(power_policy, bool, 0444);
 MODULE_PARM_DESC(power_policy, "Enable power policy: low power at probe, re-aggregate on close (default=on).");
 
+uint idle_power_down_grace_ms = 0;
+module_param(idle_power_down_grace_ms, uint, 0644);
+MODULE_PARM_DESC(idle_power_down_grace_ms,
+		 "Delay in ms between the last fd closing a device and the "
+		 "idle power-down message being sent.  0 sends the message "
+		 "synchronously at close (default).  Only honored by device "
+		 "classes that opt in via defer_idle_powerdown.");
+
 const struct pci_device_id tenstorrent_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_TENSTORRENT, PCI_DEVICE_ID_GRAYSKULL),
 	  .driver_data=(kernel_ulong_t)NULL}, // Deprecated

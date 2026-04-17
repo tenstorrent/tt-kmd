@@ -101,6 +101,14 @@ struct tenstorrent_device_class {
 	int (*set_power_state)(struct tenstorrent_device *ttdev, struct tenstorrent_power_state *power_state);
 	int (*read_telemetry_tag)(struct tenstorrent_device *ttdev, u16 tag_id, u32 *value);
 	int (*probe_telemetry)(struct tenstorrent_device *ttdev);
+
+	// If true, the idle power-down message is sent from a delayed work
+	// item armed when the last fd closes, rather than synchronously from
+	// release().  Honors idle_power_down_grace_ms: a value of 0 falls
+	// back to the synchronous path even when this is true.  If false,
+	// release() unconditionally sends synchronously (historical
+	// behavior).
+	bool defer_idle_powerdown;
 };
 
 void tenstorrent_device_put(struct tenstorrent_device *);

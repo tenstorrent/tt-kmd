@@ -12,6 +12,7 @@
 #include <linux/kref.h>
 #include <linux/rwsem.h>
 #include <linux/wait.h>
+#include <linux/workqueue.h>
 
 #include "ioctl.h"
 #include "memory.h"
@@ -52,6 +53,11 @@ struct tenstorrent_device {
 	const struct tt_hwmon_label *hwmon_labels;
 
 	struct list_head open_fds_list;	// List of struct chardev_private, linked through open_fds field
+
+	// Deferred idle power-down work.  Cancelled in suspend and remove
+	// so an in-flight FW message cannot race cleanup_hardware.  No
+	// code arms this work yet.
+	struct delayed_work power_down_work;
 
 	DECLARE_BITMAP(tlbs, TENSTORRENT_MAX_INBOUND_TLBS);
 	u32 tlb_counts[MAX_TLB_KINDS];	// Per-device TLB counts (may differ from dev_class defaults)

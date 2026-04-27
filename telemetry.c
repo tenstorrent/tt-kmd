@@ -1,17 +1,65 @@
 // SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <linux/bsearch.h>
 #include <linux/rwsem.h>
 #include <linux/sysfs.h>
 
 #include "device.h"
 
+int telem_cache_entry_cmp(const void *a, const void *b)
+{
+	u16 ta = ((const struct telem_cache_entry *)a)->tag_id;
+	u16 tb = ((const struct telem_cache_entry *)b)->tag_id;
+
+	if (ta < tb)
+		return -1;
+	if (ta > tb)
+		return 1;
+	return 0;
+}
+
+u64 telem_cache_lookup(const struct tenstorrent_device *tt_dev, u16 tag_id)
+{
+	struct telem_cache_entry key = { .tag_id = tag_id };
+	const struct telem_cache_entry *found;
+
+	found = bsearch(&key, tt_dev->telemetry_cache, tt_dev->telemetry_cache_count,
+			sizeof(*tt_dev->telemetry_cache), telem_cache_entry_cmp);
+
+	return found ? found->address : 0;
+}
+
+bool telem_tag_is_wanted(const struct tenstorrent_device *tt_dev, u16 tag_id)
+{
+	u16 i;
+
+	if (tt_dev->hwmon_attributes) {
+		for (i = 0; tt_dev->hwmon_attributes[i].tag_id != 0; i++) {
+			if (tt_dev->hwmon_attributes[i].tag_id == tag_id)
+				return true;
+		}
+	}
+
+	for (i = 0; i < tt_dev->telemetry_sysfs_count; i++) {
+		const struct tenstorrent_sysfs_attr *attr = &tt_dev->telemetry_sysfs[i];
+
+		if (attr->tag_id == tag_id)
+			return true;
+
+		// u64_hex attributes (eg. BOARD_ID and ASIC_ID) read two consecutive
+		// tags: tag_id for the high word and tag_id+1 for the low word.
+		// The low-word tag isn't listed in the table, so match it here.
+		if (attr->attr.show == tt_sysfs_show_u64_hex && attr->tag_id + 1 == tag_id)
+			return true;
+	}
+
+	return false;
+}
+
 int tt_telemetry_read32(struct tenstorrent_device *tt_dev, u16 tag_id, u32 *value)
 {
 	int r;
-
-	if (tag_id >= TELEM_TAG_CACHE_SIZE)
-		return -EINVAL;
 
 	down_read(&tt_dev->reset_rwsem);
 
@@ -135,10 +183,7 @@ umode_t tt_sysfs_telemetry_is_visible(struct kobject *kobj, struct attribute *at
 	struct tenstorrent_sysfs_attr *ts_attr = container_of(dev_attr, struct tenstorrent_sysfs_attr, attr);
 	bool visible;
 
-	if (ts_attr->tag_id >= TELEM_TAG_CACHE_SIZE)
-		return 0;
-
-	visible = tt_dev->telemetry_tag_cache[ts_attr->tag_id] != 0;
+	visible = telem_cache_lookup(tt_dev, ts_attr->tag_id) != 0;
 	return visible ? attr->mode : 0;
 }
 
@@ -159,7 +204,7 @@ static umode_t tt_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types 
 
 	for (a = tt_dev->hwmon_attributes; a && a->tag_id; a++) {
 		if (type == a->type && attr == a->attr) {
-			bool valid = tt_dev->telemetry_tag_cache[a->tag_id] != 0;
+			bool valid = telem_cache_lookup(tt_dev, a->tag_id) != 0;
 			return valid ? S_IRUGO : 0;
 		}
 	}

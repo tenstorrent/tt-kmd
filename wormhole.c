@@ -1075,4 +1075,5 @@ struct tenstorrent_device_class wormhole_class = {
 	.csm_read32 = wormhole_csm_read32,
 	.csm_write32 = wormhole_csm_write32,
 	.set_power_state = wormhole_set_power_state,
+	.defer_idle_powerdown = true,
 };

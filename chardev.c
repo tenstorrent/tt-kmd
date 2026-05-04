@@ -442,9 +442,11 @@ int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_dev)
 }
 
 // Delayed work: send the aggregated idle power-down message after the
-// grace period elapses with no open fds.  Nothing arms this work yet;
-// a subsequent change adds arming in the release path and the teardown
-// ordering in pci_remove that makes this handler safe to call unguarded.
+// grace period elapses with no open fds.  Safe to run unguarded:
+// tt_cdev_release only arms this under chardev_mutex when !detached,
+// and tenstorrent_pci_remove writes detached=true under the same mutex
+// before cancel_delayed_work_sync, so the handler cannot fire after
+// teardown begins.
 void tenstorrent_power_down_work_func(struct work_struct *work)
 {
 	struct tenstorrent_device *tt_dev = container_of(to_delayed_work(work),
@@ -676,6 +678,19 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	if (!power_aware)
 		private_data->power_state.power_flags = TT_POWER_FLAG_ALL & ~TT_POWER_FLAG_MAX_AI_CLK;
 
+	// Eagerly drain any deferred powerdown armed by a previous
+	// last-close so an open() arriving during the grace window
+	// doesn't ship a spurious powerdown->powerup pair.  Correctness
+	// doesn't depend on this: the handler re-aggregates current state
+	// and would ship the up-state once list_add lands below.  If the
+	// work is merely pending, the cancel is silent (no FW traffic,
+	// chip is still up); if mid-fire, we wait for the powerdown to
+	// complete and the aggregation below issues the balancing
+	// powerup.  Safe no-op when nothing is armed.
+	if (tt_dev->dev_class->defer_idle_powerdown
+	    && cancel_delayed_work_sync(&tt_dev->power_down_work))
+		dev_dbg(&tt_dev->pdev->dev, "cancelled pending idle powerdown\n");
+
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_add(&private_data->open_fd, &tt_dev->open_fds_list);
 	mutex_unlock(&tt_dev->chardev_mutex);
@@ -696,13 +711,14 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	struct chardev_private *priv = file->private_data;
 	struct tenstorrent_device *tt_dev = priv->device;
 	unsigned int bitpos;
+	bool defer = tt_dev->dev_class->defer_idle_powerdown;
 	bool power_aware = file->f_flags & O_APPEND;
 	bool is_minimum_power = priv->power_state.validity == TT_POWER_VALIDITY(15, 0)
 				&& priv->power_state.power_flags == 0;
 	bool has_power_contribution = !power_aware || !is_minimum_power;
-	bool power_down = !tt_dev->detached && power_policy && !tt_dev->needs_hw_init
-			  && has_power_contribution;
 	bool cleanup_noc = !tt_dev->detached && priv->noc_cleanup.enabled;
+	bool last_close = false;
+	bool armed = false;
 
 	if (cleanup_noc)
 		tt_dev->dev_class->noc_write32(
@@ -730,10 +746,31 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_del(&priv->open_fd);
+	last_close = list_empty(&tt_dev->open_fds_list);
+
+	// Armed under chardev_mutex; see the teardown comment in
+	// tenstorrent_pci_remove() for the invariant this supports.
+	// has_power_contribution gates the arm for the same reason it
+	// gates the synchronous fallback below: a zero-contribution
+	// power-aware fd closing after RESET_PCIE_LINK must not generate
+	// FW traffic (commit 40e6405).
+	if (defer && last_close && has_power_contribution && power_policy
+	    && !tt_dev->detached && !tt_dev->needs_hw_init
+	    && idle_power_down_grace_ms > 0) {
+		schedule_delayed_work(&tt_dev->power_down_work,
+				      msecs_to_jiffies(idle_power_down_grace_ms));
+		armed = true;
+	}
 	mutex_unlock(&tt_dev->chardev_mutex);
 
-	if (power_down)
+	if (armed) {
+		dev_dbg(&tt_dev->pdev->dev,
+			"deferred idle powerdown armed: grace=%u ms\n",
+			idle_power_down_grace_ms);
+	} else if (has_power_contribution && power_policy && !tt_dev->detached
+		   && !tt_dev->needs_hw_init) {
 		tenstorrent_set_aggregated_power_state(tt_dev);
+	}
 
 	tenstorrent_device_put(tt_dev);
 	put_pid(priv->pid);

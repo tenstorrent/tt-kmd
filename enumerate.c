@@ -411,6 +411,18 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 		cancel_delayed_work_sync(&wh->fw_ready_work);
 	}
 
+	// Fence deferred-powerdown arming before draining.  tt_cdev_release
+	// arms power_down_work under chardev_mutex only when it observes
+	// !detached, so writing detached=true here under the same mutex
+	// partitions concurrent releases cleanly: any that armed did so
+	// strictly before this write and are drained by the cancel below;
+	// any that run after observe detached and skip the arm.  Without
+	// this ordering a release could slip an arm past the cancel and
+	// fire its FW message into a torn-down device.
+	mutex_lock(&tt_dev->chardev_mutex);
+	tt_dev->detached = true;
+	mutex_unlock(&tt_dev->chardev_mutex);
+
 	cancel_delayed_work_sync(&tt_dev->power_down_work);
 
 	// In a hotplug scenario, the device may not be accessible anymore. Check
@@ -426,10 +438,9 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	if (tt_dev->dev_class->cleanup_telemetry)
 		tt_dev->dev_class->cleanup_telemetry(tt_dev);
 
-	// Acquire reset_rwsem for write to ensure all in-flight ioctls complete
-	// before we set detached and unmap the BARs.
+	// Drain in-flight ioctls before BAR unmap.  detached was already
+	// set under chardev_mutex above.
 	down_write(&tt_dev->reset_rwsem);
-	tt_dev->detached = true;
 	tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
 	up_write(&tt_dev->reset_rwsem);
 

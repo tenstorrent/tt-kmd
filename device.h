@@ -54,9 +54,10 @@ struct tenstorrent_device {
 
 	struct list_head open_fds_list;	// List of struct chardev_private, linked through open_fds field
 
-	// Deferred idle power-down work.  Cancelled in suspend and remove
-	// so an in-flight FW message cannot race cleanup_hardware.  No
-	// code arms this work yet.
+	// Deferred idle power-down work.  Armed by tt_cdev_release on last
+	// close when dev_class->defer_idle_powerdown is set and
+	// idle_power_down_grace_ms > 0.  Cancelled in suspend and remove so
+	// an in-flight FW message cannot race cleanup_hardware.
 	struct delayed_work power_down_work;
 
 	DECLARE_BITMAP(tlbs, TENSTORRENT_MAX_INBOUND_TLBS);

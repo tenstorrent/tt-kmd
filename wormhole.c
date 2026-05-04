@@ -1028,10 +1028,6 @@ static int wormhole_csm_write32(struct tenstorrent_device *tt_dev, u64 addr, u32
 
 static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct tenstorrent_power_state *power_state)
 {
-	// WH firmware can take over a second to process power state changes,
-	// blocking open() and close().
-	// TODO: fix FW latency or move the message off the calling thread.
-#if 0
 	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
 	struct arc_msg msg = {0};
 	bool ok;
@@ -1040,11 +1036,13 @@ static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct te
 	BUILD_BUG_ON(sizeof(power_state->power_settings) != sizeof(msg.payload));
 	memcpy(msg.payload, power_state->power_settings, sizeof(msg.payload));
 
+	dev_dbg(&wh->tt.pdev->dev, "Power state request: validity=%#x flags=%#x\n",
+		power_state->validity, power_state->power_flags);
+
 	ok = send_arc_message(wh, &msg);
 
 	if (!ok)
 		return -EINVAL;
-#endif
 
 	return 0;
 }
@@ -1077,4 +1075,5 @@ struct tenstorrent_device_class wormhole_class = {
 	.csm_read32 = wormhole_csm_read32,
 	.csm_write32 = wormhole_csm_write32,
 	.set_power_state = wormhole_set_power_state,
+	.defer_idle_powerdown = true,
 };

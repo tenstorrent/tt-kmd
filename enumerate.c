@@ -430,6 +430,10 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
 	up_write(&tt_dev->reset_rwsem);
 
+	// Wake any LOCK_CTL ACQUIRE_BLOCKING waiters parked on this device so
+	// they observe detached and return -ENODEV instead of waiting forever.
+	wake_up_interruptible(&tt_dev->resource_lock_waitqueue);
+
 	list_for_each_entry_safe(priv, tmp, &tt_dev->open_fds_list, open_fd) {
 		tenstorrent_memory_cleanup(priv);
 	}

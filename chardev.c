@@ -259,6 +259,12 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	out.output_size_bytes = sizeof(out);
 	out.result = !ok;
 
+	// Wake any LOCK_CTL ACQUIRE_BLOCKING waiters. If reset_gen was bumped
+	// or the device is otherwise unusable for them, they will observe it
+	// and return -ENODEV instead of waiting forever for a lock that no
+	// pre-reset fd can ever release via ioctl.
+	wake_up_interruptible(&tt_dev->resource_lock_waitqueue);
+
 	if (clear_user(&arg->out, in.output_size_bytes) != 0)
 		return -EFAULT;
 
@@ -270,11 +276,69 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	return 0;
 }
 
+// Resource locks survive reset.  A reset invalidates every pre-reset fd
+// (open_reset_gen no longer matches reset_gen), so the holder cannot release
+// via ioctl; only close(fd) clears the bits.  ACQUIRE_BLOCKING from a
+// pre-reset fd therefore returns -ENODEV after a reset because the fd is no
+// longer allowed to acquire anything.
+//
+// Holding reset_rwsem across wait_event_interruptible deadlocks RESET_DEVICE
+// (which needs the rwsem for write) and starves all other ioctls because the
+// rwsem is writer-fair.  Drop it for the duration of the wait and reacquire
+// before returning so the caller's matching up_read in tt_cdev_ioctl stays
+// balanced.
+static long acquire_resource_lock_blocking(struct chardev_private *priv, u8 idx)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	bool got_bit = false;
+	long w = 0;
+
+	up_read(&tt_dev->reset_rwsem);
+
+	while (!got_bit) {
+		w = wait_event_interruptible(tt_dev->resource_lock_waitqueue,
+			!test_bit(idx, tt_dev->resource_lock) ||
+			tt_dev->detached ||
+			atomic_long_read(&tt_dev->reset_gen) != priv->open_reset_gen);
+		if (w)
+			break;
+		if (tt_dev->detached ||
+		    atomic_long_read(&tt_dev->reset_gen) != priv->open_reset_gen)
+			break;
+		got_bit = !test_and_set_bit(idx, tt_dev->resource_lock);
+	}
+
+	down_read(&tt_dev->reset_rwsem);
+
+	if (w)
+		return -ERESTARTSYS;
+
+	// If a reset/remove raced in after we set the device bit, give the
+	// bit back: the reset is treated as having won against the unlock
+	// that would have made the bit takeable.  The caller never observes
+	// a successful acquire on a fd that is now invalid.
+	if (tt_dev->detached ||
+	    atomic_long_read(&tt_dev->reset_gen) != priv->open_reset_gen) {
+		if (got_bit) {
+			clear_bit(idx, tt_dev->resource_lock);
+			wake_up_interruptible(&tt_dev->resource_lock_waitqueue);
+		}
+		return -ENODEV;
+	}
+
+	if (!got_bit)
+		return -ENODEV;
+
+	set_bit(idx, priv->resource_lock);
+	return 0;
+}
+
 // Ordering invariant: acquire sets global then local; release clears local then
 // global. This ensures the global bit is always set while the local bit is set.
 static long ioctl_lock_ctl(struct chardev_private *priv, struct tenstorrent_lock_ctl __user *arg)
 {
 	u32 bytes_to_copy;
+	long blocking_ret;
 
 	struct tenstorrent_lock_ctl_in in;
 	struct tenstorrent_lock_ctl_out out;
@@ -298,10 +362,9 @@ static long ioctl_lock_ctl(struct chardev_private *priv, struct tenstorrent_lock
 		}
 		break;
 	case TENSTORRENT_LOCK_CTL_ACQUIRE_BLOCKING:
-		if (wait_event_interruptible(priv->device->resource_lock_waitqueue,
-					     !test_and_set_bit(in.index, priv->device->resource_lock)))
-			return -ERESTARTSYS;
-		set_bit(in.index, priv->resource_lock);
+		blocking_ret = acquire_resource_lock_blocking(priv, in.index);
+		if (blocking_ret)
+			return blocking_ret;
 		out.value = 1;
 		break;
 	case TENSTORRENT_LOCK_CTL_RELEASE:

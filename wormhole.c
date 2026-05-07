@@ -118,7 +118,7 @@
 // ARC message queue. FW publishes the QCB pointer in NOC_NODEID_X_1.
 #define ARC_MSG_QCB_PTR (RESET_UNIT_START + 0x01D8)
 #define ARC_MSG_READY_MS 500
-#define ARC_MSG_TYPE_POWER_SETTING 0xBF
+#define ARC_MSG_TYPE_POWER_SETTING 0xC0
 
 #define WRITE_IATU_REG(wh_dev, direction, region, reg, value) \
 	write_iatu_reg(wh_dev, IATU_##direction, region, \

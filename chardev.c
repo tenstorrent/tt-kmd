@@ -93,6 +93,7 @@ int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 	char name[16];
 
 	init_waitqueue_head(&tt_dev->resource_lock_waitqueue);
+	init_waitqueue_head(&tt_dev->chardev_excl_waitqueue);
 
 	device_initialize(&tt_dev->dev);
 	tt_dev->dev.devt = devt;
@@ -188,6 +189,14 @@ static long ioctl_get_driver_info(struct chardev_private *priv,
 	return 0;
 }
 
+// Bump the device's reset generation and bring this fd's open_reset_gen along
+// with it. Other fds become permanently invalid, but the resetter keeps a live
+// fd so it can complete the reset sequence without a close/reopen window.
+static void bump_reset_gen(struct chardev_private *priv)
+{
+	priv->open_reset_gen = atomic_long_inc_return(&priv->device->reset_gen);
+}
+
 static long ioctl_reset_device(struct chardev_private *priv,
 			       struct tenstorrent_reset_device __user *arg)
 {
@@ -220,21 +229,21 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		tenstorrent_vma_zap(tt_dev);
 		ok = pcie_hot_reset_and_restore_state(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_CONFIG_WRITE) {
-		atomic_long_inc(&priv->device->reset_gen);
+		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
 		ok = pcie_timer_interrupt(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_USER_RESET) {
-		atomic_long_inc(&priv->device->reset_gen);
+		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
 		ok = set_reset_marker(pdev);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
-		atomic_long_inc(&priv->device->reset_gen);
+		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
-		atomic_long_inc(&priv->device->reset_gen);
+		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
@@ -708,11 +717,60 @@ static struct tenstorrent_device *inode_to_tt_dev(struct inode *inode)
 	return container_of(inode->i_cdev, struct tenstorrent_device, chardev);
 }
 
+// Arbitrate open vs existing fds.  This is an open()-time reader/writer lock:
+// O_EXCL is the writer and plain opens are readers.  A writer waits for the
+// device to be idle; a reader waits for any O_EXCL holder to go away.  In both
+// cases O_NONBLOCK turns the wait into -EAGAIN.  While an O_EXCL fd is held it
+// is the only fd on the list, so the holder's release is exactly the
+// list_empty transition that wakes both kinds of waiter.
+static int admit_chardev_open(struct tenstorrent_device *tt_dev, struct chardev_private *priv, unsigned int f_flags)
+{
+	bool want_excl = f_flags & O_EXCL;
+	bool nonblock = f_flags & O_NONBLOCK;
+	int ret;
+
+	mutex_lock(&tt_dev->chardev_mutex);
+
+	if (want_excl) {
+		// Writer: wait until no other fd is open, then take exclusivity.
+		while (!list_empty(&tt_dev->open_fds_list)) {
+			mutex_unlock(&tt_dev->chardev_mutex);
+			if (nonblock)
+				return -EAGAIN;
+			ret = wait_event_interruptible_exclusive(tt_dev->chardev_excl_waitqueue,
+								 list_empty(&tt_dev->open_fds_list));
+			if (ret)
+				return ret;
+			mutex_lock(&tt_dev->chardev_mutex);
+		}
+		WRITE_ONCE(tt_dev->chardev_excl_held, true);
+	} else {
+		// Reader: wait until no O_EXCL fd is held.  Registered non-exclusively
+		// so all readers wake together when the holder releases.
+		while (tt_dev->chardev_excl_held) {
+			mutex_unlock(&tt_dev->chardev_mutex);
+			if (nonblock)
+				return -EAGAIN;
+			ret = wait_event_interruptible(tt_dev->chardev_excl_waitqueue,
+						       !READ_ONCE(tt_dev->chardev_excl_held));
+			if (ret)
+				return ret;
+			mutex_lock(&tt_dev->chardev_mutex);
+		}
+	}
+
+	list_add(&priv->open_fd, &tt_dev->open_fds_list);
+
+	mutex_unlock(&tt_dev->chardev_mutex);
+	return 0;
+}
+
 static int tt_cdev_open(struct inode *inode, struct file *file)
 {
 	struct tenstorrent_device *tt_dev = inode_to_tt_dev(inode);
 	struct chardev_private *private_data;
 	bool power_aware = file->f_flags & O_APPEND;
+	int ret;
 
 	private_data = kzalloc(sizeof(*private_data), GFP_KERNEL);
 	if (private_data == NULL)
@@ -729,48 +787,54 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	kref_get(&tt_dev->kref);
 	private_data->device = tt_dev;
 	private_data->open_reset_gen = atomic_long_read(&tt_dev->reset_gen);
-	file->private_data = private_data;
 
 	private_data->pid = get_pid(task_pid(current->group_leader));
 	get_task_comm(private_data->comm, current);
 
 	// Legacy client: default to AICLK=Low, everything else enabled.
 	// Else, client is expected to explicitly request power states via ioctl.
+	// Initialize before admit_chardev_open() so this fd is fully initialized
+	// before it becomes visible on open_fds_list.
 	private_data->power_state.validity = TT_POWER_VALIDITY(15, 0);
 	if (!power_aware)
 		private_data->power_state.power_flags = TT_POWER_FLAG_ALL & ~TT_POWER_FLAG_MAX_AI_CLK;
 
-	// Hold reset_rwsem (shared) across the body so the reset ioctl
-	// (which holds it exclusive) cannot interleave with the deferred
-	// powerdown cancel, list_add, or the initial aggregation.  Without
-	// this, a reset that drained the work could find a fresh arm
-	// landed by this open after its cancel on the power_down_work.
+	ret = admit_chardev_open(tt_dev, private_data, file->f_flags);
+	if (ret) {
+		put_pid(private_data->pid);
+		kfree(private_data);
+		tenstorrent_device_put(tt_dev);
+		return ret;
+	}
+
+	// Hold reset_rwsem (shared) across the body so the reset ioctl (which holds
+	// it exclusive) cannot interleave with the deferred powerdown cancel or the
+	// initial aggregation.  Without this, a reset that drained the work could
+	// find a fresh arm landed by this open after its cancel on the
+	// power_down_work.
 	down_read(&tt_dev->reset_rwsem);
 
-	// Eagerly drain any deferred powerdown armed by a previous
-	// last-close so an open() arriving during the grace window
-	// doesn't ship a spurious powerdown->powerup pair.  Correctness
-	// doesn't depend on this: the handler re-aggregates current state
-	// and would ship the up-state once list_add lands below.  If the
-	// work is merely pending, the cancel is silent (no FW traffic,
-	// chip is still up); if mid-fire, we wait for the powerdown to
-	// complete and the aggregation below issues the balancing
-	// powerup.  Safe no-op when nothing is armed.
+	// Eagerly drain any deferred powerdown armed by a previous last-close so an
+	// open() arriving during the grace window doesn't ship a spurious
+	// powerdown->powerup pair.  Correctness doesn't depend on this: the handler
+	// re-aggregates current state and would ship the up-state since this fd is
+	// already on the list.  If the work is merely pending, the cancel is silent
+	// (no FW traffic, chip is still up); if mid-fire, we wait for the powerdown
+	// to complete and the aggregation below issues the balancing powerup.  Safe
+	// no-op when nothing is armed.
 	if (tt_dev->dev_class->defer_idle_powerdown
 	    && cancel_delayed_work_sync(&tt_dev->power_down_work))
 		dev_dbg(&tt_dev->pdev->dev, "cancelled pending idle powerdown\n");
 
-	mutex_lock(&tt_dev->chardev_mutex);
-	list_add(&private_data->open_fd, &tt_dev->open_fds_list);
-	mutex_unlock(&tt_dev->chardev_mutex);
-
 	if (!power_aware && !tt_dev->detached && !tt_dev->needs_hw_init) {
-		int ret = tenstorrent_set_aggregated_power_state(tt_dev);
+		ret = tenstorrent_set_aggregated_power_state(tt_dev);
 		if (ret < 0)
 			dev_warn(&tt_dev->pdev->dev, "Failed to set initial power state: %d\n", ret);
 	}
 
 	up_read(&tt_dev->reset_rwsem);
+
+	file->private_data = private_data;
 
 	return 0;
 }
@@ -852,6 +916,11 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 
 	// Must follow the list_del: release_power reads open_fds_list.
 	tt_cdev_release_power(priv);
+
+	if (list_empty(&tt_dev->open_fds_list)) {
+		WRITE_ONCE(tt_dev->chardev_excl_held, false);
+		wake_up_interruptible(&tt_dev->chardev_excl_waitqueue);
+	}
 
 	mutex_unlock(&tt_dev->chardev_mutex);
 

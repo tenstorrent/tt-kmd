@@ -93,6 +93,7 @@ int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 	char name[16];
 
 	init_waitqueue_head(&tt_dev->resource_lock_waitqueue);
+	init_waitqueue_head(&tt_dev->chardev_excl_waitqueue);
 
 	device_initialize(&tt_dev->dev);
 	tt_dev->dev.devt = devt;
@@ -188,6 +189,14 @@ static long ioctl_get_driver_info(struct chardev_private *priv,
 	return 0;
 }
 
+// Bump the device's reset generation and bring this fd's open_reset_gen along
+// with it. Other fds become permanently invalid, but the resetter keeps a live
+// fd so it can complete the reset sequence without a close/reopen window.
+static void bump_reset_gen(struct chardev_private *priv)
+{
+	priv->open_reset_gen = atomic_long_inc_return(&priv->device->reset_gen);
+}
+
 static long ioctl_reset_device(struct chardev_private *priv,
 			       struct tenstorrent_reset_device __user *arg)
 {
@@ -215,21 +224,21 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		tenstorrent_vma_zap(tt_dev);
 		ok = pcie_hot_reset_and_restore_state(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_CONFIG_WRITE) {
-		atomic_long_inc(&priv->device->reset_gen);
+		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
 		ok = pcie_timer_interrupt(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_USER_RESET) {
-		atomic_long_inc(&priv->device->reset_gen);
+		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
 		ok = set_reset_marker(pdev);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
-		atomic_long_inc(&priv->device->reset_gen);
+		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
-		atomic_long_inc(&priv->device->reset_gen);
+		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
@@ -615,11 +624,46 @@ static struct tenstorrent_device *inode_to_tt_dev(struct inode *inode)
 	return container_of(inode->i_cdev, struct tenstorrent_device, chardev);
 }
 
+// Arbitrate open vs existing fd with O_EXCL.
+static int admit_chardev_open(struct tenstorrent_device *tt_dev, struct chardev_private *priv, unsigned int f_flags)
+{
+	bool want_excl = f_flags & O_EXCL;
+	bool nonblock = f_flags & O_NONBLOCK;
+	int ret;
+
+	mutex_lock(&tt_dev->chardev_mutex);
+
+	if (want_excl) {
+		while (!list_empty(&tt_dev->open_fds_list)) {
+			if (nonblock) {
+				mutex_unlock(&tt_dev->chardev_mutex);
+				return -EAGAIN;
+			}
+			mutex_unlock(&tt_dev->chardev_mutex);
+			ret = wait_event_interruptible_exclusive(tt_dev->chardev_excl_waitqueue,
+								 list_empty(&tt_dev->open_fds_list));
+			if (ret)
+				return ret;
+			mutex_lock(&tt_dev->chardev_mutex);
+		}
+		tt_dev->chardev_excl_held = true;
+	} else if (tt_dev->chardev_excl_held) {
+		mutex_unlock(&tt_dev->chardev_mutex);
+		return -EBUSY;
+	}
+
+	list_add(&priv->open_fd, &tt_dev->open_fds_list);
+
+	mutex_unlock(&tt_dev->chardev_mutex);
+	return 0;
+}
+
 static int tt_cdev_open(struct inode *inode, struct file *file)
 {
 	struct tenstorrent_device *tt_dev = inode_to_tt_dev(inode);
 	struct chardev_private *private_data;
 	bool power_aware = file->f_flags & O_APPEND;
+	int ret;
 
 	private_data = kzalloc(sizeof(*private_data), GFP_KERNEL);
 	if (private_data == NULL)
@@ -636,10 +680,17 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	kref_get(&tt_dev->kref);
 	private_data->device = tt_dev;
 	private_data->open_reset_gen = atomic_long_read(&tt_dev->reset_gen);
-	file->private_data = private_data;
 
 	private_data->pid = get_pid(task_pid(current->group_leader));
 	get_task_comm(private_data->comm, current);
+
+	ret = admit_chardev_open(tt_dev, private_data, file->f_flags);
+	if (ret) {
+		put_pid(private_data->pid);
+		kfree(private_data);
+		tenstorrent_device_put(tt_dev);
+		return ret;
+	}
 
 	// Legacy client: default to AICLK=Low, everything else enabled.
 	// Else, client is expected to explicitly request power states via ioctl.
@@ -647,15 +698,13 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	if (!power_aware)
 		private_data->power_state.power_flags = TT_POWER_FLAG_ALL & ~TT_POWER_FLAG_MAX_AI_CLK;
 
-	mutex_lock(&tt_dev->chardev_mutex);
-	list_add(&private_data->open_fd, &tt_dev->open_fds_list);
-	mutex_unlock(&tt_dev->chardev_mutex);
-
 	if (!power_aware && !tt_dev->detached && !tt_dev->needs_hw_init) {
-		int ret = tenstorrent_set_aggregated_power_state(tt_dev);
+		ret = tenstorrent_set_aggregated_power_state(tt_dev);
 		if (ret < 0)
 			dev_warn(&tt_dev->dev, "Failed to set initial power state: %d\n", ret);
 	}
+
+	file->private_data = private_data;
 
 	return 0;
 }
@@ -696,7 +745,14 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 		tenstorrent_device_free_tlb(tt_dev, bitpos);
 
 	mutex_lock(&tt_dev->chardev_mutex);
-	list_del(&priv->open_fd);
+	{
+		list_del(&priv->open_fd);
+
+		if (list_empty(&tt_dev->open_fds_list)) {
+			tt_dev->chardev_excl_held = false;
+			wake_up_interruptible(&tt_dev->chardev_excl_waitqueue);
+		}
+	}
 	mutex_unlock(&tt_dev->chardev_mutex);
 
 	if (power_down)

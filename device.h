@@ -40,6 +40,8 @@ struct tenstorrent_device {
 	bool interrupt_enabled;
 
 	struct mutex chardev_mutex;
+	bool chardev_excl_held;	// An O_EXCL fd is currently open
+	wait_queue_head_t chardev_excl_waitqueue;
 
 	struct notifier_block reboot_notifier;
 

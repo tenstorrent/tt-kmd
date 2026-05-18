@@ -168,6 +168,7 @@ struct tenstorrent_reset_device {
 #define TENSTORRENT_PIN_PAGES_CONTIGUOUS 1	// app attests that the pages are physically contiguous
 #define TENSTORRENT_PIN_PAGES_NOC_DMA 2		// app wants to use the pages for NOC DMA
 #define TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN 4	// NOC DMA will be allocated top-down (default is bottom-up)
+#define TENSTORRENT_PIN_PAGES_READ_ONLY 8	// device will only read; IOMMU enforced, requires IOMMU translation
 
 struct tenstorrent_pin_pages_in {
 	__u32 output_size_bytes;

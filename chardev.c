@@ -615,22 +615,6 @@ static struct tenstorrent_device *inode_to_tt_dev(struct inode *inode)
 	return container_of(inode->i_cdev, struct tenstorrent_device, chardev);
 }
 
-static void increment_cdev_open_count(struct tenstorrent_device *tt_dev) {
-	mutex_lock(&tt_dev->chardev_mutex);
-	if (!tt_dev->chardev_open_count && tt_dev->dev_class->first_open_cb)
-		tt_dev->dev_class->first_open_cb(tt_dev);
-	tt_dev->chardev_open_count++;
-	mutex_unlock(&tt_dev->chardev_mutex);
-}
-
-static void decrement_cdev_open_count(struct tenstorrent_device *tt_dev) {
-	mutex_lock(&tt_dev->chardev_mutex);
-	tt_dev->chardev_open_count--;
-	if (!tt_dev->chardev_open_count && tt_dev->dev_class->last_release_cb)
-		tt_dev->dev_class->last_release_cb(tt_dev);
-	mutex_unlock(&tt_dev->chardev_mutex);
-}
-
 static int tt_cdev_open(struct inode *inode, struct file *file)
 {
 	struct tenstorrent_device *tt_dev = inode_to_tt_dev(inode);
@@ -667,8 +651,6 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	list_add(&private_data->open_fd, &tt_dev->open_fds_list);
 	mutex_unlock(&tt_dev->chardev_mutex);
 
-	increment_cdev_open_count(tt_dev);
-
 	if (!power_aware && !tt_dev->detached && !tt_dev->needs_hw_init) {
 		int ret = tenstorrent_set_aggregated_power_state(tt_dev);
 		if (ret < 0)
@@ -699,8 +681,6 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 			priv->noc_cleanup.addr,
 			priv->noc_cleanup.data & 0xFFFFFFFF,
 			priv->noc_cleanup.noc);
-
-	decrement_cdev_open_count(tt_dev);
 
 	tenstorrent_memory_cleanup(priv);
 

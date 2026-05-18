@@ -41,7 +41,6 @@ struct tenstorrent_device {
 	bool interrupt_enabled;
 
 	struct mutex chardev_mutex;
-	unsigned int chardev_open_count;
 
 	struct notifier_block reboot_notifier;
 
@@ -94,8 +93,6 @@ struct tenstorrent_device_class {
 	void (*cleanup_telemetry)(struct tenstorrent_device *ttdev);
 	void (*cleanup_hardware)(struct tenstorrent_device *ttdev);
 	void (*cleanup_device)(struct tenstorrent_device *ttdev);
-	void (*first_open_cb)(struct tenstorrent_device *ttdev);
-	void (*last_release_cb)(struct tenstorrent_device *ttdev);
 	void (*reboot)(struct tenstorrent_device *ttdev);
 	int (*configure_tlb)(struct tenstorrent_device *ttdev, int tlb, struct tenstorrent_noc_tlb_config *config);
 	int (*describe_tlb)(struct tenstorrent_device *ttdev, int tlb, struct tlb_descriptor *tlb_desc);

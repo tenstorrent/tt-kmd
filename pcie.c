@@ -28,7 +28,7 @@ static bool poll_pcie_link_up(struct pci_dev *pdev, u32 timeout_ms) {
 	pci_read_config_word(pdev, PCI_VENDOR_ID, &tt_vendor_id);
 	while (tt_vendor_id != PCI_VENDOR_ID_TENSTORRENT) {
 		if (ktime_after(ktime_get(), end_time)) {
-			pr_debug("device timeout during link up.\n");
+			dev_dbg(&pdev->dev, "device timeout during link up\n");
 			return false;
 		}
 
@@ -36,7 +36,7 @@ static bool poll_pcie_link_up(struct pci_dev *pdev, u32 timeout_ms) {
 		msleep(100);
 	}
 
-	pr_debug("device link up successfully.\n");
+	dev_dbg(&pdev->dev, "device link up successfully\n");
 	return true;
 }
 
@@ -109,15 +109,15 @@ bool wormhole_complete_pcie_init(struct tenstorrent_device *tt_dev, u8 __iomem* 
 
 		pci_read_config_word(bridge_dev, PCI_SUBSYSTEM_VENDOR_ID, &subsys_vendor_id);
 
-		if (!wormhole_send_arc_fw_message_with_args(reset_unit_regs, FW_MSG_PCIE_RETRAIN,
+		if (!wormhole_send_arc_fw_message_with_args(&pdev->dev, reset_unit_regs, FW_MSG_PCIE_RETRAIN,
 			target_link_speed | (last_retry << 15), subsys_vendor_id, 200000, &exit_code))
 			return false;
 
 		if (exit_code == 0) {
-			pr_debug("pcie init passed after %u iterations.\n", i);
+			dev_dbg(&pdev->dev, "pcie init passed after %u iterations\n", i);
 			return true;
 		} else {
-			pr_debug("pcie init failed on iteration %u.\n", i);
+			dev_dbg(&pdev->dev, "pcie init failed on iteration %u\n", i);
 			if (last_retry)
 				return false;
 		}

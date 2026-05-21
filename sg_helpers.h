@@ -36,6 +36,6 @@ static inline void dma_unmap_sgtable(struct device *dev, struct sg_table *dma_ma
 bool alloc_chained_sgt_for_pages(struct sg_table *table, struct page **pages, unsigned int n_pages);
 void free_chained_sgt(struct sg_table *table); // Safe to pass zero-intialized sg_table.
 
-void debug_print_sgtable(struct sg_table *table);
+void debug_print_sgtable(struct device *dev, struct sg_table *table);
 
 #endif

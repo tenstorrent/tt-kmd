@@ -265,8 +265,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	device_class = (const struct tenstorrent_device_class *)id->driver_data;
 
-	printk(KERN_INFO "Found a Tenstorrent %s device at bus %04x:%02x.\n",
-	       device_class->name, (unsigned)pci_domain_nr(dev->bus), (unsigned)dev->bus->number);
+	dev_info(&dev->dev, "Found a Tenstorrent %s device\n", device_class->name);
 
 	// During pre-test, unflashed boards have no class code which trips up __dev_sort_resources.
 	// Assign the proper class code and rerun resource assignment to clear things up.

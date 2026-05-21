@@ -645,7 +645,7 @@ static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
 
 	r = device_add_group(&tt_dev->dev, &bh_pcie_perf_counters_group);
 	if (r)
-		dev_err(&tt_dev->dev, "PCIe perf counters unavailable: %d\n", r);
+		dev_err(&tt_dev->pdev->dev, "PCIe perf counters unavailable: %d\n", r);
 	else
 		bh->pcie_perf_group_registered = true;
 
@@ -704,7 +704,7 @@ static void blackhole_cleanup_hardware(struct tenstorrent_device *tt_dev)
 
 	msg.header = ARC_MSG_TYPE_ASIC_STATE3;
 	if (!send_arc_message(bh, &msg))
-		dev_err(&tt_dev->dev, "Failed to send ARC message for A3 state\n");
+		dev_err(&tt_dev->pdev->dev, "Failed to send ARC message for A3 state\n");
 }
 
 static void blackhole_cleanup(struct tenstorrent_device *tt_dev)

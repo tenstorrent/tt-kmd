@@ -79,6 +79,21 @@ cat > "${DEBIAN_DIR}/postinst" << 'EOF'
 #!/bin/sh
 set -e
 
+# Remove stale DKMS registrations left behind by older packages.  Once the
+# matching /usr/src tree is gone, dkms remove cannot recover the entry.
+for dkms_dir in /var/lib/dkms/tenstorrent/*; do
+    [ -d "$dkms_dir" ] || continue
+    [ -L "$dkms_dir/source" ] || [ -d "$dkms_dir/source" ] || continue
+    [ ! -e "$dkms_dir/source/dkms.conf" ] || continue
+
+    case "$dkms_dir" in
+        /var/lib/dkms/tenstorrent/*)
+            echo "Removing stale Tenstorrent DKMS state: $dkms_dir"
+            rm -rf "$dkms_dir"
+            ;;
+    esac
+done
+
 # Pass arguments to common postinst script
 /usr/lib/dkms/common.postinst tenstorrent __VERSION__ /usr/share/tenstorrent "" "$2"
 
@@ -101,8 +116,8 @@ cat > "${DEBIAN_DIR}/prerm" << 'EOF'
 set -e
 
 case "$1" in
-    remove)
-        dkms remove -m tenstorrent -v __VERSION__ --all
+    remove|upgrade)
+        dkms remove -m tenstorrent -v __VERSION__ --all || true
         ;;
 esac
 
@@ -137,4 +152,3 @@ echo "Package contents:"
 dpkg-deb --contents "${OUTPUT_DIR}/${DEB_FILE}"
 
 exit 0
-

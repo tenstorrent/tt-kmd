@@ -588,20 +588,20 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	nr_pages = PAGE_ALIGN(in.size) >> PAGE_SHIFT;
 	pages = vzalloc(nr_pages * sizeof(struct page *));
 	if (!pages) {
-		pr_err("vzalloc failed for %lu page pointers\n", nr_pages);
+		dev_err(&priv->device->pdev->dev, "vzalloc failed for %lu page pointers\n", nr_pages);
 		ret = -ENOMEM;
 		goto err_free_pinning;
 	}
 
 	pages_pinned = pin_user_pages_fast_longterm(in.virtual_address, nr_pages, FOLL_WRITE, pages);
 	if (pages_pinned < 0) {
-		pr_warn("pin_user_pages_longterm failed: %d\n", pages_pinned);
+		dev_warn(&priv->device->pdev->dev, "pin_user_pages_longterm failed: %d\n", pages_pinned);
 		ret = pages_pinned;
 		goto err_vfree_pages;
 	}
 
 	if (pages_pinned != nr_pages) {
-		pr_err("could only pin %d of %lu pages\n", pages_pinned, nr_pages);
+		dev_err(&priv->device->pdev->dev, "could only pin %d of %lu pages\n", pages_pinned, nr_pages);
 		ret = -EINVAL;
 		goto err_unpin_pages;
 	}
@@ -613,7 +613,8 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		unsigned long total_dma_len = 0;
 
 		if (!alloc_chained_sgt_for_pages(&dma_mapping, pages, nr_pages)) {
-			pr_warn("alloc_chained_sgt_for_pages failed for %lu pages, probably out of memory.\n", nr_pages);
+			dev_warn(&priv->device->pdev->dev,
+				 "alloc_chained_sgt_for_pages failed for %lu pages, probably out of memory\n", nr_pages);
 			ret = -ENOMEM;
 			goto err_unpin_pages;
 		}
@@ -621,14 +622,14 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		ret = dma_map_sgtable(&priv->device->pdev->dev, &dma_mapping, DMA_BIDIRECTIONAL, 0);
 
 		if (ret != 0) {
-			pr_err("dma_map_sg failed.\n");
+			dev_err(&priv->device->pdev->dev, "dma_map_sg failed\n");
 			goto err_unlock_priv;
 		}
 
 		// This can only happen due to a misconfiguration or a bug.
 		for_each_sgtable_dma_sg((&dma_mapping), sg, i) {
 			if (i > 0 && sg_dma_address(sg) != expected_next_address) {
-				pr_err("discontiguous mapping\n");
+				dev_err(&priv->device->pdev->dev, "discontiguous mapping\n");
 				ret = -EINVAL;
 			}
 
@@ -637,12 +638,13 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		}
 
 		if (total_dma_len != nr_pages * PAGE_SIZE) {
-			pr_err("dma-mapped (%lX) != original length (%lX).\n", total_dma_len, nr_pages * PAGE_SIZE);
+			dev_err(&priv->device->pdev->dev, "dma-mapped (%lX) != original length (%lX)\n",
+				total_dma_len, nr_pages * PAGE_SIZE);
 			ret = -EINVAL;
 		}
 
 		if (ret != 0) {
-			debug_print_sgtable(&dma_mapping);
+			debug_print_sgtable(&priv->device->pdev->dev, &dma_mapping);
 			goto err_dma_unmap;
 		}
 
@@ -660,7 +662,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 
 		for (i = 1; i < pages_pinned; i++) {
 			if (page_to_pfn(pages[i]) != page_to_pfn(pages[i-1]) + 1) {
-				pr_err("pages discontiguous at %d\n", i);
+				dev_err(&priv->device->pdev->dev, "pages discontiguous at %d\n", i);
 				ret = -EINVAL;
 				goto err_unpin_pages;
 			}
@@ -1031,7 +1033,7 @@ static void tenstorrent_vma_open(struct vm_area_struct *vma)
 
 	new_mmap_vma = kzalloc(sizeof(*new_mmap_vma), GFP_KERNEL);
 	if (!new_mmap_vma) {
-		pr_err_ratelimited("Failed to allocate mmap_vma on fork()\n");
+		dev_err_ratelimited(&priv->device->pdev->dev, "Failed to allocate mmap_vma on fork()\n");
 		zap_vma_ptes(vma, vma->vm_start, vma->vm_end - vma->vm_start);
 		vma->vm_private_data = NULL;
 		return;

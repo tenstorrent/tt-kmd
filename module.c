@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
 // SPDX-License-Identifier: GPL-2.0-only
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -67,7 +69,7 @@ static int __init ttdriver_init(void)
 {
 	int err = 0;
 
-	printk(KERN_INFO "Loading Tenstorrent AI driver module v%s.\n", TENSTORRENT_DRIVER_VERSION_STRING);
+	pr_info("Loading Tenstorrent AI driver module v%s\n", TENSTORRENT_DRIVER_VERSION_STRING);
 
 	tt_debugfs_root = debugfs_create_dir("tenstorrent", NULL);
 
@@ -99,7 +101,7 @@ fail_procfs:
 
 static void __exit ttdriver_cleanup(void)
 {
-	printk(KERN_INFO "Unloading Tenstorrent AI driver module.\n");
+	pr_info("Unloading Tenstorrent AI driver module\n");
 
 	tenstorrent_pci_unregister_driver();
 	cleanup_char_driver();

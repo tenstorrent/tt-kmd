@@ -160,8 +160,8 @@ static int csm_write32(struct wormhole_device *wh, u32 addr, u32 value)
 	return 0;
 }
 
-static int arc_msg_poll_completion(u8 __iomem *reset_unit_regs, u8 __iomem *msg_reg, u32 msg_code, u32 timeout_us,
-				   u16 *exit_code)
+static int arc_msg_poll_completion(struct pci_dev *pdev, u8 __iomem *reset_unit_regs, u8 __iomem *msg_reg,
+				   u32 msg_code, u32 timeout_us, u16 *exit_code)
 {
 	// Scale poll_period for around 100 polls, and at least 10 us
 	u32 poll_period_us = max((u32)10, timeout_us / 100);
@@ -177,18 +177,18 @@ static int arc_msg_poll_completion(u8 __iomem *reset_unit_regs, u8 __iomem *msg_
 			return 0;
 		}
 
-		if (read_val == 0xFFFFFFFFu && is_hardware_hung(NULL, reset_unit_regs)) {
-			pr_debug("Tenstorrent Device is hung executing message: %08X.", msg_code);
+		if (read_val == 0xFFFFFFFFu && is_hardware_hung(pdev, reset_unit_regs)) {
+			dev_dbg(&pdev->dev, "Tenstorrent device is hung executing message: %08X\n", msg_code);
 			return -3;
 		}
 
 		if (read_val == 0xFFFFFFFFu) {
-			pr_debug("Tenstorrent FW message unrecognized: %08X.", msg_code);
+			dev_dbg(&pdev->dev, "Tenstorrent FW message unrecognized: %08X\n", msg_code);
 			return -2;
 		}
 
 		if (ktime_after(ktime_get(), end_time)) {
-			pr_debug("Tenstorrent FW message timeout: %08X.", msg_code);
+			dev_dbg(&pdev->dev, "Tenstorrent FW message timeout: %08X\n", msg_code);
 			return -1;
 		}
 
@@ -202,8 +202,8 @@ static bool arc_l2_is_running(u8 __iomem *reset_unit_regs)
 	return ((post_code & POST_CODE_ARC_L2_MASK) == POST_CODE_ARC_L2);
 }
 
-bool wormhole_send_arc_fw_message_with_args(u8 __iomem *reset_unit_regs, u8 message_id, u16 arg0, u16 arg1,
-					    u32 timeout_us, u16 *exit_code)
+bool wormhole_send_arc_fw_message_with_args(struct pci_dev *pdev, u8 __iomem *reset_unit_regs, u8 message_id,
+					    u16 arg0, u16 arg1, u32 timeout_us, u16 *exit_code)
 {
 	void __iomem *args_reg = reset_unit_regs + SCRATCH_REG(3);
 	void __iomem *message_reg = reset_unit_regs + SCRATCH_REG(5);
@@ -212,7 +212,7 @@ bool wormhole_send_arc_fw_message_with_args(u8 __iomem *reset_unit_regs, u8 mess
 	u32 arc_misc_cntl;
 
 	if (!arc_l2_is_running(reset_unit_regs)) {
-		pr_warn("Skipping message %08X due to FW not running.\n", (unsigned int)message_id);
+		dev_warn(&pdev->dev, "Skipping message %08X due to FW not running\n", (unsigned int)message_id);
 		return false;
 	}
 
@@ -226,16 +226,17 @@ bool wormhole_send_arc_fw_message_with_args(u8 __iomem *reset_unit_regs, u8 mess
 	if (timeout_us == 0)
 		return false;
 
-	if (arc_msg_poll_completion(reset_unit_regs, message_reg, message_id, timeout_us, exit_code) < 0) {
+	if (arc_msg_poll_completion(pdev, reset_unit_regs, message_reg, message_id, timeout_us, exit_code) < 0) {
 		return false;
 	} else {
 		return true;
 	}
 }
 
-static bool wormhole_send_arc_fw_message(u8 __iomem *reset_unit_regs, u8 message_id, u32 timeout_us, u16 *exit_code)
+static bool wormhole_send_arc_fw_message(struct pci_dev *pdev, u8 __iomem *reset_unit_regs, u8 message_id,
+					 u32 timeout_us, u16 *exit_code)
 {
-	return wormhole_send_arc_fw_message_with_args(reset_unit_regs, message_id, 0, 0, timeout_us, exit_code);
+	return wormhole_send_arc_fw_message_with_args(pdev, reset_unit_regs, message_id, 0, 0, timeout_us, exit_code);
 }
 
 static bool __maybe_unused send_arc_message(struct wormhole_device *wh, struct arc_msg *msg)
@@ -294,7 +295,7 @@ static bool wormhole_shutdown_firmware(struct pci_dev *pdev, u8 __iomem *reset_u
 	if (is_hardware_hung(pdev, reset_unit_regs))
 		return false;
 
-	if (!wormhole_send_arc_fw_message(reset_unit_regs, WH_FW_MSG_ASTATE3, 10000, NULL))
+	if (!wormhole_send_arc_fw_message(pdev, reset_unit_regs, WH_FW_MSG_ASTATE3, 10000, NULL))
 		return false;
 	return true;
 }
@@ -317,7 +318,7 @@ static void month_lookup(u32 days_into_year, u32 *day, u32 *month)
 	*month = i;
 }
 
-static void wormhole_send_curr_date(u8 __iomem *reset_unit_regs)
+static void wormhole_send_curr_date(struct pci_dev *pdev, u8 __iomem *reset_unit_regs)
 {
 	const u32 SECONDS_TO_2020 = 1577836800; // date -d "Jan 1, 2020 UTC" +%s
 	const u32 DAYS_PER_FOUR_YEARS = 4 * 365 + 1;
@@ -354,7 +355,7 @@ static void wormhole_send_curr_date(u8 __iomem *reset_unit_regs)
 	packed_datetime_low = (HH << 8) | MM;
 	packed_datetime_high = (Y << 12) | (M << 8) | DD;
 
-	wormhole_send_arc_fw_message_with_args(reset_unit_regs, WH_FW_MSG_CURR_DATE, packed_datetime_low,
+	wormhole_send_arc_fw_message_with_args(pdev, reset_unit_regs, WH_FW_MSG_CURR_DATE, packed_datetime_low,
 					       packed_datetime_high, 1000, NULL);
 }
 
@@ -463,7 +464,7 @@ static u8 __iomem *reset_unit_regs(struct wormhole_device *wh_dev) {
 static void update_device_index(struct wormhole_device *wh_dev) {
 	static const u8 INDEX_VALID = 0x80;
 
-	wormhole_send_arc_fw_message_with_args(reset_unit_regs(wh_dev),
+	wormhole_send_arc_fw_message_with_args(wh_dev->tt.pdev, reset_unit_regs(wh_dev),
 						WH_FW_MSG_PCIE_INDEX,
 						wh_dev->tt.ordinal | INDEX_VALID, 0,
 						10*1000, NULL);
@@ -477,7 +478,7 @@ static bool wormhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 	bool responsive;
 
 	// See if the device is responsive.
-	responsive = wormhole_send_arc_fw_message(reset_unit_regs(wh_dev), WH_FW_MSG_NOP, 1000, NULL);
+	responsive = wormhole_send_arc_fw_message(pdev, reset_unit_regs(wh_dev), WH_FW_MSG_NOP, 1000, NULL);
 
 	// If not responsive, wait for the watchdog.
 	if (!responsive) {
@@ -493,7 +494,8 @@ static bool wormhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 		while (ktime_before(ktime_get(), end_time)) {
 			pcie_hot_reset_and_restore_state(pdev);
 
-			responsive = wormhole_send_arc_fw_message(reset_unit_regs(wh_dev), WH_FW_MSG_NOP, 1000, NULL);
+			responsive = wormhole_send_arc_fw_message(pdev, reset_unit_regs(wh_dev), WH_FW_MSG_NOP,
+								  1000, NULL);
 			if (responsive)
 				break;
 
@@ -505,8 +507,8 @@ static bool wormhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 	// If the device is responsive, finalize the reset.
 	if (responsive) {
 		set_reset_marker(pdev);
-		wormhole_send_arc_fw_message_with_args(reset_unit_regs(wh_dev), WH_FW_MSG_TRIGGER_RESET, reset_arg, 0,
-							0, NULL);
+		wormhole_send_arc_fw_message_with_args(pdev, reset_unit_regs(wh_dev), WH_FW_MSG_TRIGGER_RESET,
+						       reset_arg, 0, 0, NULL);
 		return true; // Assumes the reset was successful.
 	}
 
@@ -719,11 +721,14 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 	map_bar4_to_system_registers(wh_dev);
 
 	if (arc_l2_is_running(reset_unit_regs(wh_dev))) {
-		wormhole_send_curr_date(reset_unit_regs(wh_dev));
-		wormhole_send_arc_fw_message(reset_unit_regs(wh_dev), WH_FW_MSG_ASTATE0, 10000, NULL);
+		wormhole_send_curr_date(tt_dev->pdev, reset_unit_regs(wh_dev));
+		wormhole_send_arc_fw_message(tt_dev->pdev, reset_unit_regs(wh_dev), WH_FW_MSG_ASTATE0, 10000,
+					     NULL);
 		update_device_index(wh_dev);
 		wormhole_complete_pcie_init(&wh_dev->tt, reset_unit_regs(wh_dev));
-		wormhole_send_arc_fw_message_with_args(reset_unit_regs(wh_dev), WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT, auto_reset_timeout, 0, 10000, NULL);
+		wormhole_send_arc_fw_message_with_args(tt_dev->pdev, reset_unit_regs(wh_dev),
+						       WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT, auto_reset_timeout, 0,
+						       10000, NULL);
 	}
 
 	return true;
@@ -747,7 +752,7 @@ static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev)
 
 	r = device_add_group(&tt_dev->dev, &wh_pcie_perf_counters_group);
 	if (r)
-		dev_err(&tt_dev->dev, "PCIe perf counters unavailable: %d\n", r);
+		dev_err(&tt_dev->pdev->dev, "PCIe perf counters unavailable: %d\n", r);
 	else
 		wh_dev->pcie_perf_group_registered = true;
 

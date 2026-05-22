@@ -460,6 +460,9 @@ static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorre
 	if (data.validity > TT_POWER_VALIDITY(15, 14))
 		return -EINVAL;
 
+	dev_dbg(&tt_dev->pdev->dev, "Power state request: validity=0x%x flags=0x%x\n",
+		data.validity, data.power_flags);
+
 	mutex_lock(&priv->mutex);
 	priv->power_state = data;
 	mutex_unlock(&priv->mutex);
@@ -672,7 +675,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	if (!power_aware && !tt_dev->detached && !tt_dev->needs_hw_init) {
 		int ret = tenstorrent_set_aggregated_power_state(tt_dev);
 		if (ret < 0)
-			dev_warn(&tt_dev->dev, "Failed to set initial power state: %d\n", ret);
+			dev_warn(&tt_dev->pdev->dev, "Failed to set initial power state: %d\n", ret);
 	}
 
 	return 0;

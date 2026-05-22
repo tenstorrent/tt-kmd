@@ -109,7 +109,7 @@ bool wormhole_complete_pcie_init(struct tenstorrent_device *tt_dev, u8 __iomem* 
 
 		pci_read_config_word(bridge_dev, PCI_SUBSYSTEM_VENDOR_ID, &subsys_vendor_id);
 
-		if (!wormhole_send_arc_fw_message_with_args(&pdev->dev, reset_unit_regs, FW_MSG_PCIE_RETRAIN,
+		if (!wormhole_send_arc_fw_message_with_args(pdev, reset_unit_regs, FW_MSG_PCIE_RETRAIN,
 			target_link_speed | (last_retry << 15), subsys_vendor_id, 200000, &exit_code))
 			return false;
 

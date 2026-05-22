@@ -28,6 +28,8 @@ struct pinned_page_range {
 	u64 virtual_address;
 
 	int outbound_iatu_region;
+
+	bool read_only;	// IOMMU forbids device writes
 };
 
 

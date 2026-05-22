@@ -286,12 +286,14 @@ static void teardown_outbound_iatu(struct chardev_private *priv, int iatu_region
 static void unpin_pinned_page_range(struct chardev_private *priv,
 	struct pinned_page_range *pinning)
 {
+	enum dma_data_direction dir = pinning->read_only ? DMA_TO_DEVICE : DMA_BIDIRECTIONAL;
+
 	teardown_outbound_iatu(priv, pinning->outbound_iatu_region);
 
-	dma_unmap_sgtable(&priv->device->pdev->dev, &pinning->dma_mapping, DMA_BIDIRECTIONAL, 0);
+	dma_unmap_sgtable(&priv->device->pdev->dev, &pinning->dma_mapping, dir, 0);
 	free_chained_sgt(&pinning->dma_mapping);
 
-	unpin_user_pages_dirty_lock(pinning->pages, pinning->page_count, true);
+	unpin_user_pages_dirty_lock(pinning->pages, pinning->page_count, !pinning->read_only);
 	vfree(pinning->pages);
 
 	list_del(&pinning->list);
@@ -530,7 +532,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		     struct tenstorrent_pin_pages __user *arg)
 {
 	const u32 valid_flags = TENSTORRENT_PIN_PAGES_CONTIGUOUS | TENSTORRENT_PIN_PAGES_NOC_DMA |
-				TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN;
+				TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN | TENSTORRENT_PIN_PAGES_READ_ONLY;
 	unsigned long nr_pages;
 	struct page **pages;
 	int pages_pinned;
@@ -542,6 +544,9 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	int iatu_region = -1;
 	bool noc_dma = false;
 	bool top_down = false;
+	bool read_only = false;
+	unsigned int gup_flags;
+	enum dma_data_direction dir;
 
 	struct tenstorrent_pin_pages_in in;
 	struct tenstorrent_pin_pages_out_extended out;
@@ -565,6 +570,13 @@ long ioctl_pin_pages(struct chardev_private *priv,
 
 	noc_dma = in.flags & (TENSTORRENT_PIN_PAGES_NOC_DMA | TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN);
 	top_down = in.flags & TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN;
+	read_only = in.flags & TENSTORRENT_PIN_PAGES_READ_ONLY;
+
+	if (read_only && !is_iommu_translated(&priv->device->pdev->dev))
+		return -EOPNOTSUPP;
+
+	gup_flags = read_only ? 0 : FOLL_WRITE;
+	dir = read_only ? DMA_TO_DEVICE : DMA_BIDIRECTIONAL;
 
 	mutex_lock(&priv->mutex);
 
@@ -593,7 +605,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		goto err_free_pinning;
 	}
 
-	pages_pinned = pin_user_pages_fast_longterm(in.virtual_address, nr_pages, FOLL_WRITE, pages);
+	pages_pinned = pin_user_pages_fast_longterm(in.virtual_address, nr_pages, gup_flags, pages);
 	if (pages_pinned < 0) {
 		dev_warn(&priv->device->pdev->dev, "pin_user_pages_longterm failed: %d\n", pages_pinned);
 		ret = pages_pinned;
@@ -619,7 +631,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 			goto err_unpin_pages;
 		}
 
-		ret = dma_map_sgtable(&priv->device->pdev->dev, &dma_mapping, DMA_BIDIRECTIONAL, 0);
+		ret = dma_map_sgtable(&priv->device->pdev->dev, &dma_mapping, dir, 0);
 
 		if (ret != 0) {
 			dev_err(&priv->device->pdev->dev, "dma_map_sg failed\n");
@@ -692,6 +704,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	pinning->dma_mapping = dma_mapping;
 	pinning->virtual_address = in.virtual_address;
 	pinning->outbound_iatu_region = iatu_region;
+	pinning->read_only = read_only;
 
 	list_add(&pinning->list, &priv->pinnings);
 	mutex_unlock(&priv->mutex);
@@ -704,7 +717,7 @@ err_teardown_iatu:
 	// zero-initialized dma_mapping from the non-IOMMU path.
 	teardown_outbound_iatu(priv, iatu_region);
 err_dma_unmap:
-	dma_unmap_sgtable(&priv->device->pdev->dev, &dma_mapping, DMA_BIDIRECTIONAL, 0);
+	dma_unmap_sgtable(&priv->device->pdev->dev, &dma_mapping, dir, 0);
 err_unlock_priv:
 	free_chained_sgt(&dma_mapping);
 err_unpin_pages:

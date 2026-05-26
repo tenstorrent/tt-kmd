@@ -204,6 +204,11 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
 		return -EFAULT;
 
+	// Drain any deferred idle powerdown before disturbing the device.
+	// open()/release() take reset_rwsem shared and we hold it exclusive
+	// here, so no new arm can land between the cancel and the reset.
+	cancel_delayed_work_sync(&tt_dev->power_down_work);
+
 	if (in.flags == TENSTORRENT_RESET_DEVICE_RESTORE_STATE) {
 		if (safe_pci_restore_state(pdev)) {
 			priv->device->dev_class->restore_reset_state(priv->device);
@@ -441,6 +446,21 @@ int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_dev)
 	return ret;
 }
 
+// Delayed work: send the aggregated idle power-down message after the
+// grace period elapses with no open fds.  Safe to run unguarded:
+// tt_cdev_release only arms this under chardev_mutex when !detached,
+// and tenstorrent_pci_remove writes detached=true under the same mutex
+// before cancel_delayed_work_sync, so the handler cannot fire after
+// teardown begins.
+void tenstorrent_power_down_work_func(struct work_struct *work)
+{
+	struct tenstorrent_device *tt_dev = container_of(to_delayed_work(work),
+							 struct tenstorrent_device,
+							 power_down_work);
+
+	tenstorrent_set_aggregated_power_state(tt_dev);
+}
+
 static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorrent_power_state __user *arg)
 {
 	struct tenstorrent_device *tt_dev = priv->device;
@@ -666,6 +686,26 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	if (!power_aware)
 		private_data->power_state.power_flags = TT_POWER_FLAG_ALL & ~TT_POWER_FLAG_MAX_AI_CLK;
 
+	// Hold reset_rwsem (shared) across the body so the reset ioctl
+	// (which holds it exclusive) cannot interleave with the deferred
+	// powerdown cancel, list_add, or the initial aggregation.  Without
+	// this, a reset that drained the work could find a fresh arm
+	// landed by this open after its cancel on the power_down_work.
+	down_read(&tt_dev->reset_rwsem);
+
+	// Eagerly drain any deferred powerdown armed by a previous
+	// last-close so an open() arriving during the grace window
+	// doesn't ship a spurious powerdown->powerup pair.  Correctness
+	// doesn't depend on this: the handler re-aggregates current state
+	// and would ship the up-state once list_add lands below.  If the
+	// work is merely pending, the cancel is silent (no FW traffic,
+	// chip is still up); if mid-fire, we wait for the powerdown to
+	// complete and the aggregation below issues the balancing
+	// powerup.  Safe no-op when nothing is armed.
+	if (tt_dev->dev_class->defer_idle_powerdown
+	    && cancel_delayed_work_sync(&tt_dev->power_down_work))
+		dev_dbg(&tt_dev->pdev->dev, "cancelled pending idle powerdown\n");
+
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_add(&private_data->open_fd, &tt_dev->open_fds_list);
 	mutex_unlock(&tt_dev->chardev_mutex);
@@ -678,6 +718,8 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 			dev_warn(&tt_dev->pdev->dev, "Failed to set initial power state: %d\n", ret);
 	}
 
+	up_read(&tt_dev->reset_rwsem);
+
 	return 0;
 }
 
@@ -686,13 +728,22 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	struct chardev_private *priv = file->private_data;
 	struct tenstorrent_device *tt_dev = priv->device;
 	unsigned int bitpos;
+	bool defer = tt_dev->dev_class->defer_idle_powerdown;
 	bool power_aware = file->f_flags & O_APPEND;
 	bool is_minimum_power = priv->power_state.validity == TT_POWER_VALIDITY(15, 0)
 				&& priv->power_state.power_flags == 0;
 	bool has_power_contribution = !power_aware || !is_minimum_power;
-	bool power_down = !tt_dev->detached && power_policy && !tt_dev->needs_hw_init
-			  && has_power_contribution;
-	bool cleanup_noc = !tt_dev->detached && priv->noc_cleanup.enabled;
+	bool cleanup_noc;
+	bool last_close = false;
+	bool armed = false;
+
+	// Hold reset_rwsem (shared) across the body so the reset ioctl
+	// (which holds it exclusive) cannot interleave with the device-
+	// touching cleanup, the list_del/arm site, or the synchronous
+	// aggregation fallback.
+	down_read(&tt_dev->reset_rwsem);
+
+	cleanup_noc = !tt_dev->detached && priv->noc_cleanup.enabled;
 
 	if (cleanup_noc)
 		tt_dev->dev_class->noc_write32(
@@ -720,10 +771,33 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_del(&priv->open_fd);
+	last_close = list_empty(&tt_dev->open_fds_list);
+
+	// Armed under chardev_mutex; see the teardown comment in
+	// tenstorrent_pci_remove() for the invariant this supports.
+	// has_power_contribution gates the arm for the same reason it
+	// gates the synchronous fallback below: a zero-contribution
+	// power-aware fd closing after RESET_PCIE_LINK must not generate
+	// FW traffic (commit 40e6405).
+	if (defer && last_close && has_power_contribution && power_policy
+	    && !tt_dev->detached && !tt_dev->needs_hw_init
+	    && idle_power_down_grace_ms > 0) {
+		mod_delayed_work(system_wq, &tt_dev->power_down_work,
+				      msecs_to_jiffies(idle_power_down_grace_ms));
+		armed = true;
+	}
 	mutex_unlock(&tt_dev->chardev_mutex);
 
-	if (power_down)
+	if (armed) {
+		dev_dbg(&tt_dev->pdev->dev,
+			"deferred idle powerdown armed: grace=%u ms\n",
+			idle_power_down_grace_ms);
+	} else if (has_power_contribution && power_policy && !tt_dev->detached
+		   && !tt_dev->needs_hw_init) {
 		tenstorrent_set_aggregated_power_state(tt_dev);
+	}
+
+	up_read(&tt_dev->reset_rwsem);
 
 	tenstorrent_device_put(tt_dev);
 	put_pid(priv->pid);

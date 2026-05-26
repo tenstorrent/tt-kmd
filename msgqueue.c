@@ -22,6 +22,11 @@ bool arc_msg_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg, 
 	if (cls->csm_read32(tt_dev, ARC_MSG_QUEUE_REQ_WPTR(queue_base), &wptr) != 0)
 		return false;
 
+	if (wptr == U32_MAX) {
+		dev_err(&tt_dev->pdev->dev, "ARC queue WPTR read returned all-1s; device gone?\n");
+		return false;
+	}
+
 	timeout = jiffies + msecs_to_jiffies(ARC_MSG_TIMEOUT_MS);
 	for (;;) {
 		u32 rptr;
@@ -29,6 +34,11 @@ bool arc_msg_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg, 
 
 		if (cls->csm_read32(tt_dev, ARC_MSG_QUEUE_REQ_RPTR(queue_base), &rptr) != 0)
 			return false;
+
+		if (rptr == U32_MAX) {
+			dev_err(&tt_dev->pdev->dev, "ARC queue RPTR read returned all-1s; device gone?\n");
+			return false;
+		}
 
 		num_occupied = (wptr - rptr) % (2 * num_entries);
 		if (num_occupied < num_entries)
@@ -72,6 +82,11 @@ bool arc_msg_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 que
 	if (cls->csm_read32(tt_dev, ARC_MSG_QUEUE_RES_RPTR(queue_base), &rptr) != 0)
 		return false;
 
+	if (rptr == U32_MAX) {
+		dev_err(&tt_dev->pdev->dev, "ARC queue RPTR read returned all-1s; device gone?\n");
+		return false;
+	}
+
 	timeout = jiffies + msecs_to_jiffies(ARC_MSG_TIMEOUT_MS);
 	for (;;) {
 		u32 wptr;
@@ -79,6 +94,11 @@ bool arc_msg_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 que
 
 		if (cls->csm_read32(tt_dev, ARC_MSG_QUEUE_RES_WPTR(queue_base), &wptr) != 0)
 			return false;
+
+		if (wptr == U32_MAX) {
+			dev_err(&tt_dev->pdev->dev, "ARC queue WPTR read returned all-1s; device gone?\n");
+			return false;
+		}
 
 		num_occupied = (wptr - rptr) % (2 * num_entries);
 		if (num_occupied > 0)

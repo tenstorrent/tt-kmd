@@ -12,6 +12,7 @@
 #include <linux/kref.h>
 #include <linux/rwsem.h>
 #include <linux/wait.h>
+#include <linux/workqueue.h>
 
 #include "ioctl.h"
 #include "memory.h"
@@ -52,6 +53,12 @@ struct tenstorrent_device {
 	const struct tt_hwmon_label *hwmon_labels;
 
 	struct list_head open_fds_list;	// List of struct chardev_private, linked through open_fds field
+
+	// Deferred idle power-down work.  Armed by tt_cdev_release on last
+	// close when dev_class->defer_idle_powerdown is set and
+	// idle_power_down_grace_ms > 0.  Cancelled in suspend and remove so
+	// an in-flight FW message cannot race cleanup_hardware.
+	struct delayed_work power_down_work;
 
 	DECLARE_BITMAP(tlbs, TENSTORRENT_MAX_INBOUND_TLBS);
 	u32 tlb_counts[MAX_TLB_KINDS];	// Per-device TLB counts (may differ from dev_class defaults)
@@ -101,6 +108,14 @@ struct tenstorrent_device_class {
 	int (*set_power_state)(struct tenstorrent_device *ttdev, struct tenstorrent_power_state *power_state);
 	int (*read_telemetry_tag)(struct tenstorrent_device *ttdev, u16 tag_id, u32 *value);
 	int (*probe_telemetry)(struct tenstorrent_device *ttdev);
+
+	// If true, the idle power-down message is sent from a delayed work
+	// item armed when the last fd closes, rather than synchronously from
+	// release().  Honors idle_power_down_grace_ms: a value of 0 falls
+	// back to the synchronous path even when this is true.  If false,
+	// release() unconditionally sends synchronously (historical
+	// behavior).
+	bool defer_idle_powerdown;
 };
 
 void tenstorrent_device_put(struct tenstorrent_device *);

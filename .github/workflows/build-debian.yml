@@ -34,17 +34,21 @@ jobs:
         id: version
         run: |
           VERSION=$(./tools/current-version)
+          # Debian uses ~ for prerelease sorting (2.7.0~rc1 sorts before 2.7.0).
+          DEB_VERSION="${VERSION//-/\~}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "deb_version=${DEB_VERSION}" >> $GITHUB_OUTPUT
           echo "Version: ${VERSION}"
+          echo "Deb version: ${DEB_VERSION}"
 
       - name: Upload Debian package
         uses: actions/upload-artifact@v4
         with:
-          name: tenstorrent-dkms_${{ steps.version.outputs.version }}_all.deb
-          path: tenstorrent-dkms_${{ steps.version.outputs.version }}_all.deb
+          name: tenstorrent-dkms_${{ steps.version.outputs.deb_version }}_all.deb
+          path: tenstorrent-dkms_${{ steps.version.outputs.deb_version }}_all.deb
 
       - name: Display package info
         run: |
           echo "=== Package Information ==="
-          dpkg-deb --info tenstorrent-dkms_${{ steps.version.outputs.version }}_all.deb
+          dpkg-deb --info tenstorrent-dkms_${{ steps.version.outputs.deb_version }}_all.deb
 

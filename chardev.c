@@ -204,6 +204,11 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
 		return -EFAULT;
 
+	// Drain any deferred idle powerdown before disturbing the device.
+	// open()/release() take reset_rwsem shared and we hold it exclusive
+	// here, so no new arm can land between the cancel and the reset.
+	cancel_delayed_work_sync(&tt_dev->power_down_work);
+
 	if (in.flags == TENSTORRENT_RESET_DEVICE_RESTORE_STATE) {
 		if (safe_pci_restore_state(pdev)) {
 			priv->device->dev_class->restore_reset_state(priv->device);
@@ -681,6 +686,13 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	if (!power_aware)
 		private_data->power_state.power_flags = TT_POWER_FLAG_ALL & ~TT_POWER_FLAG_MAX_AI_CLK;
 
+	// Hold reset_rwsem (shared) across the body so the reset ioctl
+	// (which holds it exclusive) cannot interleave with the deferred
+	// powerdown cancel, list_add, or the initial aggregation.  Without
+	// this, a reset that drained the work could find a fresh arm
+	// landed by this open after its cancel on the power_down_work.
+	down_read(&tt_dev->reset_rwsem);
+
 	// Eagerly drain any deferred powerdown armed by a previous
 	// last-close so an open() arriving during the grace window
 	// doesn't ship a spurious powerdown->powerup pair.  Correctness
@@ -706,6 +718,8 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 			dev_warn(&tt_dev->pdev->dev, "Failed to set initial power state: %d\n", ret);
 	}
 
+	up_read(&tt_dev->reset_rwsem);
+
 	return 0;
 }
 
@@ -719,9 +733,17 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	bool is_minimum_power = priv->power_state.validity == TT_POWER_VALIDITY(15, 0)
 				&& priv->power_state.power_flags == 0;
 	bool has_power_contribution = !power_aware || !is_minimum_power;
-	bool cleanup_noc = !tt_dev->detached && priv->noc_cleanup.enabled;
+	bool cleanup_noc;
 	bool last_close = false;
 	bool armed = false;
+
+	// Hold reset_rwsem (shared) across the body so the reset ioctl
+	// (which holds it exclusive) cannot interleave with the device-
+	// touching cleanup, the list_del/arm site, or the synchronous
+	// aggregation fallback.
+	down_read(&tt_dev->reset_rwsem);
+
+	cleanup_noc = !tt_dev->detached && priv->noc_cleanup.enabled;
 
 	if (cleanup_noc)
 		tt_dev->dev_class->noc_write32(
@@ -774,6 +796,8 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 		   && !tt_dev->needs_hw_init) {
 		tenstorrent_set_aggregated_power_state(tt_dev);
 	}
+
+	up_read(&tt_dev->reset_rwsem);
 
 	tenstorrent_device_put(tt_dev);
 	put_pid(priv->pid);

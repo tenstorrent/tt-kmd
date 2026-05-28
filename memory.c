@@ -13,6 +13,8 @@
 #include <linux/file.h>
 #include <linux/vmalloc.h>
 #include <linux/sched/mm.h>
+#include <linux/dma-buf.h>
+#include <linux/module.h>
 
 #include "chardev_private.h"
 #include "device.h"
@@ -20,6 +22,9 @@
 #include "ioctl.h"
 #include "sg_helpers.h"
 #include "tlb.h"
+
+// dma_buf_export() and friends live in the DMA_BUF symbol namespace.
+MODULE_IMPORT_NS(DMA_BUF);
 
 #define BAR0_SIZE (1UL << 29)
 
@@ -985,10 +990,113 @@ long ioctl_configure_tlb(struct chardev_private *priv,
 	return tenstorrent_device_configure_tlb(tt_dev, in.id, &in.config);
 }
 
+// Private data for a dma-buf that exports a TLB window's BAR aperture.
+struct tt_tlb_dmabuf {
+	struct tenstorrent_device *tt_dev;
+	phys_addr_t phys;	// BAR physical address of the exported region
+	size_t size;
+};
+
+static int tt_tlb_dmabuf_attach(struct dma_buf *dmabuf, struct dma_buf_attachment *attach)
+{
+	// We hand out a PCI BAR region with no backing struct page, so the
+	// importer must be able to consume peer resources (peer-to-peer DMA).
+	if (!attach->peer2peer)
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
+static struct sg_table *tt_tlb_dmabuf_map(struct dma_buf_attachment *attach,
+					  enum dma_data_direction dir)
+{
+	struct tt_tlb_dmabuf *priv = attach->dmabuf->priv;
+	struct sg_table *sgt;
+	dma_addr_t addr;
+	int ret;
+
+	sgt = kzalloc(sizeof(*sgt), GFP_KERNEL);
+	if (!sgt)
+		return ERR_PTR(-ENOMEM);
+
+	ret = sg_alloc_table(sgt, 1, GFP_KERNEL);
+	if (ret) {
+		kfree(sgt);
+		return ERR_PTR(ret);
+	}
+
+	// Map the BAR region into the *importer's* DMA domain. attach->dev is
+	// the importing device (e.g. the NIC), supplied by the dma-buf core.
+	addr = dma_map_resource(attach->dev, priv->phys, priv->size, dir, 0);
+	if (dma_mapping_error(attach->dev, addr)) {
+		sg_free_table(sgt);
+		kfree(sgt);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	// Page-less entry: only the DMA address and length are meaningful.
+	sg_dma_address(sgt->sgl) = addr;
+	sg_dma_len(sgt->sgl) = priv->size;
+
+	return sgt;
+}
+
+static void tt_tlb_dmabuf_unmap(struct dma_buf_attachment *attach,
+				struct sg_table *sgt, enum dma_data_direction dir)
+{
+	struct tt_tlb_dmabuf *priv = attach->dmabuf->priv;
+
+	dma_unmap_resource(attach->dev, sg_dma_address(sgt->sgl), priv->size, dir, 0);
+	sg_free_table(sgt);
+	kfree(sgt);
+}
+
+static int tt_tlb_dmabuf_pin(struct dma_buf_attachment *attach)
+{
+	// The exported region is a fixed PCI BAR aperture; it never migrates.
+	return 0;
+}
+
+static void tt_tlb_dmabuf_unpin(struct dma_buf_attachment *attach)
+{
+}
+
+static void tt_tlb_dmabuf_release(struct dma_buf *dmabuf)
+{
+	// Frees only the export's private data. We hold no device reference:
+	// the dma-buf may outlive the device (reset/removal), but the ops never
+	// dereference tt_dev, so there is no use-after-free. Accessing the
+	// aperture across a reset/removal is undefined by design; we do not try
+	// try to revoke the importer's mapping.
+	//
+	// TODO(stage 4): make FREE_TLB refuse (-EBUSY) while an export of the
+	// window exists, tracked like priv->vma_list.
+	kfree(dmabuf->priv);
+}
+
+static const struct dma_buf_ops tt_tlb_dmabuf_ops = {
+	.attach = tt_tlb_dmabuf_attach,
+	.map_dma_buf = tt_tlb_dmabuf_map,
+	.unmap_dma_buf = tt_tlb_dmabuf_unmap,
+	.pin = tt_tlb_dmabuf_pin,
+	.unpin = tt_tlb_dmabuf_unpin,
+	.release = tt_tlb_dmabuf_release,
+};
+
 long ioctl_export_tlb_dmabuf(struct chardev_private *priv,
 			     struct tenstorrent_export_tlb_dmabuf __user *arg)
 {
+	struct tenstorrent_device *tt_dev = priv->device;
 	struct tenstorrent_export_tlb_dmabuf in = {0};
+	DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
+	struct tlb_descriptor tlb_desc = {0};
+	struct tt_tlb_dmabuf *dmabuf_priv;
+	struct dma_buf *dmabuf;
+	resource_size_t bar_len;
+	u64 region_size;
+	u64 region_end;
+	phys_addr_t phys;
+	int fd;
 
 	if (copy_from_user(&in, arg, sizeof(in)))
 		return -EFAULT;
@@ -1002,12 +1110,75 @@ long ioctl_export_tlb_dmabuf(struct chardev_private *priv,
 	if (in.tlb_id >= TENSTORRENT_MAX_INBOUND_TLBS)
 		return -EINVAL;
 
+	if (!PAGE_ALIGNED(in.offset) || !PAGE_ALIGNED(in.size))
+		return -EINVAL;
+
+	if (!tt_dev->dev_class->describe_tlb)
+		return -EINVAL;
+
 	// The caller must own the TLB window it wants to export.
 	if (!test_bit(in.tlb_id, priv->tlbs))
 		return -EPERM;
 
-	// dma-buf export is not implemented yet; the ABI lands first.
-	return -EOPNOTSUPP;
+	if (tt_dev->dev_class->describe_tlb(tt_dev, in.tlb_id, &tlb_desc))
+		return -EINVAL;
+
+	// Resolve the exported sub-range [offset, offset + size) within the
+	// window. size == 0 means "to the end of the window".
+	if (in.offset >= tlb_desc.size || in.size > tlb_desc.size)
+		return -EINVAL;
+
+	region_size = in.size ? in.size : tlb_desc.size - in.offset;
+	region_end = in.offset + region_size;	// no overflow: both <= tlb_desc.size
+
+	if (region_size == 0 || region_end > tlb_desc.size)
+		return -EINVAL;
+
+	// The exported region must lie within the BAR (matches map_tlb_window()).
+	bar_len = pci_resource_len(tt_dev->pdev, tlb_desc.bar);
+	if (tlb_desc.bar_offset + region_end > bar_len)
+		return -EINVAL;
+
+	phys = pci_resource_start(tt_dev->pdev, tlb_desc.bar) + tlb_desc.bar_offset + in.offset;
+
+	dmabuf_priv = kzalloc(sizeof(*dmabuf_priv), GFP_KERNEL);
+	if (!dmabuf_priv)
+		return -ENOMEM;
+
+	dmabuf_priv->tt_dev = tt_dev;
+	dmabuf_priv->phys = phys;
+	dmabuf_priv->size = region_size;
+
+	exp_info.ops = &tt_tlb_dmabuf_ops;
+	exp_info.size = region_size;
+	exp_info.flags = O_RDWR | O_CLOEXEC;
+	exp_info.priv = dmabuf_priv;
+
+	dmabuf = dma_buf_export(&exp_info);
+	if (IS_ERR(dmabuf)) {
+		kfree(dmabuf_priv);
+		return PTR_ERR(dmabuf);
+	}
+
+	// The dma_buf now owns dmabuf_priv; it is freed via .release.
+
+	fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0) {
+		dma_buf_put(dmabuf);
+		return fd;
+	}
+
+	in.fd = fd;
+	if (copy_to_user(arg, &in, sizeof(in))) {
+		put_unused_fd(fd);
+		dma_buf_put(dmabuf);
+		return -EFAULT;
+	}
+
+	// Transfer the dma_buf's file reference to the new fd.
+	fd_install(fd, dmabuf->file);
+
+	return 0;
 }
 
 // Is the mapping target range contained entirely with start - start+len?

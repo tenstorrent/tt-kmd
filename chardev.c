@@ -668,6 +668,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			ret = ioctl_set_power_state(priv, (struct tenstorrent_power_state __user *)arg);
 			break;
 
+		case TENSTORRENT_IOCTL_EXPORT_TLB_DMABUF:
+			ret = ioctl_export_tlb_dmabuf(priv, (struct tenstorrent_export_tlb_dmabuf __user *)arg);
+			break;
+
 		default:
 			ret = -EINVAL;
 			break;

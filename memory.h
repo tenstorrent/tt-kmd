@@ -16,6 +16,7 @@ struct tenstorrent_allocate_dma_buf;
 struct tenstorrent_free_dma_buf;
 struct tenstorrent_pin_pages;
 struct tenstorrent_map_peer_bar;
+struct tenstorrent_export_tlb_dmabuf;
 struct vm_area_struct;
 
 struct pinned_page_range {
@@ -51,6 +52,8 @@ long ioctl_free_tlb(struct chardev_private *priv,
 			struct tenstorrent_free_tlb __user *arg);
 long ioctl_configure_tlb(struct chardev_private *priv,
 			struct tenstorrent_configure_tlb __user *arg);
+long ioctl_export_tlb_dmabuf(struct chardev_private *priv,
+			struct tenstorrent_export_tlb_dmabuf __user *arg);
 
 int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma);
 void tenstorrent_memory_cleanup(struct chardev_private *priv);

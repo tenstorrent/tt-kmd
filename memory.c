@@ -15,6 +15,8 @@
 #include <linux/file.h>
 #include <linux/vmalloc.h>
 #include <linux/sched/mm.h>
+#include <linux/dma-buf.h>
+#include <linux/module.h>
 
 #include "chardev_private.h"
 #include "device.h"
@@ -990,6 +992,253 @@ long ioctl_configure_tlb(struct chardev_private *priv,
 
 	return tenstorrent_device_configure_tlb(tt_dev, in.id, &in.config);
 }
+
+// On kernels older than 5.8.0, EXPORT_TLB_DMABUF is unsupported.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
+
+// dma_buf_export() and friends live in the DMA_BUF symbol namespace.
+// Linux 6.13 changed MODULE_IMPORT_NS to take a string literal instead of a bare token.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+MODULE_IMPORT_NS("DMA_BUF");
+#else
+MODULE_IMPORT_NS(DMA_BUF);
+#endif
+
+// Private data for a dma-buf that exports a TLB window's BAR aperture.
+struct tt_tlb_dmabuf {
+	struct tenstorrent_device *tt_dev;
+	phys_addr_t phys;	// BAR physical address of the exported region
+	size_t size;
+};
+
+static int tt_tlb_dmabuf_attach(struct dma_buf *dmabuf, struct dma_buf_attachment *attach)
+{
+	// We hand out a PCI BAR region with no backing struct page, so the
+	// importer must be able to consume peer resources (peer-to-peer DMA).
+	if (!attach->peer2peer)
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
+// A scatterlist entry's length (sg_dma_len) is a 32-bit unsigned int, so a
+// single entry cannot describe a >=4 GiB segment (4 GiB truncates to 0).
+// Split the contiguous BAR mapping across entries kept well under 4 GiB.
+#define TT_TLB_DMABUF_SG_CHUNK SZ_1G
+
+static struct sg_table *tt_tlb_dmabuf_map(struct dma_buf_attachment *attach, enum dma_data_direction dir)
+{
+	struct tt_tlb_dmabuf *priv = attach->dmabuf->priv;
+	struct scatterlist *sg;
+	struct sg_table *sgt;
+	unsigned int nents;
+	dma_addr_t addr;
+	size_t off;
+	int ret;
+	int i;
+
+	nents = DIV_ROUND_UP(priv->size, TT_TLB_DMABUF_SG_CHUNK);
+
+	sgt = kzalloc(sizeof(*sgt), GFP_KERNEL);
+	if (!sgt)
+		return ERR_PTR(-ENOMEM);
+
+	ret = sg_alloc_table(sgt, nents, GFP_KERNEL);
+	if (ret) {
+		kfree(sgt);
+		return ERR_PTR(ret);
+	}
+
+	// Map the whole BAR region into the *importer's* DMA domain as one
+	// contiguous IOVA. attach->dev is the importing device (e.g. the NIC),
+	// supplied by the dma-buf core.
+	addr = dma_map_resource(attach->dev, priv->phys, priv->size, dir, 0);
+	if (dma_mapping_error(attach->dev, addr)) {
+		sg_free_table(sgt);
+		kfree(sgt);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	// Describe the single contiguous IOVA with page-less entries, each
+	// below the 32-bit sg length limit. Only the DMA address and length are
+	// meaningful (there are no backing struct pages). Entry 0 holds the base
+	// address, which tt_tlb_dmabuf_unmap() uses to release the whole range.
+	off = 0;
+	for_each_sg(sgt->sgl, sg, sgt->orig_nents, i) {
+		size_t len = min_t(size_t, TT_TLB_DMABUF_SG_CHUNK, priv->size - off);
+
+		sg_dma_address(sg) = addr + off;
+		sg_dma_len(sg) = len;
+		off += len;
+	}
+
+	return sgt;
+}
+
+static void tt_tlb_dmabuf_unmap(struct dma_buf_attachment *attach, struct sg_table *sgt, enum dma_data_direction dir)
+{
+	struct tt_tlb_dmabuf *priv = attach->dmabuf->priv;
+
+	dma_unmap_resource(attach->dev, sg_dma_address(sgt->sgl), priv->size, dir, 0);
+	sg_free_table(sgt);
+	kfree(sgt);
+}
+
+static int tt_tlb_dmabuf_pin(struct dma_buf_attachment *attach)
+{
+	// The exported region is a fixed PCI BAR aperture; it never migrates.
+	return 0;
+}
+
+static void tt_tlb_dmabuf_unpin(struct dma_buf_attachment *attach)
+{
+}
+
+static void tt_tlb_dmabuf_release(struct dma_buf *dmabuf)
+{
+	// Frees only the export's private data. We hold no device reference:
+	// the dma-buf may outlive the device (reset/removal), but the ops never
+	// dereference tt_dev, so there is no use-after-free. Accessing the
+	// aperture across a reset/removal is undefined by design; we do not try
+	// try to revoke the importer's mapping.
+	//
+	// TODO: make FREE_TLB refuse (-EBUSY) while an export of the window exists.
+	kfree(dmabuf->priv);
+}
+
+static const struct dma_buf_ops tt_tlb_dmabuf_ops = {
+	.attach = tt_tlb_dmabuf_attach,
+	.map_dma_buf = tt_tlb_dmabuf_map,
+	.unmap_dma_buf = tt_tlb_dmabuf_unmap,
+	.pin = tt_tlb_dmabuf_pin,
+	.unpin = tt_tlb_dmabuf_unpin,
+	.release = tt_tlb_dmabuf_release,
+};
+
+long ioctl_export_tlb_dmabuf(struct chardev_private *priv, struct tenstorrent_export_tlb_dmabuf __user *arg)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_export_tlb_dmabuf in = {0};
+	DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
+	struct tlb_descriptor tlb_desc = {0};
+	struct tt_tlb_dmabuf *dmabuf_priv;
+	struct dma_buf *dmabuf;
+	resource_size_t bar_len;
+	u64 region_size;
+	u64 region_end;
+	phys_addr_t phys;
+	long ret;
+	int fd;
+
+	if (copy_from_user(&in, arg, sizeof(in)))
+		return -EFAULT;
+
+	if (in.argsz != sizeof(in))
+		return -EINVAL;
+
+	if (in.flags != 0)
+		return -EINVAL;
+
+	if (in.tlb_id >= TENSTORRENT_MAX_INBOUND_TLBS)
+		return -EINVAL;
+
+	if (!PAGE_ALIGNED(in.offset) || !PAGE_ALIGNED(in.size))
+		return -EINVAL;
+
+	if (!tt_dev->dev_class->describe_tlb)
+		return -EINVAL;
+
+	// The caller must own the TLB window it wants to export.
+	mutex_lock(&priv->mutex);
+	if (!test_bit(in.tlb_id, priv->tlbs)) {
+		ret = -EPERM;
+		goto unlock;
+	}
+
+	if (tt_dev->dev_class->describe_tlb(tt_dev, in.tlb_id, &tlb_desc)) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	// Resolve the exported sub-range [offset, offset + size) within the
+	// window. size == 0 means "to the end of the window".
+	if (in.offset >= tlb_desc.size || in.size > tlb_desc.size) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	region_size = in.size ? in.size : tlb_desc.size - in.offset;
+	region_end = in.offset + region_size;	// no overflow: both <= tlb_desc.size
+
+	if (region_end > tlb_desc.size) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	// The exported region must lie within the BAR (matches map_tlb_window()).
+	bar_len = pci_resource_len(tt_dev->pdev, tlb_desc.bar);
+	if (tlb_desc.bar_offset + region_end > bar_len) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	phys = pci_resource_start(tt_dev->pdev, tlb_desc.bar) + tlb_desc.bar_offset + in.offset;
+
+	dmabuf_priv = kzalloc(sizeof(*dmabuf_priv), GFP_KERNEL);
+	if (!dmabuf_priv) {
+		ret = -ENOMEM;
+		goto unlock;
+	}
+
+	dmabuf_priv->tt_dev = tt_dev;
+	dmabuf_priv->phys = phys;
+	dmabuf_priv->size = region_size;
+
+	exp_info.ops = &tt_tlb_dmabuf_ops;
+	exp_info.size = region_size;
+	exp_info.flags = O_RDWR | O_CLOEXEC;
+	exp_info.priv = dmabuf_priv;
+
+	dmabuf = dma_buf_export(&exp_info);
+	if (IS_ERR(dmabuf)) {
+		kfree(dmabuf_priv);
+		ret = PTR_ERR(dmabuf);
+		goto unlock;
+	}
+
+	mutex_unlock(&priv->mutex);
+
+	fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0) {
+		dma_buf_put(dmabuf);
+		return fd;
+	}
+
+	in.fd = fd;
+	if (copy_to_user(arg, &in, sizeof(in))) {
+		put_unused_fd(fd);
+		dma_buf_put(dmabuf);
+		return -EFAULT;
+	}
+
+	// Transfer the dma_buf's file reference to the new fd.
+	fd_install(fd, dmabuf->file);
+
+	return 0;
+
+unlock:
+	mutex_unlock(&priv->mutex);
+	return ret;
+}
+
+#else /* LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0) */
+
+long ioctl_export_tlb_dmabuf(struct chardev_private *priv, struct tenstorrent_export_tlb_dmabuf __user *arg)
+{
+	return -EOPNOTSUPP;
+}
+
+#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0) */
 
 // Is the mapping target range contained entirely with start - start+len?
 // start and len must be page-aligned.

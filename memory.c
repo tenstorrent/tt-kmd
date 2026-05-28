@@ -1061,6 +1061,29 @@ static void tt_tlb_dmabuf_unpin(struct dma_buf_attachment *attach)
 {
 }
 
+static int tt_tlb_dmabuf_mmap(struct dma_buf *dmabuf, struct vm_area_struct *vma)
+{
+	// CPU mapping of the exported BAR aperture. This exists for testing the
+	// export path without an importing device; it is not needed for the
+	// peer-to-peer DMA use case and may be removed later. Unlike the chardev
+	// TLB mmap, this mapping is not tracked in priv->vma_list and so is not
+	// torn down by tenstorrent_vma_zap() on reset (consistent with the
+	// undefined-on-reset posture for exported dma-bufs).
+	struct tt_tlb_dmabuf *priv = dmabuf->priv;
+	unsigned long size = vma->vm_end - vma->vm_start;
+	unsigned long offset = (unsigned long)vma->vm_pgoff << PAGE_SHIFT;
+
+	if (offset >= priv->size || size > priv->size - offset)
+		return -EINVAL;
+
+	// The aperture is device MMIO, not memory: map it uncacheable.
+	vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
+
+	return io_remap_pfn_range(vma, vma->vm_start,
+				  (priv->phys + offset) >> PAGE_SHIFT,
+				  size, vma->vm_page_prot);
+}
+
 static void tt_tlb_dmabuf_release(struct dma_buf *dmabuf)
 {
 	// Frees only the export's private data. We hold no device reference:
@@ -1080,6 +1103,7 @@ static const struct dma_buf_ops tt_tlb_dmabuf_ops = {
 	.unmap_dma_buf = tt_tlb_dmabuf_unmap,
 	.pin = tt_tlb_dmabuf_pin,
 	.unpin = tt_tlb_dmabuf_unpin,
+	.mmap = tt_tlb_dmabuf_mmap,
 	.release = tt_tlb_dmabuf_release,
 };
 

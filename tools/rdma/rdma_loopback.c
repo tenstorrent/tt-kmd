@@ -68,6 +68,24 @@ struct conn {
 	int gid_index;
 };
 
+// Real RoCE NICs (unlike Soft-RoCE) require a RoCEv2 GID; the kernel then
+// resolves the destination MAC from it during the RTR transition. Pick the
+// first IPv4-mapped (::ffff:a.b.c.d) GID, which is always RoCEv2.
+static int pick_rocev2_gid(struct ibv_context *ctx, uint8_t port)
+{
+	static const uint8_t v4_mapped_prefix[12] = { 0,0,0,0,0,0,0,0,0,0,0xff,0xff };
+	union ibv_gid g;
+	int i;
+
+	for (i = 0; i < 16; i++) {
+		if (ibv_query_gid(ctx, port, i, &g))
+			break;
+		if (memcmp(g.raw, v4_mapped_prefix, sizeof(v4_mapped_prefix)) == 0)
+			return i;
+	}
+	return -1;
+}
+
 static struct ibv_context *open_device(const char *name)
 {
 	struct ibv_device **list;
@@ -178,7 +196,7 @@ static void to_rtr(struct conn *c, const struct endpoint *remote)
 			.grh = {
 				.dgid = remote->gid,
 				.sgid_index = c->gid_index,
-				.hop_limit = 1,
+				.hop_limit = 64,
 			},
 		},
 	};
@@ -271,7 +289,7 @@ int main(int argc, char **argv)
 	char *src, *tgt;
 	size_t len = BUF_SIZE;
 	int opt;
-	int gid_index = 0;
+	int gid_index = -1;	// -1 = auto-pick a RoCEv2 GID
 	uint8_t port = 1;
 
 	while ((opt = getopt(argc, argv, "d:g:p:s:h")) != -1) {
@@ -291,6 +309,12 @@ int main(int argc, char **argv)
 	ctx = open_device(dev_name);
 	ca.ctx = cb.ctx = ctx;
 	ca.port = cb.port = port;
+
+	if (gid_index < 0) {
+		gid_index = pick_rocev2_gid(ctx, port);
+		if (gid_index < 0)
+			gid_index = 0;	// fall back (e.g. Soft-RoCE)
+	}
 	ca.gid_index = cb.gid_index = gid_index;
 
 	dump_port(&ca);

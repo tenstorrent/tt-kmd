@@ -985,6 +985,31 @@ long ioctl_configure_tlb(struct chardev_private *priv,
 	return tenstorrent_device_configure_tlb(tt_dev, in.id, &in.config);
 }
 
+long ioctl_export_tlb_dmabuf(struct chardev_private *priv,
+			     struct tenstorrent_export_tlb_dmabuf __user *arg)
+{
+	struct tenstorrent_export_tlb_dmabuf in = {0};
+
+	if (copy_from_user(&in, arg, sizeof(in)))
+		return -EFAULT;
+
+	if (in.argsz != sizeof(in))
+		return -EINVAL;
+
+	if (in.flags != 0)
+		return -EINVAL;
+
+	if (in.tlb_id >= TENSTORRENT_MAX_INBOUND_TLBS)
+		return -EINVAL;
+
+	// The caller must own the TLB window it wants to export.
+	if (!test_bit(in.tlb_id, priv->tlbs))
+		return -EPERM;
+
+	// dma-buf export is not implemented yet; the ABI lands first.
+	return -EOPNOTSUPP;
+}
+
 // Is the mapping target range contained entirely with start - start+len?
 // start and len must be page-aligned.
 static bool vma_target_range(struct vm_area_struct *vma, u64 start, resource_size_t len)

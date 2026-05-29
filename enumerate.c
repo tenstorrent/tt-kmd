@@ -23,8 +23,7 @@
 #include "wormhole.h"
 #include "tlb.h"
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0) || \
-    (defined(RHEL_RELEASE_CODE) && RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 4))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0) || TT_RHEL_RELEASE_GE(9, 4)
 #define pci_enable_pcie_error_reporting(dev) do { } while (0)
 #define pci_disable_pcie_error_reporting(dev) do { } while (0)
 #else

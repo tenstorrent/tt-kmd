@@ -6,6 +6,15 @@
 
 #include <linux/types.h>
 #include <linux/pci.h>
+#include <linux/version.h>
+
+// RHEL 9.4 backports API changes that normally key off newer upstream kernels.
+// Keep RHEL_RELEASE_VERSION() guarded because non-RHEL kernels do not define it.
+#if defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION)
+#define TT_RHEL_RELEASE_GE(a, b) (RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(a, b))
+#else
+#define TT_RHEL_RELEASE_GE(a, b) 0
+#endif
 
 #define TENSTORRENT_DRIVER_VERSION_MAJOR 2
 #define TENSTORRENT_DRIVER_VERSION_MINOR 9

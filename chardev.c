@@ -56,7 +56,7 @@ int init_char_driver(unsigned int max_devices)
 	if (res < 0)
 		goto alloc_chrdev_region_failed;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0) || TT_RHEL_RELEASE_GE(9, 4)
 	tt_dev_class = class_create(TENSTORRENT);
 #else
 	tt_dev_class = class_create(THIS_MODULE, TENSTORRENT);

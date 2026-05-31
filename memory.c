@@ -24,7 +24,12 @@
 #include "tlb.h"
 
 // dma_buf_export() and friends live in the DMA_BUF symbol namespace.
+// Linux 6.13 changed MODULE_IMPORT_NS to take a string literal instead of a bare token.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+MODULE_IMPORT_NS("DMA_BUF");
+#else
 MODULE_IMPORT_NS(DMA_BUF);
+#endif
 
 #define BAR0_SIZE (1UL << 29)
 
@@ -1007,26 +1012,38 @@ static int tt_tlb_dmabuf_attach(struct dma_buf *dmabuf, struct dma_buf_attachmen
 	return 0;
 }
 
+// A scatterlist entry's length (sg_dma_len) is a 32-bit unsigned int, so a
+// single entry cannot describe a >=4 GiB segment (4 GiB truncates to 0).
+// Split the contiguous BAR mapping across entries kept well under 4 GiB.
+#define TT_TLB_DMABUF_SG_CHUNK ((size_t)1 << 30)	// 1 GiB
+
 static struct sg_table *tt_tlb_dmabuf_map(struct dma_buf_attachment *attach,
 					  enum dma_data_direction dir)
 {
 	struct tt_tlb_dmabuf *priv = attach->dmabuf->priv;
+	struct scatterlist *sg;
 	struct sg_table *sgt;
+	unsigned int nents;
 	dma_addr_t addr;
+	size_t off;
 	int ret;
+	int i;
+
+	nents = DIV_ROUND_UP(priv->size, TT_TLB_DMABUF_SG_CHUNK);
 
 	sgt = kzalloc(sizeof(*sgt), GFP_KERNEL);
 	if (!sgt)
 		return ERR_PTR(-ENOMEM);
 
-	ret = sg_alloc_table(sgt, 1, GFP_KERNEL);
+	ret = sg_alloc_table(sgt, nents, GFP_KERNEL);
 	if (ret) {
 		kfree(sgt);
 		return ERR_PTR(ret);
 	}
 
-	// Map the BAR region into the *importer's* DMA domain. attach->dev is
-	// the importing device (e.g. the NIC), supplied by the dma-buf core.
+	// Map the whole BAR region into the *importer's* DMA domain as one
+	// contiguous IOVA. attach->dev is the importing device (e.g. the NIC),
+	// supplied by the dma-buf core.
 	addr = dma_map_resource(attach->dev, priv->phys, priv->size, dir, 0);
 	if (dma_mapping_error(attach->dev, addr)) {
 		sg_free_table(sgt);
@@ -1034,9 +1051,22 @@ static struct sg_table *tt_tlb_dmabuf_map(struct dma_buf_attachment *attach,
 		return ERR_PTR(-ENOMEM);
 	}
 
-	// Page-less entry: only the DMA address and length are meaningful.
-	sg_dma_address(sgt->sgl) = addr;
-	sg_dma_len(sgt->sgl) = priv->size;
+	// Describe the single contiguous IOVA with page-less entries, each
+	// below the 32-bit sg length limit. Only the DMA address and length are
+	// meaningful (there are no backing struct pages). Entry 0 holds the base
+	// address, which tt_tlb_dmabuf_unmap() uses to release the whole range.
+	off = 0;
+	for_each_sg(sgt->sgl, sg, sgt->orig_nents, i) {
+		size_t len = min(TT_TLB_DMABUF_SG_CHUNK, priv->size - off);
+
+		sg_dma_address(sg) = addr + off;
+		sg_dma_len(sg) = len;
+		off += len;
+	}
+
+	dev_dbg(attach->dev,
+		"tt dmabuf map: phys=%pa size=%zu dma_addr=%pad nents=%u\n",
+		&priv->phys, priv->size, &addr, nents);
 
 	return sgt;
 }

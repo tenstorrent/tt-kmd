@@ -101,8 +101,8 @@ struct tenstorrent_export_tlb_dmabuf {
 /* ===== sizes / constants ===== */
 
 #define TLB_SIZE_4G	(4ULL << 30)
-#define EXPORT_SIZE	(2ULL << 20)
-#define MR_LEN		(64 * 1024)
+#define EXPORT_SIZE	(4ULL << 30)
+#define MR_LEN		(64 * 1024 * 1024)
 #define TCP_PORT	18515
 
 #define DIE(fmt, ...) \
@@ -111,6 +111,20 @@ struct tenstorrent_export_tlb_dmabuf {
 // Deterministic patterns both sides agree on (no need to ship the data).
 static void pattern_write(uint8_t *b, size_t n) { for (size_t i = 0; i < n; i++) b[i] = (uint8_t)(0x40 + (i & 0x3f)); }
 static void pattern_read(uint8_t *b, size_t n)  { for (size_t i = 0; i < n; i++) b[i] = (uint8_t)(0x80 + (i & 0x3f)); }
+
+// Push CPU write-combining buffers toward the device. WC stores may linger in
+// a core buffer and reorder, so a barrier must precede the non-posted read
+// that actually fences them through to DRAM (see the clear/seed paths below).
+static inline void wc_flush(void)
+{
+#if defined(__aarch64__)
+	__asm__ volatile("dsb sy" ::: "memory");
+#elif defined(__x86_64__) || defined(__i386__)
+	__asm__ volatile("sfence" ::: "memory");
+#else
+	__sync_synchronize();
+#endif
+}
 
 /* ===== RDMA helpers ===== */
 
@@ -357,11 +371,15 @@ static int run_server(const char *bh_path, const char *rdma_name, int gid_index,
 	struct exch local = { 0 }, remote = { 0 };
 	struct ibv_mr *bh_mr;
 	volatile uint8_t *bh_cpu;
-	uint8_t expect[MR_LEN];
+	uint8_t *expect;
 	void *mmio;
 	int bh_fd, dmabuf_fd, sock;
 	uint8_t sync;
 	size_t i;
+
+	expect = malloc(MR_LEN);
+	if (!expect)
+		DIE("malloc(expect) failed");
 
 	bh_fd = open_blackhole(bh_path);
 
@@ -382,9 +400,15 @@ static int run_server(const char *bh_path, const char *rdma_name, int gid_index,
 		DIE("EXPORT_TLB_DMABUF: %s", strerror(errno));
 	dmabuf_fd = exp.fd;
 
-	mmio = mmap(NULL, EXPORT_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, dmabuf_fd, 0);
+	// CPU view of the window via the supported TLB mmap API (chardev fd),
+	// not the dma-buf fd. Use the write-combining offset so the bulk
+	// clear/seed stores coalesce into bursts instead of per-byte uncached
+	// writes; WC ordering is handled explicitly via wc_flush() + a read-back
+	// fence. The dma-buf fd is used only to register the RDMA MR below.
+	mmio = mmap(NULL, TLB_SIZE_4G, PROT_READ | PROT_WRITE, MAP_SHARED,
+		    bh_fd, alloc.out.mmap_offset_wc);
 	if (mmio == MAP_FAILED)
-		DIE("mmap dma-buf: %s", strerror(errno));
+		DIE("mmap TLB window: %s", strerror(errno));
 	bh_cpu = mmio;
 
 	printf("server: BH %s window->(x=%u,y=%u,addr=0x%llx) exported\n",
@@ -406,9 +430,16 @@ static int run_server(const char *bh_path, const char *rdma_name, int gid_index,
 	connect_qp(&c, &local, &remote);
 	printf("server: connected to client qpn=0x%x\n", remote.qpn);
 
-	// Phase 1 (NIC writes BH): clear DRAM, wait for the client's WRITE.
+	// Phase 1 (NIC writes BH): clear DRAM *before* releasing the client.
+	// The clear is 64K of uncached MMIO stores and is far slower than the
+	// client's one-shot hardware RDMA WRITE. Without an explicit handoff the
+	// zero-fill races the NIC and can land *after* it, clobbering the
+	// pattern back to 0x00 - which looks like "the WRITE never arrived".
 	for (i = 0; i < MR_LEN; i++)
 		bh_cpu[i] = 0;
+	wc_flush();			// drain WC buffers, then a non-posted
+	(void)bh_cpu[MR_LEN - 1];	// read-back fences the clears into DRAM
+	rw_all(sock, &sync, 1, 1);	// "DRAM cleared, you may write"
 	rw_all(sock, &sync, 1, 0);	// client signals "write done"
 
 	pattern_write(expect, MR_LEN);
@@ -420,7 +451,8 @@ static int run_server(const char *bh_path, const char *rdma_name, int gid_index,
 
 	// Phase 2 (NIC reads BH): seed DRAM, fence, tell client to read.
 	pattern_read((uint8_t *)bh_cpu, MR_LEN);
-	(void)bh_cpu[0];	// UC read-back fences the CPU writes into DRAM
+	wc_flush();			// drain WC buffers, then a non-posted
+	(void)bh_cpu[MR_LEN - 1];	// read-back fences the seed into DRAM
 	rw_all(sock, &sync, 1, 1);	// "read pattern ready"
 	rw_all(sock, &sync, 1, 0);	// client signals "read verified"
 	printf("server: client reported RDMA READ verified\n");
@@ -428,11 +460,12 @@ static int run_server(const char *bh_path, const char *rdma_name, int gid_index,
 
 	close(sock);
 	ibv_dereg_mr(bh_mr);
-	munmap(mmio, EXPORT_SIZE);
+	munmap(mmio, TLB_SIZE_4G);
 	close(dmabuf_fd);
 	ft.in.id = alloc.out.id;
 	ioctl(bh_fd, TENSTORRENT_IOCTL_FREE_TLB, &ft);
 	close(bh_fd);
+	free(expect);
 	return 0;
 }
 
@@ -443,7 +476,7 @@ static int run_client(const char *server_ip, const char *rdma_name, int gid_inde
 	struct conn c = { 0 };
 	struct exch local = { 0 }, remote = { 0 };
 	struct ibv_mr *host_mr;
-	uint8_t *host, expect[MR_LEN];
+	uint8_t *host, *expect;
 	int sock;
 	uint8_t sync = 1;
 	size_t i;
@@ -453,6 +486,9 @@ static int run_client(const char *server_ip, const char *rdma_name, int gid_inde
 	host = aligned_alloc(4096, MR_LEN);
 	if (!host)
 		DIE("aligned_alloc failed");
+	expect = malloc(MR_LEN);
+	if (!expect)
+		DIE("malloc(expect) failed");
 	host_mr = ibv_reg_mr(c.pd, host, MR_LEN, IBV_ACCESS_LOCAL_WRITE);
 	if (!host_mr)
 		DIE("ibv_reg_mr failed: %s", strerror(errno));
@@ -463,8 +499,11 @@ static int run_client(const char *server_ip, const char *rdma_name, int gid_inde
 	connect_qp(&c, &local, &remote);
 	printf("client: connected to server qpn=0x%x (bh rkey=0x%x)\n", remote.qpn, remote.rkey);
 
-	// Phase 1: RDMA WRITE a known pattern into the BH aperture.
+	// Phase 1: wait until the server has cleared BH DRAM, then RDMA WRITE a
+	// known pattern into the aperture. The wait avoids racing the server's
+	// slow uncached zero-fill, which would otherwise clobber our write.
 	pattern_write(host, MR_LEN);
+	rw_all(sock, &sync, 1, 0);	// wait for "DRAM cleared, you may write"
 	rdma_op(&c, IBV_WR_RDMA_WRITE, host_mr, host, MR_LEN, remote.addr, remote.rkey);
 	printf("client: RDMA WRITE %d bytes into BH posted+completed\n", MR_LEN);
 	rw_all(sock, &sync, 1, 1);	// tell server "write done"
@@ -485,6 +524,7 @@ static int run_client(const char *server_ip, const char *rdma_name, int gid_inde
 	close(sock);
 	ibv_dereg_mr(host_mr);
 	free(host);
+	free(expect);
 	return 0;
 }
 

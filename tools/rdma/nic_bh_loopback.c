@@ -370,10 +370,14 @@ int main(int argc, char **argv)
 	printf("Blackhole:   %s, window->(x=%u,y=%u,addr=0x%llx), dma-buf fd=%d\n",
 	       bh_path, noc_x, noc_y, (unsigned long long)noc_addr, dmabuf_fd);
 
-	// CPU view of the same aperture, for seeding/verifying BH DRAM.
-	mmio = mmap(NULL, EXPORT_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, dmabuf_fd, 0);
+	// CPU view of the same aperture, for seeding/verifying BH DRAM. Use the
+	// supported TLB mmap API (chardev fd + mmap_offset_uc), not the dma-buf
+	// fd: same BAR aperture, same uncacheable semantics. The dma-buf fd is
+	// used only to register the RDMA MR below.
+	mmio = mmap(NULL, EXPORT_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED,
+		    bh_fd, alloc.out.mmap_offset_uc);
 	if (mmio == MAP_FAILED)
-		DIE("mmap dma-buf fd: %s", strerror(errno));
+		DIE("mmap TLB window: %s", strerror(errno));
 	bh_cpu = mmio;
 
 	// --- NIC: open verbs, build a self-looped RC connection ---

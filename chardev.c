@@ -447,14 +447,13 @@ static long ioctl_set_noc_cleanup(struct chardev_private *priv,
 	return 0;
 }
 
-int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_dev)
+static int tenstorrent_set_aggregated_power_state_locked(struct tenstorrent_device *tt_dev)
 {
 	struct tenstorrent_power_state power_state = { 0 };
 	struct chardev_private *priv;
 	u8 max_settings_count = 0;
-	int ret;
 
-	mutex_lock(&tt_dev->chardev_mutex);
+	lockdep_assert_held(&tt_dev->chardev_mutex);
 
 	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
 		u8 flags_count;
@@ -503,7 +502,15 @@ int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_dev)
 	// regardless of what validity individual FDs specified.
 	power_state.validity = TT_POWER_VALIDITY(15, max_settings_count);
 
-	ret = tt_dev->dev_class->set_power_state(tt_dev, &power_state);
+	return tt_dev->dev_class->set_power_state(tt_dev, &power_state);
+}
+
+int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_dev)
+{
+	int ret;
+
+	mutex_lock(&tt_dev->chardev_mutex);
+	ret = tenstorrent_set_aggregated_power_state_locked(tt_dev);
 	mutex_unlock(&tt_dev->chardev_mutex);
 
 	return ret;
@@ -786,79 +793,86 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int tt_cdev_release(struct inode *inode, struct file *file)
+static void tt_cdev_release_noc_cleanup(struct chardev_private *priv)
 {
-	struct chardev_private *priv = file->private_data;
 	struct tenstorrent_device *tt_dev = priv->device;
+
+	if (tt_dev->detached || !priv->noc_cleanup.enabled)
+		return;
+
+	tt_dev->dev_class->noc_write32(tt_dev, priv->noc_cleanup.x, priv->noc_cleanup.y,
+				       priv->noc_cleanup.addr, priv->noc_cleanup.data & 0xFFFFFFFF,
+				       priv->noc_cleanup.noc);
+}
+
+static void tt_cdev_release_resource_locks(struct chardev_private *priv)
+{
 	unsigned int bitpos;
-	bool defer = tt_dev->dev_class->defer_idle_powerdown;
-	bool power_aware = file->f_flags & O_APPEND;
-	bool is_minimum_power = priv->power_state.validity == TT_POWER_VALIDITY(15, 0)
-				&& priv->power_state.power_flags == 0;
-	bool has_power_contribution = !power_aware || !is_minimum_power;
-	bool cleanup_noc;
-	bool last_close = false;
-	bool armed = false;
-
-	// Hold reset_rwsem (shared) across the body so the reset ioctl
-	// (which holds it exclusive) cannot interleave with the device-
-	// touching cleanup, the list_del/arm site, or the synchronous
-	// aggregation fallback.
-	down_read(&tt_dev->reset_rwsem);
-
-	cleanup_noc = !tt_dev->detached && priv->noc_cleanup.enabled;
-
-	if (cleanup_noc)
-		tt_dev->dev_class->noc_write32(
-			tt_dev,
-			priv->noc_cleanup.x,
-			priv->noc_cleanup.y,
-			priv->noc_cleanup.addr,
-			priv->noc_cleanup.data & 0xFFFFFFFF,
-			priv->noc_cleanup.noc);
-
-	decrement_cdev_open_count(tt_dev);
-
-	tenstorrent_memory_cleanup(priv);
-
-	// Release all locally held locks and wake any waiters.
 	for (bitpos = 0; bitpos < TENSTORRENT_RESOURCE_LOCK_COUNT; ++bitpos) {
 		if (test_and_clear_bit(bitpos, priv->resource_lock))
 			clear_bit(bitpos, priv->device->resource_lock);
 	}
 	wake_up_interruptible(&priv->device->resource_lock_waitqueue);
+}
 
-	// Release all TLBs held by this file descriptor.
+static void tt_cdev_release_tlbs(struct chardev_private *priv)
+{
+	unsigned int bitpos;
 	for_each_set_bit(bitpos, priv->tlbs, TENSTORRENT_MAX_INBOUND_TLBS)
-		tenstorrent_device_free_tlb(tt_dev, bitpos);
+		tenstorrent_device_free_tlb(priv->device, bitpos);
+}
 
-	mutex_lock(&tt_dev->chardev_mutex);
-	list_del(&priv->open_fd);
+static void tt_cdev_release_power(struct chardev_private *priv)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	bool can_defer;
+	bool no_power_contrib;
+	bool last_close;
+
+	lockdep_assert_held(&tt_dev->chardev_mutex);
+
+	can_defer = tt_dev->dev_class->defer_idle_powerdown && (idle_power_down_grace_ms > 0);
+	no_power_contrib = (priv->power_state.validity == TT_POWER_VALIDITY(15, 0) && priv->power_state.power_flags == 0);
 	last_close = list_empty(&tt_dev->open_fds_list);
 
-	// Armed under chardev_mutex; see the teardown comment in
-	// tenstorrent_pci_remove() for the invariant this supports.
-	// has_power_contribution gates the arm for the same reason it
-	// gates the synchronous fallback below: a zero-contribution
-	// power-aware fd closing after RESET_PCIE_LINK must not generate
-	// FW traffic (commit 40e6405).
-	if (defer && last_close && has_power_contribution && power_policy
-	    && !tt_dev->detached && !tt_dev->needs_hw_init
-	    && idle_power_down_grace_ms > 0) {
-		mod_delayed_work(system_wq, &tt_dev->power_down_work,
-				      msecs_to_jiffies(idle_power_down_grace_ms));
-		armed = true;
-	}
-	mutex_unlock(&tt_dev->chardev_mutex);
+	if (tt_dev->detached || tt_dev->needs_hw_init)
+		return;
 
-	if (armed) {
-		dev_dbg(&tt_dev->pdev->dev,
-			"deferred idle powerdown armed: grace=%u ms\n",
-			idle_power_down_grace_ms);
-	} else if (has_power_contribution && power_policy && !tt_dev->detached
-		   && !tt_dev->needs_hw_init) {
-		tenstorrent_set_aggregated_power_state(tt_dev);
-	}
+	if (!power_policy)
+		return;
+
+	if (no_power_contrib)
+		return;
+
+	if (can_defer && last_close)
+		mod_delayed_work(system_wq, &tt_dev->power_down_work, msecs_to_jiffies(idle_power_down_grace_ms));
+	else
+		tenstorrent_set_aggregated_power_state_locked(tt_dev);
+}
+
+static int tt_cdev_release(struct inode *inode, struct file *file)
+{
+	struct chardev_private *priv = file->private_data;
+	struct tenstorrent_device *tt_dev = priv->device;
+
+	// Hold reset_rwsem (shared) across the body so the reset ioctl (which holds
+	// it exclusive) cannot interleave with the device-touching cleanup.
+	down_read(&tt_dev->reset_rwsem);
+
+	tt_cdev_release_noc_cleanup(priv);
+	decrement_cdev_open_count(tt_dev);
+	tenstorrent_memory_cleanup(priv);
+	tt_cdev_release_resource_locks(priv);
+	tt_cdev_release_tlbs(priv);
+
+	mutex_lock(&tt_dev->chardev_mutex);
+
+	list_del(&priv->open_fd);
+
+	// Must follow the list_del: release_power reads open_fds_list.
+	tt_cdev_release_power(priv);
+
+	mutex_unlock(&tt_dev->chardev_mutex);
 
 	up_read(&tt_dev->reset_rwsem);
 
@@ -866,6 +880,7 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	put_pid(priv->pid);
 	kfree(file->private_data);
 	file->private_data = NULL;
+
 	return 0;
 }
 

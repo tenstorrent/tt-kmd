@@ -45,6 +45,15 @@ static DEFINE_XARRAY_ALLOC(tenstorrent_dev_xa);
 static const u8 wh_galaxy_ubb_bus_prefix[GALAXY_NUM_UBBS] = { 0xC, 0x8, 0x0, 0x4 };
 static const u8 bh_galaxy_ubb_bus_prefix[GALAXY_NUM_UBBS] = { 0x0, 0x4, 0xC, 0x8 };
 
+static void pci_enable_hotplug(struct pci_dev *dev)
+{
+	struct pci_dev *bridge = dev->bus->self;
+
+	dev->ignore_hotplug = 0;
+	if (bridge)
+		bridge->ignore_hotplug = 0;
+}
+
 static int galaxy_bdf_to_ordinal(struct pci_dev *pdev)
 {
 	const u8 *ubb_table;
@@ -350,9 +359,9 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	pci_set_master(dev);
 	pci_enable_pcie_error_reporting(dev);
 
-	// HACK: Suppress hotplug for Galaxy systems.
+	// HACK: Enable hotplug for Galaxy systems.
 	if (dev->subsystem_device == PCI_SUBSYSTEM_ID_GALAXY_WH || dev->subsystem_device == PCI_SUBSYSTEM_ID_GALAXY_BH)
-		pci_ignore_hotplug(dev);
+		pci_enable_hotplug(dev);
 
 	pci_set_drvdata(dev, tt_dev);
 	dev_set_drvdata(&tt_dev->dev, tt_dev);

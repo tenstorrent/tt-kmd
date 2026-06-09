@@ -10,6 +10,7 @@
 #include <linux/cdev.h>
 #include <linux/reboot.h>
 #include <linux/kref.h>
+#include <linux/refcount.h>
 #include <linux/rwsem.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
@@ -63,6 +64,7 @@ struct tenstorrent_device {
 
 	DECLARE_BITMAP(tlbs, TENSTORRENT_MAX_INBOUND_TLBS);
 	u32 tlb_counts[MAX_TLB_KINDS];	// Per-device TLB counts (may differ from dev_class defaults)
+	refcount_t tlb_refcount[TENSTORRENT_MAX_INBOUND_TLBS];
 
 	struct mutex iatu_mutex;
 	struct tenstorrent_outbound_iatu_region outbound_iatus[TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS];

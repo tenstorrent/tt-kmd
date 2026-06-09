@@ -314,6 +314,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	memcpy(tt_dev->tlb_counts, device_class->tlb_counts, sizeof(tt_dev->tlb_counts));
 
 	mutex_init(&tt_dev->chardev_mutex);
+	mutex_init(&tt_dev->tlb_mutex);
 	mutex_init(&tt_dev->iatu_mutex);
 	INIT_DELAYED_WORK(&tt_dev->power_down_work, tenstorrent_power_down_work_func);
 

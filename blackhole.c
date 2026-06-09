@@ -5,6 +5,8 @@
 #include <linux/bitfield.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/bsearch.h>
+#include <linux/slab.h>
 #include <linux/jiffies.h>
 #include <linux/delay.h>
 
@@ -440,32 +442,25 @@ static const struct hwmon_chip_info bh_hwmon_chip_info = {
 static int blackhole_read_telemetry_tag(struct tenstorrent_device *tt_dev, u16 tag_id, u32 *value)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-	u64 addr;
+	u64 addr = telem_cache_lookup(tt_dev, tag_id);
 
-	if (tag_id >= TELEM_TAG_CACHE_SIZE)
-		return -EINVAL;
-
-	addr = tt_dev->telemetry_tag_cache[tag_id];
 	if (addr == 0)
 		return -ENODATA;
 
 	return csm_read32(bh, addr, value);
 }
 
-static int telemetry_probe(struct tenstorrent_device *tt_dev)
+static int blackhole_populate_telemetry_cache(struct tenstorrent_device *tt_dev,
+					      struct telem_cache_entry *cache,
+					      u16 count)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	u32 base_addr, data_addr;
 	u32 version, major_ver, minor_ver, patch_ver;
-	u32 tags_addr;
-	u32 num_entries;
-	u32 i;
-
-	memset(tt_dev->telemetry_tag_cache, 0, sizeof(tt_dev->telemetry_tag_cache));
+	u32 tags_addr, num_entries, i;
 
 	base_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_PTR, 0);
 	data_addr = noc_read32(bh, ARC_X, ARC_Y, ARC_TELEMETRY_DATA, 0);
-	tags_addr = base_addr + 8;
 
 	if (!is_range_within_csm(base_addr, 1) || !is_range_within_csm(data_addr, 1)) {
 		dev_err(&tt_dev->pdev->dev, "Telemetry not available\n");
@@ -482,16 +477,21 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 		return -ENOTSUPP;
 	}
 
+	tags_addr = base_addr + 8;
 	num_entries = noc_read32(bh, ARC_X, ARC_Y, base_addr + 4, 0);
 
-	for (i = 0; i < num_entries; ++i) {
+	for (i = 0; i < num_entries; i++) {
 		u32 tag_entry = noc_read32(bh, ARC_X, ARC_Y, tags_addr + (i * 4), 0);
 		u16 tag_id = tag_entry & 0xFFFF;
 		u16 offset = (tag_entry >> 16) & 0xFFFF;
 		u32 addr = data_addr + (offset * 4);
+		struct telem_cache_entry key = { .tag_id = tag_id };
+		struct telem_cache_entry *entry;
 
-		if (tag_id < TELEM_TAG_CACHE_SIZE)
-			tt_dev->telemetry_tag_cache[tag_id] = addr;
+		entry = bsearch(&key, cache, count, sizeof(*cache),
+				telem_cache_entry_cmp);
+		if (entry)
+			entry->address = addr;
 	}
 
 	return 0;
@@ -609,6 +609,11 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
 	mutex_init(&bh->kernel_tlb_mutex);
 
+	tt_dev->hwmon_attributes = bh_hwmon_attrs;
+	tt_dev->hwmon_labels = bh_hwmon_labels;
+	tt_dev->telemetry_sysfs = bh_sysfs_attributes;
+	tt_dev->telemetry_sysfs_count = ARRAY_SIZE(bh_sysfs_attributes);
+
 	for (i = 0; i < ARRAY_SIZE(bh_sysfs_attributes); ++i)
 		tt_dev->telemetry_attrs[i] = &bh_sysfs_attributes[i].attr.attr;
 	tt_dev->telemetry_group.attrs = tt_dev->telemetry_attrs;
@@ -649,7 +654,7 @@ static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
 	else
 		bh->pcie_perf_group_registered = true;
 
-	r = telemetry_probe(tt_dev);
+	r = tt_telemetry_probe(tt_dev);
 	if (!r) {
 		struct device *dev = &tt_dev->pdev->dev;
 		struct device *hwmon_device;
@@ -657,9 +662,6 @@ static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
 		r = device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
 		if (!r)
 			bh->telemetry_group_registered = true;
-
-		tt_dev->hwmon_attributes = bh_hwmon_attrs;
-		tt_dev->hwmon_labels = bh_hwmon_labels;
 
 		hwmon_device = hwmon_device_register_with_info(dev, "blackhole", tt_dev, &bh_hwmon_chip_info, NULL);
 		if (IS_ERR(hwmon_device))
@@ -692,6 +694,10 @@ static void blackhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
 		device_remove_group(&tt_dev->dev, &bh_pcie_perf_counters_group);
 		bh->pcie_perf_group_registered = false;
 	}
+
+	kfree(tt_dev->telemetry_cache);
+	tt_dev->telemetry_cache = NULL;
+	tt_dev->telemetry_cache_count = 0;
 }
 
 static void blackhole_cleanup_hardware(struct tenstorrent_device *tt_dev)
@@ -825,7 +831,8 @@ struct tenstorrent_device_class blackhole_class = {
 	.init_telemetry = blackhole_init_telemetry,
 	.cleanup_telemetry = blackhole_cleanup_telemetry,
 	.read_telemetry_tag = blackhole_read_telemetry_tag,
-	.probe_telemetry = telemetry_probe,
+	.populate_telemetry_cache = blackhole_populate_telemetry_cache,
+	.probe_telemetry = tt_telemetry_probe,
 	.cleanup_hardware = blackhole_cleanup_hardware,
 	.cleanup_device = blackhole_cleanup,
 	.configure_tlb = blackhole_configure_tlb,

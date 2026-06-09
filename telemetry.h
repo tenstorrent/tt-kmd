@@ -8,9 +8,14 @@
 #include <linux/device.h>
 #include <linux/hwmon.h>
 
-// Maximum number of tag IDs in the per-device tag-to-address cache.
-// Tag IDs are small integers (currently up to 64); 128 gives comfortable headroom.
-#define TELEM_TAG_CACHE_SIZE 128
+// Sparse cache entry mapping a telemetry tag ID to an arch-specific address.
+// WH stores a BAR4 sysreg offset; BH stores a raw CSM address.
+struct telem_cache_entry {
+	u16 tag_id;
+	u64 address;
+};
+
+#define TELEM_ADDR_INVALID U64_MAX
 
 enum tt_telemetry_tags {
     TELEMETRY_BOARD_ID = 1,
@@ -47,6 +52,9 @@ struct tenstorrent_sysfs_attr {
 
 struct tenstorrent_device;
 int tt_telemetry_read32(struct tenstorrent_device *tt_dev, u16 tag_id, u32 *value);
+int tt_telemetry_probe(struct tenstorrent_device *tt_dev);
+u64 telem_cache_lookup(const struct tenstorrent_device *tt_dev, u16 tag_id);
+int telem_cache_entry_cmp(const void *a, const void *b);
 
 // Common sysfs show callbacks for telemetry attributes.
 ssize_t tt_sysfs_show_u32_dec(struct device *dev, struct device_attribute *attr, char *buf);

@@ -218,24 +218,29 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		}
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK) {
 		tenstorrent_vma_zap(tt_dev);
+		tenstorrent_revoke_tlb_dmabufs(tt_dev);
 		ok = pcie_hot_reset_and_restore_state(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_CONFIG_WRITE) {
 		atomic_long_inc(&priv->device->reset_gen);
 		tenstorrent_vma_zap(tt_dev);
+		tenstorrent_revoke_tlb_dmabufs(tt_dev);
 		ok = pcie_timer_interrupt(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_USER_RESET) {
 		atomic_long_inc(&priv->device->reset_gen);
 		tenstorrent_vma_zap(tt_dev);
+		tenstorrent_revoke_tlb_dmabufs(tt_dev);
 		ok = set_reset_marker(pdev);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
 		atomic_long_inc(&priv->device->reset_gen);
 		tenstorrent_vma_zap(tt_dev);
+		tenstorrent_revoke_tlb_dmabufs(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
 		atomic_long_inc(&priv->device->reset_gen);
 		tenstorrent_vma_zap(tt_dev);
+		tenstorrent_revoke_tlb_dmabufs(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {

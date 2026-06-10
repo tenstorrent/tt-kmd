@@ -419,12 +419,28 @@ struct tenstorrent_power_state {
  * that device can perform peer-to-peer PCIe DMA into/out of the window, which
  * routes onto the NOC according to the window's configuration (CONFIGURE_TLB).
  *
- * The exported region is [offset, offset + size) within the window. A size of
- * 0 means the remainder of the window starting at offset.
+ * The exported region is [offset, offset + size); a size of 0 means the
+ * remainder of the window starting at offset.
  *
- * WARNING: behavior is undefined if the device is reset while an importer holds
- * a mapping of the returned dma-buf. The importer's mapping cannot be revoked.
- * Applications must release importer mappings before resetting the device.
+ * The region is a PCI BAR aperture with no backing pages, so importers must
+ * support peer-to-peer DMA. Both importers that implement move_notify and
+ * importers that pin the mapping are accepted.
+ *
+ * A device reset, suspend, or removal revokes all exports on a best-effort
+ * basis: further maps fail with -ENODEV, and move_notify fires. An importer
+ * that implements move_notify stops DMA and unmaps in response; an importer
+ * that pins the mapping cannot be revoked and will not stop. Because the device
+ * is never prevented from resetting, resetting it while a pinned mapping is live
+ * is undefined behavior on the data path -- the application must quiesce DMA
+ * before resetting. Revocation is permanent: to recover, reallocate and
+ * reconfigure a window on a fresh device fd and export it again. A revoked fd is
+ * still safe to close.
+ *
+ * An export pins its window: FREE_TLB or close() of the owning fd does not
+ * return the window to the allocation pool while the export is live, so the
+ * window cannot be reallocated and reconfigured to redirect a live importer's
+ * DMA elsewhere on the NOC. The window is freed only once the dma-buf is
+ * released; a revoked export still pins its window until then.
  *
  * @argsz: Must be sizeof(struct tenstorrent_export_tlb_dmabuf).
  * @flags: Reserved for future use, must be 0.

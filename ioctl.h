@@ -419,12 +419,23 @@ struct tenstorrent_power_state {
  * that device can perform peer-to-peer PCIe DMA into/out of the window, which
  * routes onto the NOC according to the window's configuration (CONFIGURE_TLB).
  *
- * The exported region is [offset, offset + size) within the window. A size of
- * 0 means the remainder of the window starting at offset.
+ * The exported region is [offset, offset + size); a size of 0 means the
+ * remainder of the window starting at offset.
  *
- * WARNING: behavior is undefined if the device is reset while an importer holds
- * a mapping of the returned dma-buf. The importer's mapping cannot be revoked.
- * Applications must release importer mappings before resetting the device.
+ * The region is a PCI BAR aperture with no backing pages, so importers must
+ * support peer-to-peer DMA. Both importers that implement move_notify and
+ * importers that pin the mapping are accepted.
+ *
+ * Resetting the device under in-flight P2P DMA can wedge the host hard enough
+ * to require out-of-band recovery, and a pin-only importer cannot be revoked to
+ * prevent the in-flight DMA. RESET_DEVICE is therefore refused with -EBUSY
+ * while any export is live.
+ *
+ * An export pins its window: FREE_TLB or close() of the owning fd does not
+ * return the window to the allocation pool while the export is live, so the
+ * window cannot be reallocated and reconfigured to redirect a live importer's
+ * DMA elsewhere on the NOC. The window is freed only once the dma-buf is
+ * released.
  *
  * @argsz: Must be sizeof(struct tenstorrent_export_tlb_dmabuf).
  * @flags: Reserved for future use, must be 0.

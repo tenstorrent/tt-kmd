@@ -213,6 +213,25 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
 		return -EFAULT;
 
+	// Refuse a destructive in-place reset while any TLB window is exported as
+	// a dma-buf: an importer may be doing peer-to-peer DMA into it, and a
+	// pin-only importer cannot be revoked to make the reset safe. See the
+	// EXPORT_TLB_DMABUF rationale in ioctl.h. RESTORE_STATE/POST_RESET are the
+	// re-init halves of a reset sequence, not destructive, so they are left
+	// alone.
+	switch (in.flags) {
+	case TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK:
+	case TENSTORRENT_RESET_DEVICE_CONFIG_WRITE:
+	case TENSTORRENT_RESET_DEVICE_USER_RESET:
+	case TENSTORRENT_RESET_DEVICE_ASIC_RESET:
+	case TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET:
+		if (tenstorrent_has_tlb_dmabuf_exports(tt_dev))
+			return -EBUSY;
+		break;
+	default:
+		break;
+	}
+
 	// Drain any deferred idle powerdown before disturbing the device.
 	// open()/release() take reset_rwsem shared and we hold it exclusive
 	// here, so no new arm can land between the cancel and the reset.

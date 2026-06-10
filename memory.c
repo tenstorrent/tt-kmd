@@ -17,6 +17,7 @@
 #include <linux/sched/mm.h>
 #include <linux/dma-buf.h>
 #include <linux/module.h>
+#include <linux/dma-resv.h>
 
 #include "chardev_private.h"
 #include "device.h"
@@ -27,8 +28,12 @@
 
 #define BAR0_SIZE (1UL << 29)
 
+// In 7.1:
+// 52a9e9cd181f renamed zap_vma_ptes() to zap_special_vma_range()
+// 95308225e5ba renamed dma_buf_move_notify() to dma_buf_invalidate_mappings()
 #if LINUX_VERSION_CODE < KERNEL_VERSION(7, 1, 0)
-# define zap_special_vma_range(vma, addr, size) zap_vma_ptes(vma, addr, size)
+#define zap_special_vma_range(vma, addr, size) zap_vma_ptes(vma, addr, size)
+#define dma_buf_invalidate_mappings(dmabuf) dma_buf_move_notify(dmabuf)
 #endif
 
 static int get_sorted_iatu_region_indices(const struct tenstorrent_outbound_iatu_region *regions, int *sorted_indices)
@@ -1007,9 +1012,12 @@ MODULE_IMPORT_NS(DMA_BUF);
 // Private data for a dma-buf that exports a TLB window's BAR aperture.
 struct tt_tlb_dmabuf {
 	struct tenstorrent_device *tt_dev;
+	struct dma_buf *dmabuf;		// back-pointer for the revoke walk
+	struct list_head list;		// node in tt_dev->dmabuf_exports
 	u32 tlb_id;		// window this export holds a refcount on
 	phys_addr_t phys;	// BAR physical address of the exported region
 	size_t size;
+	bool revoked;		// guarded by dmabuf->resv
 };
 
 static int tt_tlb_dmabuf_attach(struct dma_buf *dmabuf, struct dma_buf_attachment *attach)
@@ -1037,6 +1045,11 @@ static struct sg_table *tt_tlb_dmabuf_map(struct dma_buf_attachment *attach, enu
 	size_t off;
 	int ret;
 	int i;
+
+	dma_resv_assert_held(attach->dmabuf->resv);
+
+	if (priv->revoked)
+		return ERR_PTR(-ENODEV);
 
 	nents = DIV_ROUND_UP(priv->size, TT_TLB_DMABUF_SG_CHUNK);
 
@@ -1087,7 +1100,14 @@ static void tt_tlb_dmabuf_unmap(struct dma_buf_attachment *attach, struct sg_tab
 
 static int tt_tlb_dmabuf_pin(struct dma_buf_attachment *attach)
 {
-	// The exported region is a fixed PCI BAR aperture; it never migrates.
+	struct tt_tlb_dmabuf *priv = attach->dmabuf->priv;
+
+	dma_resv_assert_held(attach->dmabuf->resv);
+
+	// Refuse only an already-revoked export.
+	if (priv->revoked)
+		return -ENODEV;
+
 	return 0;
 }
 
@@ -1098,17 +1118,19 @@ static void tt_tlb_dmabuf_unpin(struct dma_buf_attachment *attach)
 static void tt_tlb_dmabuf_release(struct dma_buf *dmabuf)
 {
 	struct tt_tlb_dmabuf *priv = dmabuf->priv;
+	struct tenstorrent_device *tt_dev = priv->tt_dev;
+
+	mutex_lock(&tt_dev->dmabuf_export_lock);
+	list_del(&priv->list);
+	mutex_unlock(&tt_dev->dmabuf_export_lock);
 
 	// Drop this export's hold on the TLB window. If the owning fd is already
 	// gone (FREE_TLB or close()), this returns the window to the pool. The
 	// device reference taken at export time is what makes touching tt_dev
 	// safe here even if the device was removed while the dma-buf was open.
-	//
-	// NOTE: a reset still leaves an importer's mapping pointing at a window
-	// whose NOC routing has been torn down. Revoking that mapping
-	// (dma_buf_move_notify) is handled separately, not here.
 	tenstorrent_tlb_export_put(priv->tt_dev, priv->tlb_id);
 	tenstorrent_device_put(priv->tt_dev);
+
 	kfree(priv);
 }
 
@@ -1200,8 +1222,9 @@ long ioctl_export_tlb_dmabuf(struct chardev_private *priv, struct tenstorrent_ex
 	dmabuf_priv->tlb_id = in.tlb_id;
 	dmabuf_priv->phys = phys;
 	dmabuf_priv->size = region_size;
+	// dmabuf back-pointer can only be set after the export succeeds (below).
 
-	// Pin the window and the device for the lifetime of the dma-buf, so the
+	// Pin the device and the window for the lifetime of the dma-buf, so the
 	// export survives FREE_TLB and close() of this fd. Both references are
 	// dropped in tt_tlb_dmabuf_release(). Taken before dma_buf_export() so
 	// the release callback -- reachable via dma_buf_put() on the error paths
@@ -1223,6 +1246,12 @@ long ioctl_export_tlb_dmabuf(struct chardev_private *priv, struct tenstorrent_ex
 		ret = PTR_ERR(dmabuf);
 		goto unlock;
 	}
+
+	dmabuf_priv->dmabuf = dmabuf;	// back-pointer for the revoke walk
+
+	mutex_lock(&tt_dev->dmabuf_export_lock);
+	list_add(&dmabuf_priv->list, &tt_dev->dmabuf_exports);
+	mutex_unlock(&tt_dev->dmabuf_export_lock);
 
 	mutex_unlock(&priv->mutex);
 
@@ -1249,11 +1278,49 @@ unlock:
 	return ret;
 }
 
+void tenstorrent_revoke_tlb_dmabufs(struct tenstorrent_device *tt_dev)
+{
+	struct tt_tlb_dmabuf *exp;
+
+	mutex_lock(&tt_dev->dmabuf_export_lock);
+	list_for_each_entry(exp, &tt_dev->dmabuf_exports, list) {
+		dma_resv_lock(exp->dmabuf->resv, NULL);
+
+		if (!exp->revoked) {
+			exp->revoked = true;
+			dma_buf_invalidate_mappings(exp->dmabuf);
+		}
+
+		dma_resv_unlock(exp->dmabuf->resv);
+	}
+	mutex_unlock(&tt_dev->dmabuf_export_lock);
+}
+
+bool tenstorrent_has_tlb_dmabuf_exports(struct tenstorrent_device *tt_dev)
+{
+	bool any;
+
+	mutex_lock(&tt_dev->dmabuf_export_lock);
+	any = !list_empty(&tt_dev->dmabuf_exports);
+	mutex_unlock(&tt_dev->dmabuf_export_lock);
+
+	return any;
+}
+
 #else /* LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0) */
 
 long ioctl_export_tlb_dmabuf(struct chardev_private *priv, struct tenstorrent_export_tlb_dmabuf __user *arg)
 {
 	return -EOPNOTSUPP;
+}
+
+void tenstorrent_revoke_tlb_dmabufs(struct tenstorrent_device *tt_dev)
+{
+}
+
+bool tenstorrent_has_tlb_dmabuf_exports(struct tenstorrent_device *tt_dev)
+{
+	return false;
 }
 
 #endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0) */

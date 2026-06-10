@@ -20,8 +20,11 @@
 struct pci_dev;
 struct cdev;
 
+struct tenstorrent_device;
+
 int tenstorrent_pci_register_driver(void);
 void tenstorrent_pci_unregister_driver(void);
+struct tenstorrent_device *tenstorrent_lookup_device(unsigned int ordinal);
 
 // Procfs show function for pids
 int pids_proc_show(struct seq_file *s, void *v);

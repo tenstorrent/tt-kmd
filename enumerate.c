@@ -465,6 +465,11 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	tenstorrent_device_put(tt_dev);
 }
 
+struct tenstorrent_device *tenstorrent_lookup_device(unsigned int ordinal)
+{
+	return xa_load(&tenstorrent_dev_xa, ordinal);
+}
+
 static void tt_dev_release(struct kref *tt_dev_kref) {
 	struct tenstorrent_device *tt_dev = container_of(tt_dev_kref, struct tenstorrent_device, kref);
 	struct pci_dev *pdev = tt_dev->pdev;

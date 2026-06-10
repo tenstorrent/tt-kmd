@@ -730,6 +730,19 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	struct chardev_private *private_data;
 	bool power_aware = file->f_flags & O_APPEND;
 
+	// Container devtmpfs inodes cache i_cdev from the first open and never
+	// update it.  After a PCI remove/re-probe cycle the cached i_cdev still
+	// points to the old (detached) cdev.  Redirect to the current device.
+	if (tt_dev->detached) {
+		unsigned int ordinal = iminor(inode) - MINOR(tt_device_id);
+		struct tenstorrent_device *new_dev = tenstorrent_lookup_device(ordinal);
+
+		if (new_dev && !new_dev->detached)
+			tt_dev = new_dev;
+		else
+			return -ENODEV;
+	}
+
 	private_data = kzalloc(sizeof(*private_data), GFP_KERNEL);
 	if (private_data == NULL)
 		return -ENOMEM;

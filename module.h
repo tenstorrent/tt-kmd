@@ -18,8 +18,8 @@
 
 #define TENSTORRENT_DRIVER_VERSION_MAJOR 2
 #define TENSTORRENT_DRIVER_VERSION_MINOR 9
-#define TENSTORRENT_DRIVER_VERSION_PATCH 99
-#define TENSTORRENT_DRIVER_VERSION_SUFFIX "-testing"
+#define TENSTORRENT_DRIVER_VERSION_PATCH 100
+#define TENSTORRENT_DRIVER_VERSION_SUFFIX "-pre"
 
 // Module options that need to be passed to other files
 extern uint dma_address_bits;

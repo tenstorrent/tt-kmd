@@ -27,6 +27,7 @@
 #define TENSTORRENT_IOCTL_CONFIGURE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 13)
 #define TENSTORRENT_IOCTL_SET_NOC_CLEANUP		_IO(TENSTORRENT_IOCTL_MAGIC, 14)
 #define TENSTORRENT_IOCTL_SET_POWER_STATE		_IO(TENSTORRENT_IOCTL_MAGIC, 15)
+#define TENSTORRENT_IOCTL_EXPORT_TLB_DMABUF		_IO(TENSTORRENT_IOCTL_MAGIC, 16)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -407,6 +408,54 @@ struct tenstorrent_power_state {
 #define TT_POWER_FLAG_TENSIX_ENABLE     (1U << 2) /* 1=Enable Tensix, 0=Clock Gate Tensix */
 #define TT_POWER_FLAG_L2CPU_ENABLE      (1U << 3) /* 1=Enable L2CPU,  0=Clock Gate L2CPU */
 	__u16 power_settings[14];
+};
+
+/**
+ * TENSTORRENT_IOCTL_EXPORT_TLB_DMABUF - export a TLB window as a dma-buf
+ *
+ * Wraps a previously-allocated TLB window (see TENSTORRENT_IOCTL_ALLOCATE_TLB)
+ * in a dma-buf and returns a file descriptor for it. The fd can be handed to
+ * another device's driver -- e.g. an RDMA NIC via ibv_reg_dmabuf_mr() -- so
+ * that device can perform peer-to-peer PCIe DMA into/out of the window, which
+ * routes onto the NOC according to the window's configuration (CONFIGURE_TLB).
+ *
+ * The exported region is [offset, offset + size); a size of 0 means the
+ * remainder of the window starting at offset.
+ *
+ * The region is a PCI BAR aperture with no backing pages, so importers must
+ * support peer-to-peer DMA. Both importers that implement move_notify and
+ * importers that pin the mapping are accepted.
+ *
+ * A device reset, suspend, or removal revokes all exports on a best-effort
+ * basis: further maps fail with -ENODEV, and move_notify fires. An importer
+ * that implements move_notify stops DMA and unmaps in response; an importer
+ * that pins the mapping cannot be revoked and will not stop. Because the device
+ * is never prevented from resetting, resetting it while a pinned mapping is live
+ * is undefined behavior on the data path -- the application must quiesce DMA
+ * before resetting. Revocation is permanent: to recover, reallocate and
+ * reconfigure a window on a fresh device fd and export it again. A revoked fd is
+ * still safe to close.
+ *
+ * An export pins its window: FREE_TLB or close() of the owning fd does not
+ * return the window to the allocation pool while the export is live, so the
+ * window cannot be reallocated and reconfigured to redirect a live importer's
+ * DMA elsewhere on the NOC. The window is freed only once the dma-buf is
+ * released; a revoked export still pins its window until then.
+ *
+ * @argsz: Must be sizeof(struct tenstorrent_export_tlb_dmabuf).
+ * @flags: Reserved for future use, must be 0.
+ * @tlb_id: A TLB window id returned by TENSTORRENT_IOCTL_ALLOCATE_TLB.
+ * @fd: OUT: the dma-buf file descriptor.
+ * @offset: Byte offset within the window at which the export begins.
+ * @size: Number of bytes to export; 0 means to the end of the window.
+ */
+struct tenstorrent_export_tlb_dmabuf {
+	__u32 argsz;
+	__u32 flags;
+	__u32 tlb_id;
+	__s32 fd;
+	__u64 offset;
+	__u64 size;
 };
 
 #endif

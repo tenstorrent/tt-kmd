@@ -60,8 +60,10 @@ struct tenstorrent_device {
 	// an in-flight FW message cannot race cleanup_hardware.
 	struct delayed_work power_down_work;
 
+	struct mutex tlb_mutex; // Serializes TLB alloc/free and per-window refcounts.
 	DECLARE_BITMAP(tlbs, TENSTORRENT_MAX_INBOUND_TLBS);
 	u32 tlb_counts[MAX_TLB_KINDS];	// Per-device TLB counts (may differ from dev_class defaults)
+	unsigned int tlb_refcount[TENSTORRENT_MAX_INBOUND_TLBS];
 
 	struct mutex iatu_mutex;
 	struct tenstorrent_outbound_iatu_region outbound_iatus[TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS];
@@ -74,6 +76,9 @@ struct tenstorrent_device {
 	// The stored value is arch-specific: WH stores a BAR4 sysreg offset,
 	// BH stores a raw CSM address for NOC reads.
 	u64 telemetry_tag_cache[TELEM_TAG_CACHE_SIZE];
+
+	struct list_head dmabuf_exports;
+	struct mutex dmabuf_export_lock;
 };
 
 struct tlb_descriptor;

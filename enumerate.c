@@ -440,6 +440,7 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	// Drain in-flight ioctls before BAR unmap.  detached was already
 	// set under chardev_mutex above.
 	down_write(&tt_dev->reset_rwsem);
+	tenstorrent_vma_zap(tt_dev);
 	tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
 	up_write(&tt_dev->reset_rwsem);
 

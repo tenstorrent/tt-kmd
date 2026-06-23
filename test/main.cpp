@@ -19,6 +19,7 @@ void TestLock(const EnumeratedDevice &dev);
 void TestHwmon(const EnumeratedDevice &dev);
 void TestIoctlOverrun(const EnumeratedDevice &dev);
 void TestIoctlZeroing(const EnumeratedDevice &dev);
+void TestIoctlArgsz(const EnumeratedDevice &dev);
 void TestMapPeerBar(const EnumeratedDevice &dev1, const EnumeratedDevice &dev2);
 void TestTlbs(const EnumeratedDevice &dev);
 void TestTlbExport(const EnumeratedDevice &dev);
@@ -52,6 +53,7 @@ int main(int argc, char *argv[])
         TestHwmon(d);
         TestIoctlOverrun(d);
         TestIoctlZeroing(d);
+        TestIoctlArgsz(d);
         TestTlbs(d);
         TestTlbExport(d);
         TestMappingsDebugfs(d);

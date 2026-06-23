@@ -291,6 +291,33 @@ exercise:
 - **`argsz` smaller than the kernel's** (old caller, new kernel) → success,
   missing fields defaulted to zero, output `argsz` reports the full size.
 
+### Locking the ABI layout
+
+The behavioral tests above prove the kernel *honors* old sizes; a separate
+compile-time check proves the structs themselves don't move. `test/pahole_check.sh`
+(run in CI by `.github/workflows/check-padding.yml`) compiles every `ioctl.h`
+struct with debug info, reads the layout back with `pahole`, and verifies two
+things against the locked snapshot in `test/ioctl_abi.golden`:
+
+1. No struct has implicit padding (all padding must be explicit reserved fields).
+2. No existing member changes offset or size or disappears, and no struct
+   shrinks. Appending a new member to the tail is allowed and reported; any
+   other change fails the build.
+
+Because the snapshot pins the offset and size of every member, it pins the
+`offsetofend` of each argsz ioctl's `minsz`-defining field — so `minsz` cannot
+silently change. A reorder, resize, insertion, or removal anywhere ahead of
+that field moves recorded bytes and fails CI.
+
+When you intentionally append a field, regenerate the snapshot and commit it:
+
+```sh
+test/pahole_check.sh --update-golden
+```
+
+The resulting diff shows only added member lines and the new total size, which
+is exactly what a reviewer should expect for legitimate tail growth.
+
 
 ## Legacy Ioctls
 

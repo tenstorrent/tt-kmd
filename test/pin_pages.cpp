@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <cstdint>
 
 #include <sys/types.h>
 #include <sys/stat.h>

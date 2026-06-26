@@ -28,6 +28,10 @@
 #define TENSTORRENT_IOCTL_SET_NOC_CLEANUP		_IO(TENSTORRENT_IOCTL_MAGIC, 14)
 #define TENSTORRENT_IOCTL_SET_POWER_STATE		_IO(TENSTORRENT_IOCTL_MAGIC, 15)
 
+// R&D / UNRELEASED, Grendel/Keraunos only -- see struct comment below.
+#define TENSTORRENT_IOCTL_KER_READ32		_IO(TENSTORRENT_IOCTL_MAGIC, 16)
+#define TENSTORRENT_IOCTL_KER_WRITE32		_IO(TENSTORRENT_IOCTL_MAGIC, 17)
+
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
 #define TENSTORRENT_MAPPING_RESOURCE0_UC	1
@@ -407,6 +411,35 @@ struct tenstorrent_power_state {
 #define TT_POWER_FLAG_TENSIX_ENABLE     (1U << 2) /* 1=Enable Tensix, 0=Clock Gate Tensix */
 #define TT_POWER_FLAG_L2CPU_ENABLE      (1U << 3) /* 1=Enable L2CPU,  0=Clock Gate L2CPU */
 	__u16 power_settings[14];
+};
+
+/*
+ * TENSTORRENT_IOCTL_KER_READ32 / _KER_WRITE32  [R&D / UNRELEASED]
+ *
+ * Grendel/Keraunos ONLY. Kernel-mediated single 32-bit access to an arbitrary
+ * 52-bit Keraunos system physical address, via a driver-managed TLB. The
+ * Wormhole/Blackhole addressing scheme is different; those devices reject these
+ * with -EOPNOTSUPP. ABI is not stable; do not ship userspace against it.
+ *
+ * @argsz: Must be sizeof(the struct).
+ * @flags: Reserved, must be 0.
+ * @addr:  52-bit SPA, must be 4-byte aligned.
+ * @value: READ32: out (value read). WRITE32: in (value to write).
+ */
+struct tenstorrent_ker_read32 {
+	__u32 argsz;
+	__u32 flags;
+	__u64 addr;
+	__u32 value;
+	__u32 reserved;
+};
+
+struct tenstorrent_ker_write32 {
+	__u32 argsz;
+	__u32 flags;
+	__u64 addr;
+	__u32 value;
+	__u32 reserved;
 };
 
 #endif

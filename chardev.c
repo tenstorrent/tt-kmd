@@ -560,6 +560,56 @@ static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorre
 	return tenstorrent_set_aggregated_power_state(tt_dev);
 }
 
+static long ioctl_ker_read32(struct chardev_private *priv,
+			     struct tenstorrent_ker_read32 __user *arg)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_ker_read32 data = {0};
+	int ret;
+
+	if (!tt_dev->dev_class->read32)
+		return -EOPNOTSUPP;
+
+	if (copy_from_user(&data, arg, sizeof(data)) != 0)
+		return -EFAULT;
+
+	if (data.argsz != sizeof(data))
+		return -EINVAL;
+
+	if (data.flags != 0)
+		return -EINVAL;
+
+	ret = tt_dev->dev_class->read32(tt_dev, data.addr, &data.value);
+	if (ret)
+		return ret;
+
+	if (copy_to_user(arg, &data, sizeof(data)) != 0)
+		return -EFAULT;
+
+	return 0;
+}
+
+static long ioctl_ker_write32(struct chardev_private *priv,
+			      struct tenstorrent_ker_write32 __user *arg)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_ker_write32 data = {0};
+
+	if (!tt_dev->dev_class->write32)
+		return -EOPNOTSUPP;
+
+	if (copy_from_user(&data, arg, sizeof(data)) != 0)
+		return -EFAULT;
+
+	if (data.argsz != sizeof(data))
+		return -EINVAL;
+
+	if (data.flags != 0)
+		return -EINVAL;
+
+	return tt_dev->dev_class->write32(tt_dev, data.addr, data.value);
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	struct chardev_private *priv = f->private_data;
@@ -657,6 +707,14 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_SET_POWER_STATE:
 			ret = ioctl_set_power_state(priv, (struct tenstorrent_power_state __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_KER_READ32:
+			ret = ioctl_ker_read32(priv, (struct tenstorrent_ker_read32 __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_KER_WRITE32:
+			ret = ioctl_ker_write32(priv, (struct tenstorrent_ker_write32 __user *)arg);
 			break;
 
 		default:

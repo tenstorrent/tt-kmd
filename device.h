@@ -105,6 +105,14 @@ struct tenstorrent_device_class {
 	void (*noc_write32)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, u32 data, int noc);
 	int (*csm_read32)(struct tenstorrent_device *ttdev, u64 addr, u32 *value);
 	int (*csm_write32)(struct tenstorrent_device *ttdev, u64 addr, u32 value);
+
+	// Kernel-mediated 32-bit access to an arbitrary system physical address,
+	// backing TENSTORRENT_IOCTL_KER_READ32 / _KER_WRITE32. The driver reserves
+	// and programs a TLB entry to reach addr. Grendel/Keraunos only; absent
+	// (NULL) means -EOPNOTSUPP, which is the correct behavior for WH/BH whose
+	// addressing scheme differs.
+	int (*read32)(struct tenstorrent_device *ttdev, u64 addr, u32 *value);
+	int (*write32)(struct tenstorrent_device *ttdev, u64 addr, u32 value);
 	int (*set_power_state)(struct tenstorrent_device *ttdev, struct tenstorrent_power_state *power_state);
 	int (*read_telemetry_tag)(struct tenstorrent_device *ttdev, u16 tag_id, u32 *value);
 	int (*probe_telemetry)(struct tenstorrent_device *ttdev);

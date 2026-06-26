@@ -30,6 +30,7 @@ extern uint idle_power_down_grace_ms;
 
 extern struct tenstorrent_device_class wormhole_class;
 extern struct tenstorrent_device_class blackhole_class;
+extern struct tenstorrent_device_class keraunos_class;
 extern const struct pci_device_id tenstorrent_ids[];
 
 extern struct dentry *tt_debugfs_root;

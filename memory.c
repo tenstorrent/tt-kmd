@@ -9,6 +9,8 @@
 #include <linux/uaccess.h>
 #include <linux/dma-mapping.h>
 #include <linux/version.h>
+#include <linux/mm.h>
+
 #include <linux/iommu.h>
 #include <linux/file.h>
 #include <linux/vmalloc.h>
@@ -22,6 +24,10 @@
 #include "tlb.h"
 
 #define BAR0_SIZE (1UL << 29)
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 1, 0)
+# define zap_special_vma_range(vma, addr, size) zap_vma_ptes(vma, addr, size)
+#endif
 
 static int get_sorted_iatu_region_indices(const struct tenstorrent_outbound_iatu_region *regions, int *sorted_indices)
 {
@@ -1047,7 +1053,7 @@ static void tenstorrent_vma_open(struct vm_area_struct *vma)
 	new_mmap_vma = kzalloc(sizeof(*new_mmap_vma), GFP_KERNEL);
 	if (!new_mmap_vma) {
 		dev_err_ratelimited(&priv->device->pdev->dev, "Failed to allocate mmap_vma on fork()\n");
-		zap_vma_ptes(vma, vma->vm_start, vma->vm_end - vma->vm_start);
+		zap_special_vma_range(vma, vma->vm_start, vma->vm_end - vma->vm_start);
 		vma->vm_private_data = NULL;
 		return;
 	}
@@ -1389,7 +1395,8 @@ void tenstorrent_vma_zap(struct tenstorrent_device *tt_dev)
 				// Detach from list but keep structure alive for vma_close.
 				list_del_init(&mmap_vma->list);
 
-				zap_vma_ptes(vma, vma->vm_start, vma->vm_end - vma->vm_start);
+				zap_special_vma_range(vma, vma->vm_start,
+						      vma->vm_end - vma->vm_start);
 			}
 
 			mutex_unlock(&priv->vma_lock);

@@ -10,8 +10,20 @@ jobs:
         runs-on: ubuntu-22.04
         steps:
             - uses: actions/checkout@v4
+            - id: cache-key
+              run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+            - uses: actions/cache@v4
+              with:
+                path: /tmp/linux
+                key: linux-clone-${{ steps.cache-key.outputs.week }}
+                restore-keys: |
+                    linux-clone-
             - run: |
                 sudo apt update
                 sudo apt install -y dkms git libelf-dev
-                git clone https://github.com/gregkh/linux /tmp/linux
+                if [ -d /tmp/linux/.git ]; then
+                    git -C /tmp/linux fetch --tags --force --prune origin
+                else
+                    git clone https://github.com/gregkh/linux /tmp/linux
+                fi
                 test/mass-build-test . /tmp/linux v5.4 v7.1

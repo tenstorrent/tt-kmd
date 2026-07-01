@@ -15,10 +15,10 @@ struct tlb_descriptor {
 	unsigned long bar_offset;
 };
 
-int tenstorrent_device_allocate_tlb(struct tenstorrent_device *tt_dev,
-				    size_t size);
-int tenstorrent_device_free_tlb(struct tenstorrent_device *tt_dev,
-				unsigned int id);
+int tenstorrent_device_allocate_tlb(struct tenstorrent_device *tt_dev, size_t size);
+int tenstorrent_device_free_tlb(struct tenstorrent_device *tt_dev, unsigned int id);
+void tenstorrent_tlb_export_get(struct tenstorrent_device *tt_dev, unsigned int id);
+void tenstorrent_tlb_export_put(struct tenstorrent_device *tt_dev, unsigned int id);
 int tenstorrent_device_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
 				     struct tenstorrent_noc_tlb_config *config);
 

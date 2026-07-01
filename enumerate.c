@@ -315,6 +315,8 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	mutex_init(&tt_dev->chardev_mutex);
 	mutex_init(&tt_dev->iatu_mutex);
+	mutex_init(&tt_dev->dmabuf_export_lock);
+	INIT_LIST_HEAD(&tt_dev->dmabuf_exports);
 	INIT_DELAYED_WORK(&tt_dev->power_down_work, tenstorrent_power_down_work_func);
 
 	// Use dma_address_bits from module parameter or device class for coherent
@@ -444,6 +446,18 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
 	up_write(&tt_dev->reset_rwsem);
 
+	// Revoke all TLB dma-buf exports.  Correctness depends on reset_rwsem:
+	// every export is created by an ioctl holding it shared, and the
+	// detached check at ioctl entry runs under that same hold.  An export
+	// in flight at this point therefore completes its list_add before the
+	// write-side drain above finishes, and this walk sees it.  An export
+	// ioctl arriving after the drain takes the read lock after our
+	// up_write -- an acquire of our release -- so it is guaranteed to
+	// observe detached (written before down_write) and fail at entry
+	// before a dma-buf can be created.  Do not move this call above the
+	// drain, and do not move the detached check outside the rwsem.
+	tenstorrent_revoke_tlb_dmabufs(tt_dev);
+
 	// Wake any LOCK_CTL ACQUIRE_BLOCKING waiters parked on this device so
 	// they observe detached and return -ENODEV instead of waiting forever.
 	wake_up_interruptible(&tt_dev->resource_lock_waitqueue);
@@ -487,6 +501,7 @@ static int tenstorrent_suspend(struct device *dev) {
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(pdev);
 
 	cancel_delayed_work_sync(&tt_dev->power_down_work);
+	tenstorrent_revoke_tlb_dmabufs(tt_dev);
 
 	tt_dev->dev_class->cleanup_hardware(tt_dev);
 

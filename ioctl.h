@@ -27,6 +27,8 @@
 #define TENSTORRENT_IOCTL_CONFIGURE_TLB		_IO(TENSTORRENT_IOCTL_MAGIC, 13)
 #define TENSTORRENT_IOCTL_SET_NOC_CLEANUP		_IO(TENSTORRENT_IOCTL_MAGIC, 14)
 #define TENSTORRENT_IOCTL_SET_POWER_STATE		_IO(TENSTORRENT_IOCTL_MAGIC, 15)
+#define TENSTORRENT_IOCTL_NOC_READ		_IO(TENSTORRENT_IOCTL_MAGIC, 16)
+#define TENSTORRENT_IOCTL_NOC_WRITE		_IO(TENSTORRENT_IOCTL_MAGIC, 17)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -407,6 +409,59 @@ struct tenstorrent_power_state {
 #define TT_POWER_FLAG_TENSIX_ENABLE     (1U << 2) /* 1=Enable Tensix, 0=Clock Gate Tensix */
 #define TT_POWER_FLAG_L2CPU_ENABLE      (1U << 3) /* 1=Enable L2CPU,  0=Clock Gate L2CPU */
 	__u16 power_settings[14];
+};
+
+/**
+ * TENSTORRENT_IOCTL_NOC_READ - Read a small value from a NOC endpoint
+ * TENSTORRENT_IOCTL_NOC_WRITE - Write a small value to a NOC endpoint
+ *
+ * These perform a single 1, 2, 4, or 8 byte read or write to a NOC address.
+ * The transfer is mediated by the kernel using a reserved address window, so
+ * it remains safe across device reset: a reset invalidates the file
+ * descriptor (subsequent calls return -ENODEV) rather than letting userspace
+ * fault on a zapped MMIO mapping. This trades throughput and latency for
+ * robustness, which suits long-running device management and telemetry tools.
+ *
+ * The target endpoint is identified by NOC coordinates (@x, @y) plus a local
+ * @addr. @flags is reserved for future addressing modes (e.g. hardware without
+ * X/Y coordinates) and must currently be 0.
+ *
+ * The KMD cannot validate that @addr refers to anything meaningful; it only
+ * enforces that @addr is naturally aligned to @size.
+ *
+ * @argsz: Must be sizeof(struct tenstorrent_noc_read/write).
+ * @flags: Reserved for future use, must be 0.
+ * @x: X coordinate of the NOC endpoint.
+ * @y: Y coordinate of the NOC endpoint.
+ * @noc: NOC ID to use; must be 0 or 1.
+ * @size: Transfer size in bytes; must be 1, 2, 4, or 8.
+ * @reserved0: Must be 0.
+ * @addr: NOC address; must be aligned to @size.
+ * @data: For NOC_READ, receives the value (zero-extended to 64 bits). For
+ *        NOC_WRITE, the value to write (only the low @size bytes are used).
+ */
+struct tenstorrent_noc_read {
+	__u32 argsz;
+	__u32 flags;
+	__u16 x;
+	__u16 y;
+	__u8 noc;
+	__u8 size;
+	__u8 reserved0[2];
+	__u64 addr;
+	__u64 data;
+};
+
+struct tenstorrent_noc_write {
+	__u32 argsz;
+	__u32 flags;
+	__u16 x;
+	__u16 y;
+	__u8 noc;
+	__u8 size;
+	__u8 reserved0[2];
+	__u64 addr;
+	__u64 data;
 };
 
 #endif

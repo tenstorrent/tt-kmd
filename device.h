@@ -103,6 +103,11 @@ struct tenstorrent_device_class {
 	void (*restore_reset_state)(struct tenstorrent_device *ttdev);
 	int (*configure_outbound_atu)(struct tenstorrent_device *ttdev, u32 region, u64 base, u64 limit, u64 target);
 	void (*noc_write32)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, u32 data, int noc);
+
+	// Reset-safe small (1/2/4/8 byte) NOC transfers. size is one of 1, 2, 4, 8.
+	// Return 0 on success or a negative errno.
+	int (*noc_read)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, void *data, u32 size, int noc);
+	int (*noc_write)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, const void *data, u32 size, int noc);
 	int (*csm_read32)(struct tenstorrent_device *ttdev, u64 addr, u32 *value);
 	int (*csm_write32)(struct tenstorrent_device *ttdev, u64 addr, u32 value);
 	int (*set_power_state)(struct tenstorrent_device *ttdev, struct tenstorrent_power_state *power_state);

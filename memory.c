@@ -273,27 +273,77 @@ static void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npage
 
 #define MMAP_SIZE_DMA_BUF (U64_C(1) << 32)
 
+// Clear an outbound iATU slot's bookkeeping without touching the hardware.
+static void release_outbound_iatu_slot(struct tenstorrent_device *tt_dev, int iatu_region)
+{
+	struct tenstorrent_outbound_iatu_region *region = &tt_dev->outbound_iatus[iatu_region];
+
+	lockdep_assert_held(&tt_dev->iatu_mutex);
+
+	region->priv = NULL;
+	region->base = 0;
+	region->limit = 0;
+	region->target = 0;
+}
+
 static void teardown_outbound_iatu(struct chardev_private *priv, int iatu_region)
 {
 	struct tenstorrent_device *tt_dev = priv->device;
-	struct tenstorrent_outbound_iatu_region *region;
 
 	if (iatu_region < 0)
 		return;
 
 	mutex_lock(&tt_dev->iatu_mutex);
 
-	region = &priv->device->outbound_iatus[iatu_region];
-
 	if (!tt_dev->detached)
 		tt_dev->dev_class->configure_outbound_atu(tt_dev, iatu_region, 0, 0, 0);
 
-	region->priv = NULL;
-	region->base = 0;
-	region->limit = 0;
-	region->target = 0;
+	release_outbound_iatu_slot(tt_dev, iatu_region);
 
 	mutex_unlock(&tt_dev->iatu_mutex);
+}
+
+// Reclaim outbound iATU slots from fds this reset invalidated (stale
+// open_reset_gen); a wedged process would otherwise hold them until a
+// close() that never comes.  Only the bookkeeping is released: reset leaves
+// the ATU default-clear, which is what a free slot means.  Nulling each
+// back-reference makes the stale fd's close() a no-op, so it cannot disable
+// a slot a post-reset fd has since claimed.  Caller holds reset_rwsem
+// exclusive and has already called bump_reset_gen().
+void tenstorrent_reset_reclaim_iatus(struct tenstorrent_device *tt_dev)
+{
+	long gen = atomic_long_read(&tt_dev->reset_gen);
+	struct chardev_private *priv;
+	struct pinned_page_range *pinning;
+	struct dmabuf *dmabuf;
+	unsigned int i;
+
+	mutex_lock(&tt_dev->chardev_mutex);
+	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
+		if (priv->open_reset_gen == gen)
+			continue;
+
+		mutex_lock(&priv->mutex);
+		mutex_lock(&tt_dev->iatu_mutex);
+
+		hash_for_each(priv->dmabufs, i, dmabuf, hash_chain) {
+			if (dmabuf->outbound_iatu_region >= 0) {
+				release_outbound_iatu_slot(tt_dev, dmabuf->outbound_iatu_region);
+				dmabuf->outbound_iatu_region = -1;
+			}
+		}
+
+		list_for_each_entry(pinning, &priv->pinnings, list) {
+			if (pinning->outbound_iatu_region >= 0) {
+				release_outbound_iatu_slot(tt_dev, pinning->outbound_iatu_region);
+				pinning->outbound_iatu_region = -1;
+			}
+		}
+
+		mutex_unlock(&tt_dev->iatu_mutex);
+		mutex_unlock(&priv->mutex);
+	}
+	mutex_unlock(&tt_dev->chardev_mutex);
 }
 
 static void unpin_pinned_page_range(struct chardev_private *priv,

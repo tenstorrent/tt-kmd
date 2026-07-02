@@ -197,6 +197,31 @@ static void bump_reset_gen(struct chardev_private *priv)
 	priv->open_reset_gen = atomic_long_inc_return(&priv->device->reset_gen);
 }
 
+// Reclaim TLB windows from fds this reset invalidated.
+// An invalidated fd can only free its windows at close(), which a wedged
+// process may never reach, leaking windows until the pool is exhausted.
+// Caller holds reset_rwsem exclusive and has already called bump_reset_gen()
+// and tenstorrent_vma_zap().
+static void tenstorrent_reset_reclaim_tlbs(struct tenstorrent_device *tt_dev)
+{
+	struct chardev_private *priv;
+	long gen = atomic_long_read(&tt_dev->reset_gen);
+	unsigned int bitpos;
+
+	mutex_lock(&tt_dev->chardev_mutex);
+	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
+		// Skip the resetting fd, since it survives the reset.
+		if (priv->open_reset_gen == gen)
+			continue;
+
+		for_each_set_bit(bitpos, priv->tlbs, TENSTORRENT_MAX_INBOUND_TLBS) {
+			tenstorrent_device_free_tlb(tt_dev, bitpos);
+			clear_bit(bitpos, priv->tlbs);
+		}
+	}
+	mutex_unlock(&tt_dev->chardev_mutex);
+}
+
 static long ioctl_reset_device(struct chardev_private *priv,
 			       struct tenstorrent_reset_device __user *arg)
 {
@@ -250,20 +275,24 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_CONFIG_WRITE) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
+		tenstorrent_reset_reclaim_tlbs(tt_dev);
 		ok = pcie_timer_interrupt(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_USER_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
+		tenstorrent_reset_reclaim_tlbs(tt_dev);
 		ok = set_reset_marker(pdev);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
+		tenstorrent_reset_reclaim_tlbs(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
+		tenstorrent_reset_reclaim_tlbs(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {

@@ -407,10 +407,8 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	struct chardev_private *priv, *tmp;
 	u16 vendor_id;
 
-	if (tt_dev->dev_class == &wormhole_class) {
-		struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
-		cancel_delayed_work_sync(&wh->fw_ready_work);
-	}
+	// Tear down telemetry first.
+	tt_telemetry_cleanup(tt_dev);
 
 	// Fence deferred-powerdown arming before draining.  tt_cdev_release
 	// arms power_down_work under chardev_mutex only when it observes
@@ -431,13 +429,7 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	// cleanup_hardware (which requires device access).
 	pci_read_config_word(dev, PCI_VENDOR_ID, &vendor_id);
 	if (vendor_id != U16_MAX)
-		tt_dev->dev_class->cleanup_hardware(tt_dev); // Put FW into A3 state
-
-	// Tear down hwmon/sysfs interfaces before unmapping BARs.
-	// This removes the sysfs files and waits for any in-flight callbacks to
-	// complete, preventing use-after-unmap crashes during device removal.
-	if (tt_dev->dev_class->cleanup_telemetry)
-		tt_dev->dev_class->cleanup_telemetry(tt_dev);
+		tt_dev->dev_class->cleanup_hardware(tt_dev);
 
 	// Drain in-flight ioctls before BAR unmap.  detached was already
 	// set under chardev_mutex above.

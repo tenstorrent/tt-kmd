@@ -5,6 +5,8 @@
 #include <linux/bitfield.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/bsearch.h>
+#include <linux/slab.h>
 #include <linux/sysfs.h>
 #include <linux/delay.h>
 #include <linux/pci.h>
@@ -517,36 +519,25 @@ static bool wormhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 	return false;
 }
 
-static int wormhole_read_telemetry_tag(struct tenstorrent_device *tt_dev, u16 tag_id, u32 *value)
+static int wormhole_read_telemetry_tag(struct tenstorrent_device *tt_dev, u64 address, u32 *value)
 {
 	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
-	u64 offset;
 
-	if (tag_id >= TELEM_TAG_CACHE_SIZE)
-		return -EINVAL;
-
-	offset = tt_dev->telemetry_tag_cache[tag_id];
-	if (offset == 0)
-		return -ENODATA;
-
-	*value = ioread32(wh->bar4_mapping + offset);
+	*value = ioread32(wh->bar4_mapping + address);
 	return 0;
 }
 
-static int telemetry_probe(struct tenstorrent_device *tt_dev)
+static int wormhole_populate_telemetry_cache(struct tenstorrent_device *tt_dev,
+					     struct telem_cache_entry *cache,
+					     u16 count)
 {
 	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
 	u32 base_addr, data_addr;
 	u32 version, major_ver, minor_ver, patch_ver;
-	u32 tags_addr;
-	u32 num_entries;
-	u32 i;
-
-	memset(tt_dev->telemetry_tag_cache, 0, sizeof(tt_dev->telemetry_tag_cache));
+	u32 tags_addr, num_entries, i;
 
 	base_addr = ioread32(wh->bar4_mapping + ARC_TELEMETRY_PTR);
 	data_addr = ioread32(wh->bar4_mapping + ARC_TELEMETRY_DATA);
-	tags_addr = base_addr + 8;
 
 	if (!is_range_within_csm(base_addr, sizeof(u32)) || !is_range_within_csm(data_addr, sizeof(u32))) {
 		dev_err(&tt_dev->pdev->dev, "Telemetry not available\n");
@@ -563,6 +554,7 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 		return -ENOTSUPP;
 	}
 
+	tags_addr = base_addr + 8;
 	num_entries = ioread32(wh->bar4_mapping + wh_arc_addr_to_sysreg(base_addr + 4));
 
 	for (i = 0; i < num_entries; i++) {
@@ -570,14 +562,18 @@ static int telemetry_probe(struct tenstorrent_device *tt_dev)
 		u16 tag_id = tag_entry & 0xFFFF;
 		u16 offset = (tag_entry >> 16) & 0xFFFF;
 		u32 addr = data_addr + (offset * sizeof(u32));
+		struct telem_cache_entry key = { .tag_id = tag_id };
+		struct telem_cache_entry *entry;
 
 		if (!is_range_within_csm(addr, sizeof(u32))) {
 			dev_err(&tt_dev->pdev->dev, "Telemetry tag %u has invalid address 0x%08X\n", tag_id, addr);
 			continue;
 		}
 
-		if (tag_id < TELEM_TAG_CACHE_SIZE)
-			tt_dev->telemetry_tag_cache[tag_id] = wh_arc_addr_to_sysreg(addr);
+		entry = bsearch(&key, cache, count, sizeof(*cache),
+				telem_cache_entry_cmp);
+		if (entry)
+			entry->address = wh_arc_addr_to_sysreg(addr);
 	}
 
 	return 0;
@@ -622,9 +618,6 @@ static void wormhole_hwmon_init(struct wormhole_device *wh_dev)
 	struct device *dev = &tt_dev->pdev->dev;
 	struct device *hwmon_device;
 
-	tt_dev->hwmon_attributes = wh_hwmon_attrs;
-	tt_dev->hwmon_labels = wh_hwmon_labels;
-
 	hwmon_device = hwmon_device_register_with_info(dev, "wormhole", tt_dev, &wh_hwmon_chip_info, NULL);
 	if (IS_ERR(hwmon_device)) {
 		dev_warn(dev, "Failed to initialize hwmon.\n");
@@ -668,7 +661,9 @@ static void fw_ready_work_func(struct work_struct *work)
 		return;
 	}
 
-	telemetry_probe(tt_dev);
+	down_write(&tt_dev->reset_rwsem);
+	tt_telemetry_probe(tt_dev);
+	up_write(&tt_dev->reset_rwsem);
 
 	// First-time init: register sysfs and hwmon if not already done.
 	if (!wh->telemetry_group_registered) {
@@ -701,6 +696,11 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev)
 
 	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
 	mutex_init(&wh_dev->kernel_tlb_mutex);
+
+	tt_dev->hwmon_attributes = wh_hwmon_attrs;
+	tt_dev->hwmon_labels = wh_hwmon_labels;
+	tt_dev->telemetry_sysfs = wh_sysfs_attributes;
+	tt_dev->telemetry_sysfs_count = ARRAY_SIZE(wh_sysfs_attributes);
 
 	for (i = 0; i < ARRAY_SIZE(wh_sysfs_attributes); ++i)
 		tt_dev->telemetry_attrs[i] = &wh_sysfs_attributes[i].attr.attr;
@@ -766,6 +766,8 @@ static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev)
 static void wormhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
 {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+
+	cancel_delayed_work_sync(&wh_dev->fw_ready_work);
 
 	if (tt_dev->hwmon_dev) {
 		hwmon_device_unregister(tt_dev->hwmon_dev);
@@ -1067,6 +1069,7 @@ struct tenstorrent_device_class wormhole_class = {
 	.init_telemetry = wormhole_init_telemetry,
 	.cleanup_telemetry = wormhole_cleanup_telemetry,
 	.read_telemetry_tag = wormhole_read_telemetry_tag,
+	.populate_telemetry_cache = wormhole_populate_telemetry_cache,
 	.probe_telemetry = wormhole_probe_telemetry,
 	.cleanup_hardware = wormhole_cleanup_hardware,
 	.cleanup_device = wormhole_cleanup,

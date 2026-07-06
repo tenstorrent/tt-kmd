@@ -51,6 +51,8 @@ struct tenstorrent_device {
 	wait_queue_head_t resource_lock_waitqueue;
 
 	struct device *hwmon_dev;
+	const struct tenstorrent_sysfs_attr *telemetry_sysfs;
+	u16 telemetry_sysfs_count;
 	const struct tt_hwmon_attr *hwmon_attributes;
 	const struct tt_hwmon_label *hwmon_labels;
 
@@ -72,11 +74,10 @@ struct tenstorrent_device {
 	struct attribute **telemetry_attrs;
 	struct attribute_group telemetry_group;
 
-	// Per-device tag-to-address cache, indexed by tag ID.
-	// Populated by telemetry_probe(); zero means tag not available.
-	// The stored value is arch-specific: WH stores a BAR4 sysreg offset,
-	// BH stores a raw CSM address for NOC reads.
-	u64 telemetry_tag_cache[TELEM_TAG_CACHE_SIZE];
+	// Per-device sparse tag-to-address cache, sorted by tag_id.
+	// Populated by telemetry_probe(); looked up via binary search.
+	struct telem_cache_entry *telemetry_cache;
+	u16 telemetry_cache_count;
 
 	struct list_head dmabuf_exports;
 	struct mutex dmabuf_export_lock;
@@ -110,7 +111,9 @@ struct tenstorrent_device_class {
 	int (*csm_read32)(struct tenstorrent_device *ttdev, u64 addr, u32 *value);
 	int (*csm_write32)(struct tenstorrent_device *ttdev, u64 addr, u32 value);
 	int (*set_power_state)(struct tenstorrent_device *ttdev, struct tenstorrent_power_state *power_state);
-	int (*read_telemetry_tag)(struct tenstorrent_device *ttdev, u16 tag_id, u32 *value);
+	int (*read_telemetry_tag)(struct tenstorrent_device *ttdev, u64 address, u32 *value);
+	int (*populate_telemetry_cache)(struct tenstorrent_device *ttdev,
+				       struct telem_cache_entry *cache, u16 count);
 	int (*probe_telemetry)(struct tenstorrent_device *ttdev);
 
 	// If true, the idle power-down message is sent from a delayed work

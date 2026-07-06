@@ -10,6 +10,7 @@
 #include <linux/cdev.h>
 #include <linux/reboot.h>
 #include <linux/kref.h>
+#include <linux/refcount.h>
 #include <linux/rwsem.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
@@ -41,7 +42,8 @@ struct tenstorrent_device {
 	bool interrupt_enabled;
 
 	struct mutex chardev_mutex;
-	unsigned int chardev_open_count;
+	bool chardev_excl_held;	// An O_EXCL fd is currently open
+	wait_queue_head_t chardev_excl_waitqueue;
 
 	struct notifier_block reboot_notifier;
 
@@ -64,6 +66,7 @@ struct tenstorrent_device {
 
 	DECLARE_BITMAP(tlbs, TENSTORRENT_MAX_INBOUND_TLBS);
 	u32 tlb_counts[MAX_TLB_KINDS];	// Per-device TLB counts (may differ from dev_class defaults)
+	refcount_t tlb_refcount[TENSTORRENT_MAX_INBOUND_TLBS];
 
 	struct mutex iatu_mutex;
 	struct tenstorrent_outbound_iatu_region outbound_iatus[TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS];
@@ -75,6 +78,9 @@ struct tenstorrent_device {
 	// Populated by telemetry_probe(); looked up via binary search.
 	struct telem_cache_entry *telemetry_cache;
 	u16 telemetry_cache_count;
+
+	struct list_head dmabuf_exports;
+	struct mutex dmabuf_export_lock;
 };
 
 struct tlb_descriptor;
@@ -95,8 +101,6 @@ struct tenstorrent_device_class {
 	void (*cleanup_telemetry)(struct tenstorrent_device *ttdev);
 	void (*cleanup_hardware)(struct tenstorrent_device *ttdev);
 	void (*cleanup_device)(struct tenstorrent_device *ttdev);
-	void (*first_open_cb)(struct tenstorrent_device *ttdev);
-	void (*last_release_cb)(struct tenstorrent_device *ttdev);
 	void (*reboot)(struct tenstorrent_device *ttdev);
 	int (*configure_tlb)(struct tenstorrent_device *ttdev, int tlb, struct tenstorrent_noc_tlb_config *config);
 	int (*describe_tlb)(struct tenstorrent_device *ttdev, int tlb, struct tlb_descriptor *tlb_desc);

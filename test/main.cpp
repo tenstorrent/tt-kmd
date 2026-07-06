@@ -21,9 +21,11 @@ void TestIoctlOverrun(const EnumeratedDevice &dev);
 void TestIoctlZeroing(const EnumeratedDevice &dev);
 void TestMapPeerBar(const EnumeratedDevice &dev1, const EnumeratedDevice &dev2);
 void TestTlbs(const EnumeratedDevice &dev);
+void TestTlbExport(const EnumeratedDevice &dev);
 void TestDeviceRelease(const EnumeratedDevice &dev);
 void TestMappingsDebugfs(const EnumeratedDevice &dev);
 void TestProcfsPids(const EnumeratedDevice &dev);
+void TestExcl(const EnumeratedDevice &dev);
 
 int main(int argc, char *argv[])
 {
@@ -51,8 +53,10 @@ int main(int argc, char *argv[])
         TestIoctlOverrun(d);
         TestIoctlZeroing(d);
         TestTlbs(d);
+        TestTlbExport(d);
         TestMappingsDebugfs(d);
         TestProcfsPids(d);
+        TestExcl(d);
         TestDeviceRelease(d);
 
         at_least_one_device = true;

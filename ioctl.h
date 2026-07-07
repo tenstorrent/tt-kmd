@@ -28,6 +28,7 @@
 #define TENSTORRENT_IOCTL_SET_NOC_CLEANUP		_IO(TENSTORRENT_IOCTL_MAGIC, 14)
 #define TENSTORRENT_IOCTL_SET_POWER_STATE		_IO(TENSTORRENT_IOCTL_MAGIC, 15)
 #define TENSTORRENT_IOCTL_EXPORT_TLB_DMABUF		_IO(TENSTORRENT_IOCTL_MAGIC, 16)
+#define TENSTORRENT_IOCTL_SMC_MSG		_IO(TENSTORRENT_IOCTL_MAGIC, 17)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -454,5 +455,49 @@ struct tenstorrent_export_tlb_dmabuf {
 	__u64 offset;
 	__u64 size;
 };
+
+/**
+ * TENSTORRENT_IOCTL_SMC_MSG - exchange a message with the system management controller
+ *
+ * The driver owns the SMC message queue and multiplexes it across all open
+ * file descriptors, so that concurrent processes can talk to the system
+ * management firmware without corrupting each other's messages.  Each fd may
+ * have at most one message outstanding at a time.
+ *
+ * The operation is selected by @flags:
+ *
+ * - POST submits @message.  Returns -EBUSY if this fd already has a message
+ *   outstanding.
+ * - POLL checks for the response.  On success the response is written back to
+ *   @message and the fd may POST again.  Returns -EAGAIN if the message is
+ *   still pending, -ESRCH if nothing is outstanding, or -EREMOTEIO if the
+ *   firmware reported a nonzero status (the status is left in @message[0]).
+ * - ABANDON cancels any outstanding message; the response, if any, is
+ *   discarded when it arrives.  Always returns 0.
+ *
+ * POST and POLL may not be combined; a caller POSTs and then POLLs one or more
+ * times.  ABANDON is mutually exclusive with POST and POLL.  An outstanding
+ * message is implicitly abandoned when the fd is closed.
+ *
+ * Returns -EOPNOTSUPP on hardware without a usable message queue (e.g.
+ * firmware too old to publish a queue).
+ *
+ * @argsz: Must be sizeof(struct tenstorrent_smc_msg).
+ * @flags: Exactly one of TENSTORRENT_SMC_MSG_POST, _POLL, or _ABANDON.
+ * @queue_index: Must be 0 (reserved for future multi-queue support).
+ * @reserved0: Must be 0.
+ * @message: Request on POST, response on a successful POLL.
+ */
+struct tenstorrent_smc_msg {
+	__u32 argsz;
+	__u32 flags;
+#define TENSTORRENT_SMC_MSG_POST	(1 << 0)
+#define TENSTORRENT_SMC_MSG_POLL	(1 << 1)
+#define TENSTORRENT_SMC_MSG_ABANDON	(1 << 2)
+	__u32 queue_index;
+	__u32 reserved0;
+	__u32 message[8];
+};
+
 
 #endif

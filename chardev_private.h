@@ -11,9 +11,26 @@
 #include <linux/refcount.h>
 
 #include "ioctl.h"
+#include "msgqueue.h"
 
 struct file;
 struct tenstorrent_device;
+
+// Per-fd ARC message state.  Guarded by the device's arc_msg_mutex (not
+// priv->mutex), because the queue pump reaches across fds to deliver a
+// response to whichever fd owns the in-flight message.
+enum chardev_msg_state {
+	CHARDEV_MSG_IDLE = 0,	// no message; legal: POST, ABANDON
+	CHARDEV_MSG_QUEUED,	// in the SW queue; legal: POLL, ABANDON
+	CHARDEV_MSG_SUBMITTED,	// pushed to FW, awaiting response; legal: POLL, ABANDON
+	CHARDEV_MSG_COMPLETED,	// response in buf; legal: POLL (copies it out, back to IDLE), ABANDON
+};
+
+struct chardev_msg {
+	enum chardev_msg_state state;
+	struct arc_msg buf;		// request on POST, overwritten by the response
+	struct list_head queue_node;	// node in tenstorrent_device.arc_msg_queue
+};
 
 enum bar_mapping_type { BAR_MAPPING_UC, BAR_MAPPING_WC };
 enum tenstorrent_vma_type { TT_VMA_BAR, TT_VMA_TLB };
@@ -73,6 +90,8 @@ struct chardev_private {
 
 	struct tenstorrent_set_noc_cleanup noc_cleanup; // NOC write on release action
 	struct tenstorrent_power_state power_state; // Power state for this fd
+
+	struct chardev_msg arc_msg; // Per-fd ARC message; guarded by device arc_msg_mutex
 
 	long open_reset_gen; // Reset generation at open time
 };

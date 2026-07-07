@@ -317,6 +317,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	mutex_init(&tt_dev->iatu_mutex);
 	mutex_init(&tt_dev->dmabuf_export_lock);
 	mutex_init(&tt_dev->arc_msg_mutex);
+	INIT_LIST_HEAD(&tt_dev->arc_msg_queue);
 	INIT_LIST_HEAD(&tt_dev->dmabuf_exports);
 	INIT_DELAYED_WORK(&tt_dev->power_down_work, tenstorrent_power_down_work_func);
 

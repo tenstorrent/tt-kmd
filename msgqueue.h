@@ -7,6 +7,7 @@
 #include <linux/types.h>
 
 struct tenstorrent_device;
+struct chardev_private;
 
 struct arc_msg {
 	u32 header;
@@ -15,6 +16,8 @@ struct arc_msg {
 
 #define ARC_MSG_QUEUE_HEADER_SIZE 32
 #define ARC_MSG_TIMEOUT_MS        1000
+
+#define ARC_MSG_STATUS_HW_ERROR   0xFFFFFFFFu
 
 #define ARC_MSG_QUEUE_REQ_WPTR(base) ((base) + 0x00)
 #define ARC_MSG_QUEUE_RES_RPTR(base) ((base) + 0x04)
@@ -34,5 +37,13 @@ int arc_msg_try_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 
 // in *msg), -EOPNOTSUPP when the device has no usable queue, -EREMOTEIO when
 // the firmware reports a nonzero status, or another negative errno.
 int arc_msg_send_sync(struct tenstorrent_device *tt_dev, struct arc_msg *msg);
+
+// Asynchronous per-fd messaging.  Both require arc_msg_mutex to be held by the
+// caller.  arc_msg_pump advances the shared queue: it collects the in-flight
+// response (if ready) and submits the next queued request.  It returns
+// -EOPNOTSUPP when the device has no usable queue, otherwise 0.  arc_msg_abandon
+// cancels the calling fd's outstanding message.
+int arc_msg_pump(struct tenstorrent_device *tt_dev);
+void arc_msg_abandon(struct chardev_private *priv);
 
 #endif

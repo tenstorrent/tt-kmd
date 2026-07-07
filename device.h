@@ -22,6 +22,7 @@
 #define MAX_TLB_KINDS 4
 
 struct tenstorrent_device_class;
+struct chardev_private;
 
 struct tenstorrent_device {
 	struct kref kref;
@@ -83,6 +84,9 @@ struct tenstorrent_device {
 	struct mutex dmabuf_export_lock;
 
 	struct mutex arc_msg_mutex; // Always innermost; don't take reset_rwsem while holding.
+	struct list_head arc_msg_queue;	// SW queue of chardev_private, via chardev_msg.queue_node
+	struct chardev_private *arc_msg_inflight; // owner of the message in the FW queue, or NULL
+	bool arc_msg_inflight_abandoned; // discard the in-flight response when it arrives
 };
 
 struct tlb_descriptor;

@@ -8,6 +8,7 @@
 #include <linux/pci.h>
 
 #include "device.h"
+#include "chardev_private.h"
 
 int arc_msg_try_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg, u32 queue_base, u32 num_entries)
 {
@@ -107,6 +108,51 @@ int arc_msg_try_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 
 	return 0;
 }
 
+// Hand the in-flight response to its owning fd (or drop it if abandoned) and
+// mark the FW queue free.  Caller holds arc_msg_mutex.
+static void arc_msg_deliver(struct tenstorrent_device *tt_dev, const struct arc_msg *resp)
+{
+	struct chardev_private *owner = tt_dev->arc_msg_inflight;
+
+	if (owner && !tt_dev->arc_msg_inflight_abandoned) {
+		owner->arc_msg.buf = *resp;
+		owner->arc_msg.state = CHARDEV_MSG_COMPLETED;
+	}
+
+	tt_dev->arc_msg_inflight_abandoned = false;
+	tt_dev->arc_msg_inflight = NULL;
+}
+
+// Block until the in-flight message (if any) completes, delivering its response
+// to the owning fd, so the FW queue is free for a synchronous kernel message to
+// jump ahead of the queued user messages.  Caller holds arc_msg_mutex.
+static void arc_msg_flush_inflight(struct tenstorrent_device *tt_dev, u32 queue_base, u32 num_entries)
+{
+	struct arc_msg resp;
+	unsigned long timeout;
+	int ret;
+
+	if (!tt_dev->arc_msg_inflight)
+		return;
+
+	timeout = jiffies + msecs_to_jiffies(ARC_MSG_TIMEOUT_MS);
+	for (;;) {
+		ret = arc_msg_try_pop(tt_dev, &resp, queue_base, num_entries);
+		if (ret == 0)
+			break;
+
+		if (ret != -EAGAIN || time_after(jiffies, timeout)) {
+			memset(&resp, 0, sizeof(resp));
+			resp.header = ARC_MSG_STATUS_HW_ERROR;
+			break;
+		}
+
+		usleep_range(100, 200);
+	}
+
+	arc_msg_deliver(tt_dev, &resp);
+}
+
 int arc_msg_send_sync(struct tenstorrent_device *tt_dev, struct arc_msg *msg)
 {
 	const struct tenstorrent_device_class *cls = tt_dev->dev_class;
@@ -131,7 +177,9 @@ int arc_msg_send_sync(struct tenstorrent_device *tt_dev, struct arc_msg *msg)
 		goto out;
 	}
 
-	// Discard any stale response left behind by a previous exchange.
+	// Let any outstanding user message finish so we don't consume its
+	// response, then discard anything stale left behind by a prior exchange.
+	arc_msg_flush_inflight(tt_dev, queue_base, num_entries);
 	while (arc_msg_try_pop(tt_dev, &drain, queue_base, num_entries) == 0)
 		;
 
@@ -162,4 +210,92 @@ int arc_msg_send_sync(struct tenstorrent_device *tt_dev, struct arc_msg *msg)
 out:
 	mutex_unlock(&tt_dev->arc_msg_mutex);
 	return ret;
+}
+
+int arc_msg_pump(struct tenstorrent_device *tt_dev)
+{
+	const struct tenstorrent_device_class *cls = tt_dev->dev_class;
+	struct chardev_private *next;
+	struct arc_msg resp;
+	u32 queue_base;
+	u32 num_entries;
+	int ret;
+
+	lockdep_assert_held(&tt_dev->arc_msg_mutex);
+
+	if (!cls->arc_msg_locate_queue || !cls->arc_msg_trigger)
+		return -EOPNOTSUPP;
+
+	ret = cls->arc_msg_locate_queue(tt_dev, &queue_base, &num_entries);
+	if (ret == -EOPNOTSUPP)
+		return -EOPNOTSUPP;
+
+	// Transient errors (FW not ready) leave queued messages in place to be
+	// retried by a later pump.
+	if (ret != 0 || num_entries == 0)
+		return 0;
+
+	// Collect the in-flight response if it has arrived.  While it hasn't,
+	// the FW queue is busy and we cannot submit the next message.
+	if (tt_dev->arc_msg_inflight) {
+		ret = arc_msg_try_pop(tt_dev, &resp, queue_base, num_entries);
+		if (ret == -EAGAIN)
+			return 0;
+
+		if (ret != 0) {
+			memset(&resp, 0, sizeof(resp));
+			resp.header = ARC_MSG_STATUS_HW_ERROR;
+		}
+
+		arc_msg_deliver(tt_dev, &resp);
+	}
+
+	// Submit the head of the SW queue, if any.
+	if (!list_empty(&tt_dev->arc_msg_queue)) {
+		next = list_first_entry(&tt_dev->arc_msg_queue, struct chardev_private, arc_msg.queue_node);
+
+		ret = arc_msg_try_push(tt_dev, &next->arc_msg.buf, queue_base, num_entries);
+		if (ret == -EAGAIN)
+			return 0;
+
+		list_del_init(&next->arc_msg.queue_node);
+
+		if (ret != 0) {
+			// Can't submit; complete with a failure so POLL reports it.
+			next->arc_msg.buf.header = ARC_MSG_STATUS_HW_ERROR;
+			next->arc_msg.state = CHARDEV_MSG_COMPLETED;
+			return 0;
+		}
+
+		next->arc_msg.state = CHARDEV_MSG_SUBMITTED;
+		tt_dev->arc_msg_inflight = next;
+		cls->arc_msg_trigger(tt_dev);
+	}
+
+	return 0;
+}
+
+void arc_msg_abandon(struct chardev_private *priv)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+
+	lockdep_assert_held(&tt_dev->arc_msg_mutex);
+
+	switch (priv->arc_msg.state) {
+	case CHARDEV_MSG_QUEUED:
+		list_del_init(&priv->arc_msg.queue_node);
+		break;
+	case CHARDEV_MSG_SUBMITTED:
+		// The response is still coming; let the pump discard it.  This
+		// leaves tt_dev->arc_msg_inflight pointing at priv, but the
+		// abandoned flag ensures the pump never dereferences it, so priv
+		// is safe to free after this returns.
+		if (tt_dev->arc_msg_inflight == priv)
+			tt_dev->arc_msg_inflight_abandoned = true;
+		break;
+	default:
+		break;
+	}
+
+	priv->arc_msg.state = CHARDEV_MSG_IDLE;
 }

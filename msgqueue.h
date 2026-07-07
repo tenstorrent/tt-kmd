@@ -21,7 +21,18 @@ struct arc_msg {
 #define ARC_MSG_QUEUE_REQ_RPTR(base) ((base) + 0x10)
 #define ARC_MSG_QUEUE_RES_WPTR(base) ((base) + 0x14)
 
-bool arc_msg_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg, u32 queue_base, u32 num_entries);
-bool arc_msg_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 queue_base, u32 num_entries);
+// Non-blocking primitives for the ARC FW message queue.  Return 0 on success,
+// -EAGAIN when the request queue is full (push) or no response is ready (pop),
+// or another negative errno on a hardware access error.  The caller is
+// responsible for serialization; see arc_msg_send_sync().
+int arc_msg_try_push(struct tenstorrent_device *tt_dev, const struct arc_msg *msg, u32 queue_base, u32 num_entries);
+int arc_msg_try_pop(struct tenstorrent_device *tt_dev, struct arc_msg *msg, u32 queue_base, u32 num_entries);
+
+// Synchronous send used for kernel-internal messages.  Takes arc_msg_mutex,
+// locates the queue, drains any stale response, pushes the request, triggers
+// the ARC, and polls for the response.  Returns 0 on success (with the response
+// in *msg), -EOPNOTSUPP when the device has no usable queue, -EREMOTEIO when
+// the firmware reports a nonzero status, or another negative errno.
+int arc_msg_send_sync(struct tenstorrent_device *tt_dev, struct arc_msg *msg);
 
 #endif

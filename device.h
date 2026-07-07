@@ -81,6 +81,8 @@ struct tenstorrent_device {
 
 	struct list_head dmabuf_exports;
 	struct mutex dmabuf_export_lock;
+
+	struct mutex arc_msg_mutex; // Always innermost; don't take reset_rwsem while holding.
 };
 
 struct tlb_descriptor;
@@ -110,6 +112,8 @@ struct tenstorrent_device_class {
 	void (*noc_write32)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, u32 data, int noc);
 	int (*csm_read32)(struct tenstorrent_device *ttdev, u64 addr, u32 *value);
 	int (*csm_write32)(struct tenstorrent_device *ttdev, u64 addr, u32 value);
+	int (*arc_msg_locate_queue)(struct tenstorrent_device *ttdev, u32 *queue_base, u32 *num_entries);
+	void (*arc_msg_trigger)(struct tenstorrent_device *ttdev);
 	int (*set_power_state)(struct tenstorrent_device *ttdev, struct tenstorrent_power_state *power_state);
 	int (*read_telemetry_tag)(struct tenstorrent_device *ttdev, u64 address, u32 *value);
 	int (*populate_telemetry_cache)(struct tenstorrent_device *ttdev,

@@ -202,7 +202,7 @@ static void bump_reset_gen(struct chardev_private *priv)
 // process may never reach, leaking windows until the pool is exhausted.
 // Caller holds reset_rwsem exclusive and has already called bump_reset_gen()
 // and tenstorrent_vma_zap().
-static void tenstorrent_reset_reclaim_tlbs(struct tenstorrent_device *tt_dev)
+void tenstorrent_reset_reclaim_tlbs(struct tenstorrent_device *tt_dev)
 {
 	struct chardev_private *priv;
 	long gen = atomic_long_read(&tt_dev->reset_gen);

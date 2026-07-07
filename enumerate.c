@@ -488,11 +488,28 @@ void tenstorrent_device_put(struct tenstorrent_device *tt_dev) {
 	kref_put(&tt_dev->kref, tt_dev_release);
 }
 
-static int tenstorrent_suspend(struct device *dev) {
+static int tenstorrent_suspend(struct device *dev)
+{
 	struct pci_dev *pdev = to_pci_dev(dev);
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(pdev);
 
 	cancel_delayed_work_sync(&tt_dev->power_down_work);
+
+	// Suspend loses hardware state (TLB routing, iATU programming, etc.), so
+	// suspend behaves like a reset: bump reset_gen to invalidate every open fd,
+	// zap userspace MMIO mappings, and reclaim chip-backed allocations.
+	down_write(&tt_dev->reset_rwsem);
+	atomic_long_inc(&tt_dev->reset_gen);
+	tenstorrent_vma_zap(tt_dev);
+	tenstorrent_reset_reclaim_tlbs(tt_dev);
+	tenstorrent_reset_reclaim_iatus(tt_dev);
+	up_write(&tt_dev->reset_rwsem);
+
+	// Wake blocked LOCK_CTL waiters so they observe the bumped generation and
+	// return -ENODEV instead of parking on a lock no pre-suspend fd can
+	// release via ioctl.
+	wake_up_interruptible(&tt_dev->resource_lock_waitqueue);
+
 	tenstorrent_revoke_tlb_dmabufs(tt_dev);
 
 	tt_dev->dev_class->cleanup_hardware(tt_dev);

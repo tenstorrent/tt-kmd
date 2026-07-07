@@ -26,6 +26,7 @@ void TestDeviceRelease(const EnumeratedDevice &dev);
 void TestMappingsDebugfs(const EnumeratedDevice &dev);
 void TestProcfsPids(const EnumeratedDevice &dev);
 void TestExcl(const EnumeratedDevice &dev);
+void TestSmcMsg(const EnumeratedDevice &dev);
 
 int main(int argc, char *argv[])
 {
@@ -57,6 +58,7 @@ int main(int argc, char *argv[])
         TestMappingsDebugfs(d);
         TestProcfsPids(d);
         TestExcl(d);
+        TestSmcMsg(d);
         TestDeviceRelease(d);
 
         at_least_one_device = true;

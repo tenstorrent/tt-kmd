@@ -585,7 +585,7 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	bh->noc2axi_cfg = pci_iomap_range(bh->tt.pdev, 0, NOC2AXI_CFG_START, NOC2AXI_CFG_LEN);
 	bh->bar2_mapping = pci_iomap(bh->tt.pdev, 2, 0);
 
-	if (!bh->tlb_regs || !bh->kernel_tlb || !bh->noc2axi_cfg) {
+	if (!bh->tlb_regs || !bh->kernel_tlb || !bh->noc2axi_cfg || !bh->bar2_mapping) {
 		if (bh->tlb_regs)
 			pci_iounmap(bh->tt.pdev, bh->tlb_regs);
 

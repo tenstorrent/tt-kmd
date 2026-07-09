@@ -1002,7 +1002,7 @@ long ioctl_free_tlb(struct chardev_private *priv, struct tenstorrent_free_tlb __
 	if (copy_from_user(&in, &arg->in, sizeof(in)))
 		return -EFAULT;
 
-	if (in.id < 0 || in.id >= TENSTORRENT_MAX_INBOUND_TLBS)
+	if (in.id >= TENSTORRENT_MAX_INBOUND_TLBS)
 		return -EINVAL;
 
 	mutex_lock(&priv->mutex);
@@ -1039,7 +1039,7 @@ long ioctl_configure_tlb(struct chardev_private *priv,
 	if (copy_from_user(&in, &arg->in, sizeof(in)))
 		return -EFAULT;
 
-	if (in.id < 0 || in.id >= TENSTORRENT_MAX_INBOUND_TLBS)
+	if (in.id >= TENSTORRENT_MAX_INBOUND_TLBS)
 		return -EINVAL;
 
 	if (!test_bit(in.id, priv->tlbs))

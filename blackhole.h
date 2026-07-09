@@ -23,6 +23,6 @@ struct blackhole_device {
 };
 
 #define tt_dev_to_bh_dev(ttdev) \
-	container_of((tt_dev), struct blackhole_device, tt)
+	container_of((ttdev), struct blackhole_device, tt)
 
 #endif

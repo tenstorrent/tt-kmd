@@ -319,15 +319,23 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	INIT_LIST_HEAD(&tt_dev->dmabuf_exports);
 	INIT_DELAYED_WORK(&tt_dev->power_down_work, tenstorrent_power_down_work_func);
 
-	// Use dma_address_bits from module parameter or device class for coherent
-	// DMA mask, but use a 64-bit mask for streaming mappings. The problem this
-	// solves is that legacy Wormhole software assumes it will get 32-bit DMA
-	// addresses from the ALLOCATE_DMA_BUF API, but a 32 bit DMA mask is too
-	// limiting for user pinnings when IOMMU is enabled.
-	// linux/dma-mapping.h says, "the DMA API guarantees that the coherent DMA
-	// mask can be set to the same or smaller than the streaming DMA mask" so
-	// only set_dma_mask() return value is checked.
-	tt_dev->dma_capable = (dma_set_mask(&dev->dev, DMA_BIT_MASK(dma_address_bits ?: 64)) == 0);
+	// The coherent DMA mask (ALLOCATE_DMA_BUF) comes from the device class.
+	// Wormhole is 32 because legacy software assumes it will get 32-bit
+	// addresses from that API; Blackhole is 58.
+	//
+	// The streaming DMA mask (PIN_PAGES) is capped at 58 bits. On Blackhole
+	// an IOVA can be used directly as a NOC address, and the upper 6 bits of
+	// a 64-bit NOC-outbound address select the PCIe outbound TLB window. An
+	// IOVA wider than 58 bits would select the wrong window and silently
+	// misdirect the DMA. 58 bits is also far more IOVA space than any
+	// Wormhole pinning needs, so one 58-bit cap is correct for both; a
+	// 32-bit streaming mask would be too limiting for user pinnings under
+	// IOMMU. The dma_address_bits module parameter overrides both masks.
+	//
+	// linux/dma-mapping.h says the coherent mask may be set the same as or
+	// smaller than the streaming mask, so only dma_set_mask()'s return value
+	// is checked.
+	tt_dev->dma_capable = (dma_set_mask(&dev->dev, DMA_BIT_MASK(dma_address_bits ?: 58)) == 0);
 	dma_set_coherent_mask(&dev->dev, DMA_BIT_MASK(dma_address_bits ?: device_class->dma_address_bits));
 
 	// Max these to ensure the IOVA allocator will not split large pinned regions.

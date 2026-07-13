@@ -13,7 +13,9 @@
 static irqreturn_t irq_handler(int irq, void *device)
 {
 	struct tenstorrent_device *tt_dev = device;
-	(void)tt_dev;	// to be used later
+
+	if (tt_dev->dev_class->interrupt)
+		tt_dev->dev_class->interrupt(tt_dev);
 
 	return IRQ_HANDLED;
 }

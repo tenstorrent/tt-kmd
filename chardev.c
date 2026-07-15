@@ -214,10 +214,12 @@ static void tenstorrent_reset_reclaim_tlbs(struct tenstorrent_device *tt_dev)
 		if (priv->open_reset_gen == gen)
 			continue;
 
+		mutex_lock(&priv->tlb_mutex);
 		for_each_set_bit(bitpos, priv->tlbs, TENSTORRENT_MAX_INBOUND_TLBS) {
 			tenstorrent_device_free_tlb(tt_dev, bitpos);
 			clear_bit(bitpos, priv->tlbs);
 		}
+		mutex_unlock(&priv->tlb_mutex);
 	}
 	mutex_unlock(&tt_dev->chardev_mutex);
 }
@@ -839,6 +841,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	INIT_LIST_HEAD(&private_data->peer_mappings);
 	INIT_LIST_HEAD(&private_data->vma_list);
 	mutex_init(&private_data->vma_lock);
+	mutex_init(&private_data->tlb_mutex);
 
 	kref_get(&tt_dev->kref);
 	private_data->device = tt_dev;
@@ -920,8 +923,13 @@ static void tt_cdev_release_resource_locks(struct chardev_private *priv)
 static void tt_cdev_release_tlbs(struct chardev_private *priv)
 {
 	unsigned int bitpos;
-	for_each_set_bit(bitpos, priv->tlbs, TENSTORRENT_MAX_INBOUND_TLBS)
+
+	mutex_lock(&priv->tlb_mutex);
+	for_each_set_bit(bitpos, priv->tlbs, TENSTORRENT_MAX_INBOUND_TLBS) {
 		tenstorrent_device_free_tlb(priv->device, bitpos);
+		clear_bit(bitpos, priv->tlbs);
+	}
+	mutex_unlock(&priv->tlb_mutex);
 }
 
 static void tt_cdev_release_power(struct chardev_private *priv)

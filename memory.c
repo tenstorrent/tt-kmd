@@ -988,7 +988,9 @@ long ioctl_allocate_tlb(struct chardev_private *priv,
 		return -EFAULT;
 	}
 
+	mutex_lock(&priv->tlb_mutex);
 	set_bit(id, priv->tlbs);
+	mutex_unlock(&priv->tlb_mutex);
 
 	return 0;
 }
@@ -1005,7 +1007,7 @@ long ioctl_free_tlb(struct chardev_private *priv, struct tenstorrent_free_tlb __
 	if (in.id >= TENSTORRENT_MAX_INBOUND_TLBS)
 		return -EINVAL;
 
-	mutex_lock(&priv->mutex);
+	mutex_lock(&priv->tlb_mutex);
 
 	if (!test_bit(in.id, priv->tlbs)) {
 		ret = -EPERM;
@@ -1027,7 +1029,7 @@ long ioctl_free_tlb(struct chardev_private *priv, struct tenstorrent_free_tlb __
 	ret = tenstorrent_device_free_tlb(tt_dev, in.id);
 
 unlock:
-	mutex_unlock(&priv->mutex);
+	mutex_unlock(&priv->tlb_mutex);
 	return ret;
 }
 
@@ -1035,6 +1037,7 @@ long ioctl_configure_tlb(struct chardev_private *priv,
 			 struct tenstorrent_configure_tlb __user *arg) {
 	struct tenstorrent_device *tt_dev = priv->device;
 	struct tenstorrent_configure_tlb_in in = {0};
+	long ret;
 
 	if (copy_from_user(&in, &arg->in, sizeof(in)))
 		return -EFAULT;
@@ -1042,10 +1045,17 @@ long ioctl_configure_tlb(struct chardev_private *priv,
 	if (in.id >= TENSTORRENT_MAX_INBOUND_TLBS)
 		return -EINVAL;
 
-	if (!test_bit(in.id, priv->tlbs))
-		return -EPERM;
+	// Hold tlb_mutex across the check and the configure so the window
+	// cannot be freed (and reallocated to another fd) in between.
+	mutex_lock(&priv->tlb_mutex);
 
-	return tenstorrent_device_configure_tlb(tt_dev, in.id, &in.config);
+	if (test_bit(in.id, priv->tlbs))
+		ret = tenstorrent_device_configure_tlb(tt_dev, in.id, &in.config);
+	else
+		ret = -EPERM;
+
+	mutex_unlock(&priv->tlb_mutex);
+	return ret;
 }
 
 // On kernels older than 5.8.0, EXPORT_TLB_DMABUF is unsupported.
@@ -1227,7 +1237,7 @@ long ioctl_export_tlb_dmabuf(struct chardev_private *priv, struct tenstorrent_ex
 		return -EINVAL;
 
 	// The caller must own the TLB window it wants to export.
-	mutex_lock(&priv->mutex);
+	mutex_lock(&priv->tlb_mutex);
 	if (!test_bit(in.tlb_id, priv->tlbs)) {
 		ret = -EPERM;
 		goto unlock;
@@ -1278,7 +1288,7 @@ long ioctl_export_tlb_dmabuf(struct chardev_private *priv, struct tenstorrent_ex
 	// export survives FREE_TLB and close() of this fd. Both references are
 	// dropped in tt_tlb_dmabuf_release(). Taken before dma_buf_export() so
 	// the release callback -- reachable via dma_buf_put() on the error paths
-	// below -- balances them. The window is still owned here (priv->mutex is
+	// below -- balances them. The window is still owned here (tlb_mutex is
 	// held and ownership was verified above), so its refcount is >= 1.
 	kref_get(&tt_dev->kref);
 	tenstorrent_tlb_export_get(tt_dev, in.tlb_id);
@@ -1303,7 +1313,7 @@ long ioctl_export_tlb_dmabuf(struct chardev_private *priv, struct tenstorrent_ex
 	list_add(&dmabuf_priv->list, &tt_dev->dmabuf_exports);
 	mutex_unlock(&tt_dev->dmabuf_export_lock);
 
-	mutex_unlock(&priv->mutex);
+	mutex_unlock(&priv->tlb_mutex);
 
 	fd = get_unused_fd_flags(O_CLOEXEC);
 	if (fd < 0) {
@@ -1324,7 +1334,7 @@ long ioctl_export_tlb_dmabuf(struct chardev_private *priv, struct tenstorrent_ex
 	return 0;
 
 unlock:
-	mutex_unlock(&priv->mutex);
+	mutex_unlock(&priv->tlb_mutex);
 	return ret;
 }
 
@@ -1586,7 +1596,10 @@ static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *v
 	if (size > tlb_desc.size)
 		return -EINVAL;
 
-	mutex_lock(&priv->mutex);
+	// tlb_mutex (not priv->mutex) so the mmap path never nests the general
+	// per-fd mutex inside mmap_lock; priv->mutex is held across GUP and
+	// uaccess elsewhere (e.g. PIN_PAGES), which nests it outside mmap_lock.
+	mutex_lock(&priv->tlb_mutex);
 
 	if (!test_bit(id, priv->tlbs)) {
 		ret = -EPERM;
@@ -1628,13 +1641,21 @@ static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *v
 	mutex_unlock(&priv->vma_lock);
 
 unlock:
-	mutex_unlock(&priv->mutex);
+	mutex_unlock(&priv->tlb_mutex);
 	return ret;
 }
 
 int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 {
 	struct pci_dev *pdev = priv->device->pdev;
+
+	// The mmap path must never take priv->mutex: we are called with
+	// mmap_lock held, and priv->mutex is held across GUP and uaccess
+	// elsewhere (e.g. PIN_PAGES), which nests it outside mmap_lock.
+	// Taking it here would complete an ABBA deadlock cycle.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 13, 0)
+	lockdep_assert_not_held(&priv->mutex);
+#endif
 
 	// We multiplex various mappable entities into a single character
 	// device using the mapping offset to determine which entity you get.

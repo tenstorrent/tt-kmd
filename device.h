@@ -9,7 +9,6 @@
 #include <linux/pci.h>
 #include <linux/cdev.h>
 #include <linux/reboot.h>
-#include <linux/kref.h>
 #include <linux/refcount.h>
 #include <linux/rwsem.h>
 #include <linux/wait.h>
@@ -24,8 +23,14 @@
 struct tenstorrent_device_class;
 
 struct tenstorrent_device {
-	struct kref kref;
-
+	// dev owns the lifetime of this structure: dev.release (tt_dev_release)
+	// frees it when the last reference drops.  Long-lived references (open
+	// fds, TLB dma-buf exports, the probe reference dropped by remove) use
+	// get_device/put_device.  An open racing remove is additionally covered
+	// by the VFS: chrdev_open takes a chardev.kobj reference before calling
+	// tt_cdev_open, and chardev.kobj holds dev.kobj (wired by
+	// cdev_device_add), so this structure cannot be freed while any open is
+	// in flight or any fd remains.
 	struct device dev;
 	struct cdev chardev;
 	struct pci_dev *pdev;
@@ -125,6 +130,6 @@ struct tenstorrent_device_class {
 	bool defer_idle_powerdown;
 };
 
-void tenstorrent_device_put(struct tenstorrent_device *);
+void tt_dev_release(struct device *dev);
 
 #endif

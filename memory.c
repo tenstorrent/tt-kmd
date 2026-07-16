@@ -1189,7 +1189,7 @@ static void tt_tlb_dmabuf_release(struct dma_buf *dmabuf)
 	// device reference taken at export time is what makes touching tt_dev
 	// safe here even if the device was removed while the dma-buf was open.
 	tenstorrent_tlb_export_put(priv->tt_dev, priv->tlb_id);
-	tenstorrent_device_put(priv->tt_dev);
+	put_device(&priv->tt_dev->dev);
 
 	kfree(priv);
 }
@@ -1290,7 +1290,7 @@ long ioctl_export_tlb_dmabuf(struct chardev_private *priv, struct tenstorrent_ex
 	// the release callback -- reachable via dma_buf_put() on the error paths
 	// below -- balances them. The window is still owned here (tlb_mutex is
 	// held and ownership was verified above), so its refcount is >= 1.
-	kref_get(&tt_dev->kref);
+	get_device(&tt_dev->dev);
 	tenstorrent_tlb_export_get(tt_dev, in.tlb_id);
 
 	exp_info.ops = &tt_tlb_dmabuf_ops;
@@ -1301,7 +1301,7 @@ long ioctl_export_tlb_dmabuf(struct chardev_private *priv, struct tenstorrent_ex
 	dmabuf = dma_buf_export(&exp_info);
 	if (IS_ERR(dmabuf)) {
 		tenstorrent_tlb_export_put(tt_dev, in.tlb_id);
-		tenstorrent_device_put(tt_dev);
+		put_device(&tt_dev->dev);
 		kfree(dmabuf_priv);
 		ret = PTR_ERR(dmabuf);
 		goto unlock;

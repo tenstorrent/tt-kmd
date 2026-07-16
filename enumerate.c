@@ -175,8 +175,13 @@ static int mappings_seq_show(struct seq_file *s, void *v)
 		}
 
 		// Allocated TLB windows.
-		for_each_set_bit(tlb_id, priv->tlbs, TENSTORRENT_MAX_INBOUND_TLBS) {
-			seq_printf(s, "%-8d %-16s %-14s ID: %-3u\n", pid, priv->comm, "TLB-alloc", tlb_id);
+		if (!mutex_trylock(&priv->tlb_mutex)) {
+			seq_printf(s, "%-8s %-16s %-14s\n", "", "", "...TLBs busy, skipping...");
+		} else {
+			for_each_set_bit(tlb_id, priv->tlbs, TENSTORRENT_MAX_INBOUND_TLBS) {
+				seq_printf(s, "%-8d %-16s %-14s ID: %-3u\n", pid, priv->comm, "TLB-alloc", tlb_id);
+			}
+			mutex_unlock(&priv->tlb_mutex);
 		}
 
 		// BAR/TLB mappings.

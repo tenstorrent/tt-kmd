@@ -71,6 +71,13 @@ struct chardev_private {
 
 	DECLARE_BITMAP(tlbs, TENSTORRENT_MAX_INBOUND_TLBS);	// TLBs owned by this fd
 
+	// Protects tlbs and serializes TLB ownership check-then-act sequences
+	// (e.g. mmap of a window vs FREE_TLB). The mmap path takes it with
+	// mmap_lock held, so never access userspace memory or pin user pages
+	// while holding it. Ordering: mmap_lock -> tlb_mutex -> vma_lock;
+	// also chardev_mutex -> tlb_mutex (reset reclaim).
+	struct mutex tlb_mutex;
+
 	struct tenstorrent_set_noc_cleanup noc_cleanup; // NOC write on release action
 	struct tenstorrent_power_state power_state; // Power state for this fd
 

@@ -412,7 +412,7 @@ fail_init_device:
 static void tenstorrent_pci_remove(struct pci_dev *dev)
 {
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(dev);
-	struct chardev_private *priv, *tmp;
+	struct chardev_private *priv;
 	u16 vendor_id;
 
 	// Tear down telemetry first.
@@ -462,9 +462,11 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	// they observe detached and return -ENODEV instead of waiting forever.
 	wake_up_interruptible(&tt_dev->resource_lock_waitqueue);
 
-	list_for_each_entry_safe(priv, tmp, &tt_dev->open_fds_list, open_fd) {
+	mutex_lock(&tt_dev->chardev_mutex);
+	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
 		tenstorrent_memory_cleanup(priv);
 	}
+	mutex_unlock(&tt_dev->chardev_mutex);
 
 	tenstorrent_unregister_device(tt_dev);
 	tenstorrent_disable_interrupts(tt_dev);

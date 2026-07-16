@@ -298,9 +298,6 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 		return err;
 	}
 
-	// The refcount created here persists until remove.
-	kref_init(&tt_dev->kref);
-
 	tt_dev->detached = false;
 	tt_dev->needs_hw_init = true;
 	tt_dev->dev_class = device_class;
@@ -404,6 +401,8 @@ fail_init_device:
 	pci_set_drvdata(dev, NULL);
 	pci_dev_put(dev);
 	xa_erase(&tenstorrent_dev_xa, ordinal);
+	// Direct kfree: this path runs before tenstorrent_register_device,
+	// so tt_dev->dev is not yet initialized and cannot be put_device'd.
 	kfree(tt_dev);
 	pci_disable_device(dev);
 	return err;
@@ -479,23 +478,23 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	// If this is postponed, a subsequent probe is forced to use a different ordinal.
 	xa_erase(&tenstorrent_dev_xa, tt_dev->ordinal);
 
-	tenstorrent_device_put(tt_dev);
+	// Drop the reference from device_initialize (tenstorrent_register_device).
+	// tt_dev is freed here unless open fds or dma-buf exports still hold it.
+	put_device(&tt_dev->dev);
 }
 
-static void tt_dev_release(struct kref *tt_dev_kref) {
-	struct tenstorrent_device *tt_dev = container_of(tt_dev_kref, struct tenstorrent_device, kref);
+// dev.release callback: runs when the last reference on tt_dev->dev drops.
+// Set by tenstorrent_register_device.
+void tt_dev_release(struct device *dev)
+{
+	struct tenstorrent_device *tt_dev = container_of(dev, struct tenstorrent_device, dev);
 	struct pci_dev *pdev = tt_dev->pdev;
 
 	if (tt_dev->dev_class->reboot)
 		unregister_reboot_notifier(&tt_dev->reboot_notifier);
 
-
 	pci_dev_put(pdev);
 	kfree(tt_dev);
-}
-
-void tenstorrent_device_put(struct tenstorrent_device *tt_dev) {
-	kref_put(&tt_dev->kref, tt_dev_release);
 }
 
 static int tenstorrent_suspend(struct device *dev) {

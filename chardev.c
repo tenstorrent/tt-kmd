@@ -95,12 +95,17 @@ int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 	init_waitqueue_head(&tt_dev->resource_lock_waitqueue);
 	init_waitqueue_head(&tt_dev->chardev_excl_waitqueue);
 
+	// device_initialize creates the reference that tenstorrent_pci_remove
+	// drops.  dev.release makes the device kobject the owner of tt_dev's
+	// memory: cdev_device_add (below) parents chardev.kobj under dev.kobj,
+	// so the VFS references taken by chrdev_open keep tt_dev alive across
+	// remove until the last fd closes.  See the comment in device.h.
 	device_initialize(&tt_dev->dev);
 	tt_dev->dev.devt = devt;
 	tt_dev->dev.class = tt_dev_class;
 	tt_dev->dev.parent = &tt_dev->pdev->dev;
 	tt_dev->dev.groups = NULL;
-	tt_dev->dev.release = NULL;
+	tt_dev->dev.release = tt_dev_release;
 
 	tt_dev->dev.id = tt_dev->ordinal;
 	dev_set_name(&tt_dev->dev, TENSTORRENT "/%d", tt_dev->ordinal);
@@ -840,7 +845,11 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	INIT_LIST_HEAD(&private_data->vma_list);
 	mutex_init(&private_data->vma_lock);
 
-	kref_get(&tt_dev->kref);
+	// Safe even if remove ran to completion while this open was in flight:
+	// the chardev.kobj reference our caller (chrdev_open) holds pins
+	// dev.kobj, which owns tt_dev's memory.  This get is the fd's own
+	// long-lived reference, dropped in tt_cdev_release.
+	get_device(&tt_dev->dev);
 	private_data->device = tt_dev;
 	private_data->open_reset_gen = atomic_long_read(&tt_dev->reset_gen);
 
@@ -859,7 +868,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	if (ret) {
 		put_pid(private_data->pid);
 		kfree(private_data);
-		tenstorrent_device_put(tt_dev);
+		put_device(&tt_dev->dev);
 		return ret;
 	}
 
@@ -982,7 +991,7 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 
 	up_read(&tt_dev->reset_rwsem);
 
-	tenstorrent_device_put(tt_dev);
+	put_device(&tt_dev->dev);
 	put_pid(priv->pid);
 	kfree(file->private_data);
 	file->private_data = NULL;

@@ -1044,10 +1044,7 @@ static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct te
 	dev_dbg(&wh->tt.pdev->dev, "Power state request: validity=%#x flags=%#x\n",
 		power_state->validity, power_state->power_flags);
 
-	if (arc_msg_send_sync(&wh->tt, &msg) != 0)
-		return -EINVAL;
-
-	return 0;
+	return arc_msg_send_sync(&wh->tt, &msg);
 }
 
 struct tenstorrent_device_class wormhole_class = {

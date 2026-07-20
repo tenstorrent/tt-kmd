@@ -798,10 +798,7 @@ static int blackhole_set_power_state(struct tenstorrent_device *tt_dev, struct t
 	BUILD_BUG_ON(sizeof(power_state->power_settings) != sizeof(msg.payload));
 	memcpy(msg.payload, power_state->power_settings, sizeof(msg.payload));
 
-	if (arc_msg_send_sync(&bh->tt, &msg) != 0)
-		return -EINVAL;
-
-	return 0;
+	return arc_msg_send_sync(&bh->tt, &msg);
 }
 
 struct tenstorrent_device_class blackhole_class = {

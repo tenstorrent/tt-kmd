@@ -194,12 +194,39 @@ static long ioctl_get_driver_info(struct chardev_private *priv,
 	return 0;
 }
 
+// Reset reinitializes the FW queue, dropping every queued/in-flight request.
+// Return all owners to IDLE and clear the queue so nothing later acts on a
+// destroyed message: a close()-time abandon becomes a no-op, and the surviving
+// resetter's POLL sees nothing outstanding.
+static void arc_msg_reset_scrub(struct tenstorrent_device *tt_dev)
+{
+	struct chardev_private *priv, *tmp;
+
+	mutex_lock(&tt_dev->arc_msg_mutex);
+
+	list_for_each_entry_safe(priv, tmp, &tt_dev->arc_msg_queue, arc_msg.queue_node) {
+		list_del_init(&priv->arc_msg.queue_node);
+		priv->arc_msg.state = CHARDEV_MSG_IDLE;
+	}
+
+	// An abandoned in-flight owner may already have been freed by close()
+	// (see arc_msg_abandon), so don't dereference it; we drop the pointer
+	// unconditionally below either way.
+	if (tt_dev->arc_msg_inflight && !tt_dev->arc_msg_inflight_abandoned)
+		tt_dev->arc_msg_inflight->arc_msg.state = CHARDEV_MSG_IDLE;
+	tt_dev->arc_msg_inflight = NULL;
+	tt_dev->arc_msg_inflight_abandoned = false;
+
+	mutex_unlock(&tt_dev->arc_msg_mutex);
+}
+
 // Bump the device's reset generation and bring this fd's open_reset_gen along
 // with it. Other fds become permanently invalid, but the resetter keeps a live
 // fd so it can complete the reset sequence without a close/reopen window.
 static void bump_reset_gen(struct chardev_private *priv)
 {
 	priv->open_reset_gen = atomic_long_inc_return(&priv->device->reset_gen);
+	arc_msg_reset_scrub(priv->device);
 }
 
 // Reclaim TLB windows from fds this reset invalidated.
@@ -628,6 +655,88 @@ static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorre
 	return tenstorrent_set_aggregated_power_state(tt_dev);
 }
 
+static long ioctl_arc_msg(struct chardev_private *priv, struct tenstorrent_smc_msg __user *arg)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_smc_msg data;
+	bool fw_error;
+	long ret;
+
+	if (copy_from_user(&data, arg, sizeof(data)) != 0)
+		return -EFAULT;
+
+	if (data.argsz != sizeof(data))
+		return -EINVAL;
+
+	if (data.queue_index != 0 || data.reserved0 != 0)
+		return -EINVAL;
+
+	// Exactly one operation per call; ABANDON does not combine with POST/POLL.
+	switch (data.flags) {
+	case TENSTORRENT_SMC_MSG_POST:
+	case TENSTORRENT_SMC_MSG_POLL:
+	case TENSTORRENT_SMC_MSG_ABANDON:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	mutex_lock(&tt_dev->arc_msg_mutex);
+
+	switch (data.flags) {
+	case TENSTORRENT_SMC_MSG_POST:
+		if (priv->arc_msg.state != CHARDEV_MSG_IDLE) {
+			ret = -EBUSY;
+			break;
+		}
+
+		BUILD_BUG_ON(sizeof(priv->arc_msg.buf) != sizeof(data.message));
+		memcpy(&priv->arc_msg.buf, data.message, sizeof(data.message));
+		priv->arc_msg.state = CHARDEV_MSG_QUEUED;
+		list_add_tail(&priv->arc_msg.queue_node, &tt_dev->arc_msg_queue);
+
+		ret = arc_msg_pump(tt_dev);
+		if (ret == -EOPNOTSUPP) {
+			list_del_init(&priv->arc_msg.queue_node);
+			priv->arc_msg.state = CHARDEV_MSG_IDLE;
+			break;
+		}
+		ret = 0;
+		break;
+
+	case TENSTORRENT_SMC_MSG_POLL:
+		if (priv->arc_msg.state == CHARDEV_MSG_IDLE) {
+			ret = -ESRCH;
+			break;
+		}
+
+		arc_msg_pump(tt_dev);
+
+		if (priv->arc_msg.state != CHARDEV_MSG_COMPLETED) {
+			ret = -EAGAIN;
+			break;
+		}
+
+		fw_error = (priv->arc_msg.buf.header != 0);
+		memcpy(data.message, &priv->arc_msg.buf, sizeof(data.message));
+		priv->arc_msg.state = CHARDEV_MSG_IDLE;
+		mutex_unlock(&tt_dev->arc_msg_mutex);
+
+		if (copy_to_user(arg, &data, sizeof(data)) != 0)
+			return -EFAULT;
+
+		return fw_error ? -EREMOTEIO : 0;
+
+	default: // TENSTORRENT_SMC_MSG_ABANDON
+		arc_msg_abandon(priv);
+		ret = 0;
+		break;
+	}
+
+	mutex_unlock(&tt_dev->arc_msg_mutex);
+	return ret;
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	struct chardev_private *priv = f->private_data;
@@ -729,6 +838,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_EXPORT_TLB_DMABUF:
 			ret = ioctl_export_tlb_dmabuf(priv, (struct tenstorrent_export_tlb_dmabuf __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_SMC_MSG:
+			ret = ioctl_arc_msg(priv, (struct tenstorrent_smc_msg __user *)arg);
 			break;
 
 		default:
@@ -845,6 +958,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	INIT_LIST_HEAD(&private_data->pinnings);
 	INIT_LIST_HEAD(&private_data->peer_mappings);
 	INIT_LIST_HEAD(&private_data->vma_list);
+	INIT_LIST_HEAD(&private_data->arc_msg.queue_node);
 	mutex_init(&private_data->vma_lock);
 	mutex_init(&private_data->tlb_mutex);
 
@@ -982,6 +1096,10 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	tenstorrent_memory_cleanup(priv);
 	tt_cdev_release_resource_locks(priv);
 	tt_cdev_release_tlbs(priv);
+
+	mutex_lock(&tt_dev->arc_msg_mutex);
+	arc_msg_abandon(priv);
+	mutex_unlock(&tt_dev->arc_msg_mutex);
 
 	mutex_lock(&tt_dev->chardev_mutex);
 

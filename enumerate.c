@@ -255,6 +255,15 @@ static int tenstorrent_reboot_notifier(struct notifier_block *nb,
 	return NOTIFY_DONE;
 }
 
+static void pci_unignore_hotplug(struct pci_dev *dev)
+{
+	struct pci_dev *bridge = dev->bus->self;
+
+	dev->ignore_hotplug = 0;
+	if (bridge)
+		bridge->ignore_hotplug = 0;
+}
+
 static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	struct tenstorrent_device *tt_dev = NULL;
@@ -362,9 +371,15 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	pci_set_master(dev);
 	pci_enable_pcie_error_reporting(dev);
 
+#if 0
 	// HACK: Suppress hotplug for Galaxy systems.
 	if (dev->subsystem_device == PCI_SUBSYSTEM_ID_GALAXY_WH || dev->subsystem_device == PCI_SUBSYSTEM_ID_GALAXY_BH)
 		pci_ignore_hotplug(dev);
+#endif
+
+	// HACK: opposite of the above - explicitly enable hotplug.
+	if (dev->subsystem_device == PCI_SUBSYSTEM_ID_GALAXY_WH || dev->subsystem_device == PCI_SUBSYSTEM_ID_GALAXY_BH)
+		pci_unignore_hotplug(dev);
 
 	pci_set_drvdata(dev, tt_dev);
 	dev_set_drvdata(&tt_dev->dev, tt_dev);

@@ -25,6 +25,7 @@
 #include "memory.h"
 #include "module.h"
 #include "tlb.h"
+#include "ioctl_helpers.h"
 
 #define TT_POWER_FLAG_ALL 0x7FFF
 
@@ -475,20 +476,11 @@ static long ioctl_set_noc_cleanup(struct chardev_private *priv,
 	const size_t minsz = offsetofend(struct tenstorrent_set_noc_cleanup, data);
 	struct tenstorrent_device *tt_dev = priv->device;
 	struct tenstorrent_set_noc_cleanup data = {0};
-	int ret;
 
 	if (!tt_dev->dev_class->noc_write32)
 		return -EOPNOTSUPP;
 
-	if (get_user(data.argsz, &arg->argsz))
-		return -EFAULT;
-
-	if (data.argsz < minsz)
-		return -EINVAL;
-
-	ret = copy_struct_from_user(&data, sizeof(data), arg, data.argsz);
-	if (ret)
-		return ret;
+	READ_IOCTL_INPUT(arg, data, minsz);
 
 	if (data.flags != 0 || data.reserved0 != 0)
 		return -EINVAL;
@@ -605,17 +597,8 @@ static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorre
 	const size_t minsz = offsetofend(struct tenstorrent_power_state, power_settings);
 	struct tenstorrent_device *tt_dev = priv->device;
 	struct tenstorrent_power_state data = {0};
-	int ret;
 
-	if (get_user(data.argsz, &arg->argsz))
-		return -EFAULT;
-
-	if (data.argsz < minsz)
-		return -EINVAL;
-
-	ret = copy_struct_from_user(&data, sizeof(data), arg, data.argsz);
-	if (ret)
-		return ret;
+	READ_IOCTL_INPUT(arg, data, minsz);
 
 	if (data.flags != 0 || data.reserved0 != 0)
 		return -EINVAL;

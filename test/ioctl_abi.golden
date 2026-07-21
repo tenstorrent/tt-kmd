@@ -38,6 +38,13 @@ tenstorrent_configure_tlb_in id 0 4
 tenstorrent_configure_tlb_in reserved 4 4
 tenstorrent_configure_tlb_out = 8
 tenstorrent_configure_tlb_out reserved 0 8
+tenstorrent_export_tlb_dmabuf = 32
+tenstorrent_export_tlb_dmabuf argsz 0 4
+tenstorrent_export_tlb_dmabuf fd 12 4
+tenstorrent_export_tlb_dmabuf flags 4 4
+tenstorrent_export_tlb_dmabuf offset 16 8
+tenstorrent_export_tlb_dmabuf size 24 8
+tenstorrent_export_tlb_dmabuf tlb_id 8 4
 tenstorrent_free_dma_buf = 0
 tenstorrent_free_dma_buf in 0 0
 tenstorrent_free_dma_buf out 0 0

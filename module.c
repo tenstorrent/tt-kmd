@@ -13,6 +13,7 @@
 
 #include "chardev.h"
 #include "enumerate.h"
+#include "fwlog.h"
 
 #include "module.h"
 
@@ -52,6 +53,16 @@ MODULE_PARM_DESC(auto_reset_timeout, "Timeout duration in seconds for M3 auto re
 bool power_policy = true;
 module_param(power_policy, bool, 0444);
 MODULE_PARM_DESC(power_policy, "Enable power policy: low power at probe, re-aggregate on close (default=on).");
+
+bool fw_logging = true;
+module_param(fw_logging, bool, 0444);
+MODULE_PARM_DESC(fw_logging, "Forward Blackhole firmware log messages to the kernel log (default=on).");
+
+uint fw_log_level = FW_LOG_LEVEL_WARN;
+module_param(fw_log_level, uint, 0644);
+MODULE_PARM_DESC(fw_log_level,
+		 "Maximum firmware log severity forwarded to the kernel log: "
+		 "1=error, 2=warning, 3=info, 4=debug (default=2).");
 
 uint idle_power_down_grace_ms = 5000;
 module_param(idle_power_down_grace_ms, uint, 0644);

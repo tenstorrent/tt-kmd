@@ -18,6 +18,7 @@
 #include "ioctl.h"
 #include "memory.h"
 #include "telemetry.h"
+#include "fwlog_kmd.h"
 
 #define MAX_TLB_KINDS 4
 
@@ -78,6 +79,9 @@ struct tenstorrent_device {
 	// Populated by telemetry_probe(); looked up via binary search.
 	struct telem_cache_entry *telemetry_cache;
 	u16 telemetry_cache_count;
+
+	// Firmware log forwarding.
+	struct fw_log_state fw_log;
 
 	struct list_head dmabuf_exports;
 	struct mutex dmabuf_export_lock;

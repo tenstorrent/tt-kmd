@@ -431,6 +431,14 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	if (vendor_id != U16_MAX)
 		tt_dev->dev_class->cleanup_hardware(tt_dev);
 
+	// Disable interrupts before cleanup_device(). A device-class interrupt
+	// handler may schedule work and cleanup_device() then cancels that work
+	// and frees the buffer it touches. free_irq() waits for in-flight handlers
+	// but does not flush already-scheduled work, so it must run before the drain
+	// otherwise a late interrupt could re-schedule log_work after
+	// cancel_work_sync().
+	tenstorrent_disable_interrupts(tt_dev);
+
 	// Drain in-flight ioctls before BAR unmap.  detached was already
 	// set under chardev_mutex above.
 	down_write(&tt_dev->reset_rwsem);
@@ -459,7 +467,6 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	}
 
 	tenstorrent_unregister_device(tt_dev);
-	tenstorrent_disable_interrupts(tt_dev);
 
 	pci_disable_pcie_error_reporting(dev);
 	pci_disable_device(dev);
@@ -495,6 +502,10 @@ static int tenstorrent_suspend(struct device *dev) {
 	cancel_delayed_work_sync(&tt_dev->power_down_work);
 	tenstorrent_revoke_tlb_dmabufs(tt_dev);
 
+	// Device-class cleanup may need to drain work scheduled by its IRQ
+	// handler before firmware is suspended. free_irq() prevents a late MSI
+	// from queuing more work after that drain.
+	tenstorrent_disable_interrupts(tt_dev);
 	tt_dev->dev_class->cleanup_hardware(tt_dev);
 
 	return 0;
@@ -503,8 +514,14 @@ static int tenstorrent_suspend(struct device *dev) {
 static int tenstorrent_resume(struct device *dev) {
 	struct pci_dev *pdev = to_pci_dev(dev);
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(pdev);
+	bool ok;
 
-	bool ok = tt_dev->dev_class->init_hardware(tt_dev);
+	// Re-establish the handler before init_hardware() re-enables firmware
+	// features that signal completion through MSI (such as FW log batches).
+	if (!tenstorrent_enable_interrupts(tt_dev))
+		dev_warn(dev, "Unable to re-enable interrupts after resume\n");
+
+	ok = tt_dev->dev_class->init_hardware(tt_dev);
 
 	// Suspend invalidates the saved state.
 	if (ok)

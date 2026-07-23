@@ -72,8 +72,13 @@
 #define ARC_MSG_TYPE_TRIGGER_RESET 0x56
 #define ARC_MSG_TYPE_POWER_SETTING 0x21
 #define ARC_MSG_TYPE_TEST 0x90
+#define ARC_MSG_TYPE_FW_LOG 0xC7          // TT_SMC_MSG_TT_PCIE_LOG
 #define ARC_BOOT_STATUS RESET_SCRATCH(2)
 #define ARC_BOOT_STATUS_READY_FOR_MSG 0x1
+
+// Sub-commands carried in byte 1 of the ARC_MSG_TYPE_FW_LOG header.
+#define FW_LOG_SUBCMD_SETUP   0x1
+#define FW_LOG_SUBCMD_RELEASE 0x2
 
 #define IATU_BASE 0x1000	// Relative to the start of BAR2
 #define IATU_OUTBOUND 0
@@ -535,6 +540,36 @@ static bool send_arc_message(struct blackhole_device *bh, struct arc_msg *msg)
 	return msg->header == 0;
 }
 
+// The generic fwlog implementation invokes these shims for its control path.
+// ARC message construction and send_arc_message() are Blackhole-specific;
+// buffer management, parsing, output, and ownership handoff live in fwlog.c.
+bool fw_log_hw_setup(void *hw_ctx, dma_addr_t buffer_dma, u32 buffer_size)
+{
+	struct blackhole_device *bh = hw_ctx;
+	struct arc_msg msg = { 0 };
+
+	msg.header = ARC_MSG_TYPE_FW_LOG | (FW_LOG_SUBCMD_SETUP << 8) |
+		     (FW_LOG_PROTOCOL_VERSION << 16);
+	msg.payload[0] = lower_32_bits(buffer_dma);
+	msg.payload[1] = upper_32_bits(buffer_dma);
+	msg.payload[2] = buffer_size;
+	return send_arc_message(bh, &msg);
+}
+
+bool fw_log_hw_release(void *hw_ctx)
+{
+	struct blackhole_device *bh = hw_ctx;
+	struct arc_msg msg = { 0 };
+
+	msg.header = ARC_MSG_TYPE_FW_LOG | (FW_LOG_SUBCMD_RELEASE << 8);
+	return send_arc_message(bh, &msg);
+}
+
+static void blackhole_interrupt(struct tenstorrent_device *tt_dev)
+{
+	fw_log_interrupt(&tt_dev->fw_log);
+}
+
 static bool blackhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
@@ -605,6 +640,13 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
 	mutex_init(&bh->kernel_tlb_mutex);
 
+	// Initialize once; the MSI handler may schedule this as soon as
+	// interrupts are enabled and firmware logging is set up.  Reserve the
+	// DMA buffer here (device-lifetime allocation); the firmware handshake
+	// happens later in blackhole_init_hardware().
+	fw_log_init(&tt_dev->fw_log, &tt_dev->pdev->dev, bh);
+	fw_log_alloc(&tt_dev->fw_log);
+
 	tt_dev->hwmon_attributes = bh_hwmon_attrs;
 	tt_dev->hwmon_labels = bh_hwmon_labels;
 	tt_dev->telemetry_sysfs = bh_sysfs_attributes;
@@ -635,6 +677,9 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 	msg.payload[0] = 1000 * auto_reset_timeout; // Convert seconds to milliseconds
 	if (!send_arc_message(bh, &msg))
 		dev_warn(&tt_dev->pdev->dev, "Failed to set ARC watchdog timeout (this is normal for old FW)\n");
+
+	// Best-effort: start firmware log forwarding.  Also re-runs on resume.
+	fw_log_setup(&tt_dev->fw_log);
 
 	return true;
 }
@@ -700,6 +745,17 @@ static void blackhole_cleanup_hardware(struct tenstorrent_device *tt_dev)
 	if (tt_dev->detached)
 		return;
 
+	// Suspend retains the DMA allocation and reuses it at resume. IRQs were
+	// disabled by the common suspend path, so drain any batch that was queued
+	// before firmware is told to stop; otherwise it could run concurrently
+	// with fw_log_setup() clearing and reinitializing the shared buffer.
+	fw_log_quiesce(&tt_dev->fw_log);
+
+	// Tell firmware to stop writing the shared log buffer while the device
+	// is still reachable.  The buffer itself is freed later on the
+	// always-run device cleanup path (blackhole_cleanup -> fw_log_free).
+	fw_log_notify_release(&tt_dev->fw_log);
+
 	msg.header = ARC_MSG_TYPE_ASIC_STATE3;
 	if (!send_arc_message(bh, &msg))
 		dev_err(&tt_dev->pdev->dev, "Failed to send ARC message for A3 state\n");
@@ -708,6 +764,12 @@ static void blackhole_cleanup_hardware(struct tenstorrent_device *tt_dev)
 static void blackhole_cleanup(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+
+	// Software teardown of firmware logging: disable, drain the workqueue,
+	// and free the shared buffer.  Runs unconditionally (no hardware
+	// access) so the buffer is always released even on an unreachable
+	// device.  Firmware was asked to stop in blackhole_cleanup_hardware.
+	fw_log_free(&tt_dev->fw_log);
 
 	if (bh->tlb_regs)
 		pci_iounmap(tt_dev->pdev, bh->tlb_regs);
@@ -833,6 +895,7 @@ struct tenstorrent_device_class blackhole_class = {
 	.restore_reset_state = blackhole_restore_reset_state,
 	.configure_outbound_atu = blackhole_configure_outbound_atu,
 	.noc_write32 = blackhole_noc_write32,
+	.interrupt = blackhole_interrupt,
 	.csm_read32 = blackhole_csm_read32,
 	.csm_write32 = blackhole_csm_write32,
 	.set_power_state = blackhole_set_power_state,

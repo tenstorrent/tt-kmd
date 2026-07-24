@@ -17,6 +17,7 @@
 #include "ioctl.h"
 #include "memory.h"
 #include "telemetry.h"
+#include "fwlog_kmd.h"
 
 #define MAX_TLB_KINDS 4
 
@@ -84,6 +85,9 @@ struct tenstorrent_device {
 	struct telem_cache_entry *telemetry_cache;
 	u16 telemetry_cache_count;
 
+	// Firmware log forwarding.
+	struct fw_log_state fw_log;
+
 	struct list_head dmabuf_exports;
 	struct mutex dmabuf_export_lock;
 };
@@ -113,6 +117,10 @@ struct tenstorrent_device_class {
 	void (*restore_reset_state)(struct tenstorrent_device *ttdev);
 	int (*configure_outbound_atu)(struct tenstorrent_device *ttdev, u32 region, u64 base, u64 limit, u64 target);
 	void (*noc_write32)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, u32 data, int noc);
+
+	// Optional MSI handler invoked from the driver's IRQ handler. May be NULL for devices
+	// with no interrupt handling.
+	void (*interrupt)(struct tenstorrent_device *ttdev);
 	int (*csm_read32)(struct tenstorrent_device *ttdev, u64 addr, u32 *value);
 	int (*csm_write32)(struct tenstorrent_device *ttdev, u64 addr, u32 value);
 	int (*set_power_state)(struct tenstorrent_device *ttdev, struct tenstorrent_power_state *power_state);

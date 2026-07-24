@@ -1,125 +1,203 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: GPL-2.0-only
-
-# Script to analyze struct padding in ioctl.h using pahole
 #
-# This script verifies that all padding in ioctl.h structures is explicit.
-# Implicit padding in kernel-userspace ABI structures can lead to portability
-# and security issues. All padding should be made explicit using reserved fields.
+# Verify the ioctl.h ABI using pahole (DWARF struct layout).
 #
-# Requirements:
-#   - pahole (from dwarves package)
-#   - gcc with debug info support
+# Two checks run against every struct declared in ioctl.h:
+#
+#   1. No implicit padding. Holes between members are an ABI/portability and
+#      information-leak hazard; all padding must be explicit reserved fields.
+#
+#   2. No existing member moves, resizes, or disappears, and no struct shrinks,
+#      versus the locked layout in test/ioctl_abi.golden. This freezes the ABI
+#      of every struct -- including the offset+size of each argsz ioctl's
+#      minsz-defining field, so minsz can never silently change. Appending new
+#      members to the tail of a struct is allowed (that is how argsz structs
+#      grow); any other layout change fails.
+#
+# When you intentionally add a field, regenerate the golden and commit it:
+#
+#   test/pahole_check.sh --update-golden
+#
+# Requirements: pahole (dwarves package), gcc with debug info.
 #
 # Usage:
-#   ./pahole_check.sh           # Check for padding (exit 1 if found)
-#   ./pahole_check.sh --verbose # Show all struct layouts
-#   ./pahole_check.sh -v        # Same as --verbose
+#   ./pahole_check.sh                 # check padding + ABI against the golden
+#   ./pahole_check.sh --update-golden # rewrite the golden from current ioctl.h
+#   ./pahole_check.sh --emit-golden   # print the layout projection to stdout
+#   ./pahole_check.sh --verbose       # also dump full pahole layouts
 #
-# Exit codes:
-#   0 - No implicit padding found
-#   1 - Implicit padding detected (or other error)
-
-set -e
+# Exit codes: 0 = clean, 1 = padding or ABI problem (or error), 2 = bad usage.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+GOLDEN="${IOCTL_ABI_GOLDEN:-$SCRIPT_DIR/ioctl_abi.golden}"
 
-# Setup cleanup trap for temporary files
-cleanup() {
-    rm -f "$SCRIPT_DIR/pahole_dummy.o" "$SCRIPT_DIR/pahole_dummy.c"
-}
-trap cleanup EXIT
+MODE=check
+case "${1:-}" in
+    --update-golden) MODE=update ;;
+    --emit-golden)   MODE=emit ;;
+    --verbose|-v)    MODE=verbose ;;
+    "")              MODE=check ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+esac
 
-# Check if pahole is available
-if ! command -v pahole &> /dev/null; then
-    echo "ERROR: pahole not found. Please install dwarves package." >&2
+if ! command -v pahole >/dev/null 2>&1; then
+    echo "ERROR: pahole not found. Please install the dwarves package." >&2
     echo "  Debian/Ubuntu: sudo apt-get install dwarves" >&2
     echo "  Fedora/RHEL:   sudo dnf install dwarves" >&2
     exit 1
 fi
 
-# Extract all struct names from ioctl.h
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+# Enumerate the structs declared in ioctl.h.
 mapfile -t STRUCTS < <(grep '^struct ' "$ROOT_DIR/ioctl.h" | awk '{print $2}' | sort -u)
 
-# Generate pahole_dummy.c with all struct instantiations
-echo "Generating pahole_dummy.c..."
-cat > "$SCRIPT_DIR/pahole_dummy.c" << 'EOF'
-// SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
-// SPDX-License-Identifier: GPL-2.0-only
-
-// Auto-generated file to instantiate all ioctl.h structs for pahole analysis
-// This ensures pahole can find type information in the DWARF debug data
-
-#include "../ioctl.h"
-
-EOF
-
-# Add struct instantiations
-idx=1
-for struct in "${STRUCTS[@]}"; do
-    echo "struct $struct v$idx;" >> "$SCRIPT_DIR/pahole_dummy.c"
-    idx=$((idx + 1))
-done
-
-# Compile pahole_dummy.c with debug info for pahole to analyze
-echo "Compiling with debug info..."
-if ! gcc -g -c -o "$SCRIPT_DIR/pahole_dummy.o" "$SCRIPT_DIR/pahole_dummy.c" 2>&1; then
-    echo "ERROR: Failed to compile pahole_dummy.c" >&2
-    exit 1
-fi
-
-echo ""
-echo "========================================"
-echo "Pahole Analysis of ioctl.h Structures"
-echo "========================================"
-echo ""
-
-FOUND_ISSUES=0
-
-for struct in "${STRUCTS[@]}"; do
-    OUTPUT=$(pahole -C "$struct" "$SCRIPT_DIR/pahole_dummy.o" 2>/dev/null || true)
-
-    if [ -z "$OUTPUT" ]; then
-        continue
-    fi
-
-    # Check if this struct has holes or padding
-    if echo "$OUTPUT" | grep -q "XXX.*hole\|padding:"; then
-        echo "PADDING DETECTED: struct $struct"
-        echo "$OUTPUT"
-        echo ""
-        FOUND_ISSUES=$((FOUND_ISSUES + 1))
-    fi
-done
-
-# Also show all structs for reference if requested
-if [ "$1" == "--verbose" ] || [ "$1" == "-v" ]; then
-    echo ""
-    echo "========================================"
-    echo "Full Details of All Structures"
-    echo "========================================"
-    echo ""
-    for struct in "${STRUCTS[@]}"; do
-        OUTPUT=$(pahole -C "$struct" "$SCRIPT_DIR/pahole_dummy.o" 2>/dev/null || true)
-        if [ -n "$OUTPUT" ]; then
-            echo "struct $struct:"
-            echo "$OUTPUT"
-            echo ""
-        fi
+# Instantiate each struct so its type lands in the DWARF debug info.
+{
+    echo "// SPDX-License-Identifier: GPL-2.0-only"
+    echo "// Auto-generated by pahole_check.sh; do not edit or commit."
+    echo '#include "ioctl.h"'
+    idx=0
+    for s in "${STRUCTS[@]}"; do
+        echo "struct $s instance_$idx;"
+        idx=$((idx + 1))
     done
-fi
+} > "$WORK/dummy.c"
 
-if [ $FOUND_ISSUES -gt 0 ]; then
-    echo "========================================"
-    echo "Summary: Found $FOUND_ISSUES structure(s) with implicit padding"
-    echo "========================================"
+if ! gcc -g -I"$ROOT_DIR" -c -o "$WORK/dummy.o" "$WORK/dummy.c"; then
+    echo "ERROR: failed to compile the struct instantiation TU" >&2
     exit 1
-else
-    echo "========================================"
-    echo "No implicit padding found!"
-    echo "========================================"
-    exit 0
 fi
 
+# Project a struct's pahole layout to stable, version-independent lines:
+#   "<struct> <member> <offset> <size>"   one per data member
+#   "<struct> = <sizeof>"                 one per struct
+# Only the offset/size comments are used, so pahole/dwarves formatting churn
+# (spacing, cacheline annotations, type spelling) does not affect the output.
+# Written for portability across mawk and gawk: split on " " collapses runs of
+# whitespace and ignores leading/trailing blanks.
+PARSE='
+{
+    s = index($0, "/*"); if (s == 0) next
+    rest = substr($0, s + 2); e = index(rest, "*/"); if (e == 0) next
+    n = split(substr(rest, 1, e - 1), p, " ")
+    if (p[1] == "size:") { val = p[2]; gsub(/,/, "", val); print st " = " val; next }
+    if (n < 2 || p[1] !~ /^[0-9]+$/ || p[2] !~ /^[0-9]+$/) next  # not a plain member
+    pre = substr($0, 1, s - 1)
+    if (index(pre, ";") == 0) next                              # not a member decl
+    sub(/;.*/, "", pre)
+    m = split(pre, t, " "); name = t[m]; sub(/\[[0-9]*\]$/, "", name)
+    print st " " name " " p[1] " " p[2]
+}'
+
+emit_projection() {
+    local s
+    for s in "${STRUCTS[@]}"; do
+        pahole -C "$s" "$WORK/dummy.o" 2>/dev/null | awk -v st="$s" "$PARSE"
+    done | LC_ALL=C sort
+}
+
+# Check 1: implicit padding.
+padding_issues=0
+for s in "${STRUCTS[@]}"; do
+    out="$(pahole -C "$s" "$WORK/dummy.o" 2>/dev/null)"
+    [ -n "$out" ] || continue
+    if echo "$out" | grep -q "XXX.*hole\|padding:"; then
+        echo "IMPLICIT PADDING in struct $s:" >&2
+        echo "$out" >&2
+        padding_issues=$((padding_issues + 1))
+    fi
+done
+
+emit_projection > "$WORK/current"
+
+case "$MODE" in
+    emit)
+        cat "$WORK/current"
+        exit 0
+        ;;
+    update)
+        {
+            echo "# SPDX-License-Identifier: GPL-2.0-only"
+            echo "# Locked ioctl.h ABI layout. Regenerate with: test/pahole_check.sh --update-golden"
+            echo "# Format: '<struct> <member> <offset> <size>' and '<struct> = <sizeof>'."
+            cat "$WORK/current"
+        } > "$GOLDEN"
+        echo "Updated $GOLDEN"
+        ;;
+    verbose)
+        for s in "${STRUCTS[@]}"; do
+            echo "== struct $s =="
+            pahole -C "$s" "$WORK/dummy.o" 2>/dev/null
+            echo
+        done
+        ;;
+esac
+
+# Check 2: ABI layout against the golden.
+abi_fail=0
+if [ "$MODE" = check ] || [ "$MODE" = verbose ]; then
+    if [ ! -f "$GOLDEN" ]; then
+        echo "ERROR: $GOLDEN is missing. Generate it with --update-golden and commit it." >&2
+        exit 1
+    fi
+    # Compare current projection against the golden. Fail on any existing member
+    # that moved/resized/disappeared, or any struct that shrank. New members and
+    # struct growth are reported but allowed (tail growth of argsz structs).
+    grep -v '^#' "$GOLDEN" > "$WORK/golden"
+    awk '
+        FNR == NR {
+            if (NF == 4) gm[$1 SUBSEP $2] = $3 SUBSEP $4
+            else if (NF == 3 && $2 == "=") gs[$1] = $3
+            next
+        }
+        {
+            if (NF == 4) cm[$1 SUBSEP $2] = $3 SUBSEP $4
+            else if (NF == 3 && $2 == "=") cs[$1] = $3
+        }
+        END {
+            bad = 0
+            for (k in gm) {
+                split(k, a, SUBSEP)
+                if (!(k in cm)) {
+                    printf "ABI BREAK: %s.%s removed\n", a[1], a[2]; bad = 1; continue
+                }
+                if (cm[k] != gm[k]) {
+                    split(gm[k], go, SUBSEP); split(cm[k], co, SUBSEP)
+                    printf "ABI BREAK: %s.%s moved/resized: was off=%s sz=%s, now off=%s sz=%s\n",
+                           a[1], a[2], go[1], go[2], co[1], co[2]
+                    bad = 1
+                }
+            }
+            for (st in gs) {
+                if (!(st in cs)) { printf "ABI BREAK: struct %s removed\n", st; bad = 1; continue }
+                if (cs[st] + 0 < gs[st] + 0)
+                    { printf "ABI BREAK: struct %s shrank: was %s now %s\n", st, gs[st], cs[st]; bad = 1 }
+            }
+            for (k in cm) if (!(k in gm)) { split(k, a, SUBSEP); printf "note: new member %s.%s (tail growth, OK)\n", a[1], a[2] }
+            for (st in cs) if ((st in gs) && cs[st] + 0 > gs[st] + 0) printf "note: struct %s grew %s -> %s (OK)\n", st, gs[st], cs[st]
+            for (st in cs) if (!(st in gs)) printf "note: new struct %s (OK)\n", st
+            exit bad
+        }
+    ' "$WORK/golden" "$WORK/current"
+    abi_fail=$?
+fi
+
+rc=0
+if [ "$padding_issues" -gt 0 ]; then
+    echo "FAIL: implicit padding detected; make all padding explicit with reserved fields." >&2
+    rc=1
+fi
+if [ "$abi_fail" -ne 0 ]; then
+    echo "FAIL: ioctl.h ABI layout changed (see ABI BREAK lines)." >&2
+    echo "      If this is an intentional tail append, run: test/pahole_check.sh --update-golden" >&2
+    rc=1
+fi
+if [ "$rc" -eq 0 ] && { [ "$MODE" = check ] || [ "$MODE" = verbose ]; }; then
+    echo "OK: ioctl.h padding and ABI layout verified."
+fi
+exit $rc

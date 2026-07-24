@@ -25,6 +25,7 @@
 #include "memory.h"
 #include "module.h"
 #include "tlb.h"
+#include "ioctl_helpers.h"
 
 #define TT_POWER_FLAG_ALL 0x7FFF
 
@@ -472,24 +473,16 @@ static long ioctl_lock_ctl(struct chardev_private *priv, struct tenstorrent_lock
 static long ioctl_set_noc_cleanup(struct chardev_private *priv,
 			   struct tenstorrent_set_noc_cleanup __user *arg)
 {
+	const size_t minsz = offsetofend(struct tenstorrent_set_noc_cleanup, data);
 	struct tenstorrent_device *tt_dev = priv->device;
 	struct tenstorrent_set_noc_cleanup data = {0};
 
-	// First, ensure the underlying device class supports this operation.
 	if (!tt_dev->dev_class->noc_write32)
 		return -EOPNOTSUPP;
 
-	if (copy_from_user(&data, arg, sizeof(data)) != 0)
-		return -EFAULT;
+	READ_IOCTL_INPUT(arg, data, minsz);
 
-	// The `argsz` field allows the kernel to validate that the userspace caller
-	// has the same understanding of the structure size. For this specific
-	// version of the API, we require an exact match.
-	if (data.argsz != sizeof(data))
-		return -EINVAL;
-
-	// Validate reserved fields to ensure future compatibility.
-	if (data.flags != 0)
+	if (data.flags != 0 || data.reserved0 != 0)
 		return -EINVAL;
 
 	// The `enabled` field acts as a boolean; reject other values.
@@ -601,14 +594,11 @@ void tenstorrent_power_down_work_func(struct work_struct *work)
 
 static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorrent_power_state __user *arg)
 {
+	const size_t minsz = offsetofend(struct tenstorrent_power_state, power_settings);
 	struct tenstorrent_device *tt_dev = priv->device;
 	struct tenstorrent_power_state data = {0};
 
-	if (copy_from_user(&data, arg, sizeof(data)) != 0)
-		return -EFAULT;
-
-	if (data.argsz != sizeof(data))
-		return -EINVAL;
+	READ_IOCTL_INPUT(arg, data, minsz);
 
 	if (data.flags != 0 || data.reserved0 != 0)
 		return -EINVAL;

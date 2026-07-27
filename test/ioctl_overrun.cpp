@@ -193,6 +193,31 @@ void TestMapPeerBarOverrun(int fd)
     CHECK_IOCTL_OVERRUN_ERROR(fd, TENSTORRENT_IOCTL_MAP_PEER_BAR, in, EINVAL);
 }
 
+void TestSetNocCleanupOverrun(int fd)
+{
+    // argsz-style, write-only ioctl. With argsz == sizeof the kernel reads
+    // exactly the struct; a zeroed struct (enabled == 0) just clears this fd's
+    // cleanup action. Devices whose class lacks noc_write32 return EOPNOTSUPP
+    // before reading anything, so tolerate that in addition to success.
+    tenstorrent_set_noc_cleanup in{};
+    in.argsz = sizeof(in);
+
+    CHECK_IOCTL_OVERRUN_ERROR(fd, TENSTORRENT_IOCTL_SET_NOC_CLEANUP, in, EOPNOTSUPP);
+}
+
+void TestSetPowerStateOverrun(int fd)
+{
+    // argsz-style, write-only ioctl. Set an unsupported flag so the kernel
+    // rejects with EINVAL after the (bounded) copy_struct_from_user but before
+    // touching firmware -- this exercises the read bound without changing the
+    // device's power state.
+    tenstorrent_power_state in{};
+    in.argsz = sizeof(in);
+    in.flags = 1;
+
+    CHECK_IOCTL_OVERRUN_ERROR(fd, TENSTORRENT_IOCTL_SET_POWER_STATE, in, EINVAL);
+}
+
 }
 
 void TestIoctlOverrun(const EnumeratedDevice &dev)
@@ -209,4 +234,6 @@ void TestIoctlOverrun(const EnumeratedDevice &dev)
     TestPinPagesOverrun(dev_fd.get());
     TestLockCtlOverrun(dev_fd.get());
     TestMapPeerBarOverrun(dev_fd.get());
+    TestSetNocCleanupOverrun(dev_fd.get());
+    TestSetPowerStateOverrun(dev_fd.get());
 }

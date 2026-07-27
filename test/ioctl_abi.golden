@@ -1,0 +1,182 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Locked ioctl.h ABI layout. Regenerate with: test/pahole_check.sh --update-golden
+# Format: '<struct> <member> <offset> <size>' and '<struct> = <sizeof>'.
+tenstorrent_allocate_dma_buf = 64
+tenstorrent_allocate_dma_buf in 0 24
+tenstorrent_allocate_dma_buf out 24 40
+tenstorrent_allocate_dma_buf_in = 24
+tenstorrent_allocate_dma_buf_in buf_index 4 1
+tenstorrent_allocate_dma_buf_in flags 5 1
+tenstorrent_allocate_dma_buf_in requested_size 0 4
+tenstorrent_allocate_dma_buf_in reserved0 6 2
+tenstorrent_allocate_dma_buf_in reserved1 8 16
+tenstorrent_allocate_dma_buf_out = 40
+tenstorrent_allocate_dma_buf_out mapping_offset 8 8
+tenstorrent_allocate_dma_buf_out noc_address 24 8
+tenstorrent_allocate_dma_buf_out physical_address 0 8
+tenstorrent_allocate_dma_buf_out reserved0 20 4
+tenstorrent_allocate_dma_buf_out reserved1 32 8
+tenstorrent_allocate_dma_buf_out size 16 4
+tenstorrent_allocate_tlb = 48
+tenstorrent_allocate_tlb in 0 16
+tenstorrent_allocate_tlb out 16 32
+tenstorrent_allocate_tlb_in = 16
+tenstorrent_allocate_tlb_in reserved 8 8
+tenstorrent_allocate_tlb_in size 0 8
+tenstorrent_allocate_tlb_out = 32
+tenstorrent_allocate_tlb_out id 0 4
+tenstorrent_allocate_tlb_out mmap_offset_uc 8 8
+tenstorrent_allocate_tlb_out mmap_offset_wc 16 8
+tenstorrent_allocate_tlb_out reserved0 4 4
+tenstorrent_allocate_tlb_out reserved1 24 8
+tenstorrent_configure_tlb = 48
+tenstorrent_configure_tlb in 0 40
+tenstorrent_configure_tlb out 40 8
+tenstorrent_configure_tlb_in = 40
+tenstorrent_configure_tlb_in config 8 32
+tenstorrent_configure_tlb_in id 0 4
+tenstorrent_configure_tlb_in reserved 4 4
+tenstorrent_configure_tlb_out = 8
+tenstorrent_configure_tlb_out reserved 0 8
+tenstorrent_export_tlb_dmabuf = 32
+tenstorrent_export_tlb_dmabuf argsz 0 4
+tenstorrent_export_tlb_dmabuf fd 12 4
+tenstorrent_export_tlb_dmabuf flags 4 4
+tenstorrent_export_tlb_dmabuf offset 16 8
+tenstorrent_export_tlb_dmabuf size 24 8
+tenstorrent_export_tlb_dmabuf tlb_id 8 4
+tenstorrent_free_dma_buf = 0
+tenstorrent_free_dma_buf in 0 0
+tenstorrent_free_dma_buf out 0 0
+tenstorrent_free_dma_buf_in = 0
+tenstorrent_free_dma_buf_out = 0
+tenstorrent_free_tlb = 4
+tenstorrent_free_tlb in 0 4
+tenstorrent_free_tlb out 4 0
+tenstorrent_free_tlb_in = 4
+tenstorrent_free_tlb_in id 0 4
+tenstorrent_free_tlb_out = 0
+tenstorrent_get_device_info = 24
+tenstorrent_get_device_info in 0 4
+tenstorrent_get_device_info out 4 20
+tenstorrent_get_device_info_in = 4
+tenstorrent_get_device_info_in output_size_bytes 0 4
+tenstorrent_get_device_info_out = 20
+tenstorrent_get_device_info_out bus_dev_fn 12 2
+tenstorrent_get_device_info_out device_id 6 2
+tenstorrent_get_device_info_out max_dma_buf_size_log2 14 2
+tenstorrent_get_device_info_out output_size_bytes 0 4
+tenstorrent_get_device_info_out pci_domain 16 2
+tenstorrent_get_device_info_out reserved 18 2
+tenstorrent_get_device_info_out subsystem_id 10 2
+tenstorrent_get_device_info_out subsystem_vendor_id 8 2
+tenstorrent_get_device_info_out vendor_id 4 2
+tenstorrent_get_driver_info = 16
+tenstorrent_get_driver_info in 0 4
+tenstorrent_get_driver_info out 4 12
+tenstorrent_get_driver_info_in = 4
+tenstorrent_get_driver_info_in output_size_bytes 0 4
+tenstorrent_get_driver_info_out = 12
+tenstorrent_get_driver_info_out driver_version 4 4
+tenstorrent_get_driver_info_out driver_version_major 8 1
+tenstorrent_get_driver_info_out driver_version_minor 9 1
+tenstorrent_get_driver_info_out driver_version_patch 10 1
+tenstorrent_get_driver_info_out output_size_bytes 0 4
+tenstorrent_get_driver_info_out reserved0 11 1
+tenstorrent_lock_ctl = 16
+tenstorrent_lock_ctl in 0 12
+tenstorrent_lock_ctl out 12 4
+tenstorrent_lock_ctl_in = 12
+tenstorrent_lock_ctl_in flags 4 4
+tenstorrent_lock_ctl_in index 8 1
+tenstorrent_lock_ctl_in output_size_bytes 0 4
+tenstorrent_lock_ctl_in reserved 9 3
+tenstorrent_lock_ctl_out = 4
+tenstorrent_lock_ctl_out reserved 1 3
+tenstorrent_lock_ctl_out value 0 1
+tenstorrent_map_peer_bar = 40
+tenstorrent_map_peer_bar in 0 24
+tenstorrent_map_peer_bar out 24 16
+tenstorrent_map_peer_bar_in = 24
+tenstorrent_map_peer_bar_in flags 16 4
+tenstorrent_map_peer_bar_in peer_bar_index 4 4
+tenstorrent_map_peer_bar_in peer_bar_length 12 4
+tenstorrent_map_peer_bar_in peer_bar_offset 8 4
+tenstorrent_map_peer_bar_in peer_fd 0 4
+tenstorrent_map_peer_bar_in reserved 20 4
+tenstorrent_map_peer_bar_out = 16
+tenstorrent_map_peer_bar_out dma_address 0 8
+tenstorrent_map_peer_bar_out reserved 8 8
+tenstorrent_mapping = 24
+tenstorrent_mapping mapping_base 8 8
+tenstorrent_mapping mapping_id 0 4
+tenstorrent_mapping mapping_size 16 8
+tenstorrent_mapping reserved 4 4
+tenstorrent_noc_tlb_config = 32
+tenstorrent_noc_tlb_config addr 0 8
+tenstorrent_noc_tlb_config linked 19 1
+tenstorrent_noc_tlb_config mcast 17 1
+tenstorrent_noc_tlb_config noc 16 1
+tenstorrent_noc_tlb_config ordering 18 1
+tenstorrent_noc_tlb_config reserved0 21 3
+tenstorrent_noc_tlb_config reserved1 24 8
+tenstorrent_noc_tlb_config static_vc 20 1
+tenstorrent_noc_tlb_config x_end 8 2
+tenstorrent_noc_tlb_config x_start 12 2
+tenstorrent_noc_tlb_config y_end 10 2
+tenstorrent_noc_tlb_config y_start 14 2
+tenstorrent_pin_pages = 32
+tenstorrent_pin_pages in 0 24
+tenstorrent_pin_pages out 24 8
+tenstorrent_pin_pages_in = 24
+tenstorrent_pin_pages_in flags 4 4
+tenstorrent_pin_pages_in output_size_bytes 0 4
+tenstorrent_pin_pages_in size 16 8
+tenstorrent_pin_pages_in virtual_address 8 8
+tenstorrent_pin_pages_out = 8
+tenstorrent_pin_pages_out physical_address 0 8
+tenstorrent_pin_pages_out_extended = 16
+tenstorrent_pin_pages_out_extended noc_address 8 8
+tenstorrent_pin_pages_out_extended physical_address 0 8
+tenstorrent_power_state = 40
+tenstorrent_power_state argsz 0 4
+tenstorrent_power_state flags 4 4
+tenstorrent_power_state power_flags 10 2
+tenstorrent_power_state power_settings 12 28
+tenstorrent_power_state reserved0 8 1
+tenstorrent_power_state validity 9 1
+tenstorrent_query_mappings = 8
+tenstorrent_query_mappings in 0 8
+tenstorrent_query_mappings out 8 0
+tenstorrent_query_mappings_in = 8
+tenstorrent_query_mappings_in output_mapping_count 0 4
+tenstorrent_query_mappings_in reserved 4 4
+tenstorrent_query_mappings_out = 0
+tenstorrent_query_mappings_out mappings 0 0
+tenstorrent_reset_device = 16
+tenstorrent_reset_device in 0 8
+tenstorrent_reset_device out 8 8
+tenstorrent_reset_device_in = 8
+tenstorrent_reset_device_in flags 4 4
+tenstorrent_reset_device_in output_size_bytes 0 4
+tenstorrent_reset_device_out = 8
+tenstorrent_reset_device_out output_size_bytes 0 4
+tenstorrent_reset_device_out result 4 4
+tenstorrent_set_noc_cleanup = 32
+tenstorrent_set_noc_cleanup addr 16 8
+tenstorrent_set_noc_cleanup argsz 0 4
+tenstorrent_set_noc_cleanup data 24 8
+tenstorrent_set_noc_cleanup enabled 8 1
+tenstorrent_set_noc_cleanup flags 4 4
+tenstorrent_set_noc_cleanup noc 11 1
+tenstorrent_set_noc_cleanup reserved0 12 4
+tenstorrent_set_noc_cleanup x 9 1
+tenstorrent_set_noc_cleanup y 10 1
+tenstorrent_unpin_pages = 24
+tenstorrent_unpin_pages in 0 24
+tenstorrent_unpin_pages out 24 0
+tenstorrent_unpin_pages_in = 24
+tenstorrent_unpin_pages_in reserved 16 8
+tenstorrent_unpin_pages_in size 8 8
+tenstorrent_unpin_pages_in virtual_address 0 8
+tenstorrent_unpin_pages_out = 0

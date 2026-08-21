@@ -520,6 +520,9 @@ struct tenstorrent_smc_msg {
  * @addr. @flags is reserved for future addressing modes (e.g. hardware without
  * X/Y coordinates) and must currently be 0.
  *
+ * On Keraunos, @addr is a flat 52-bit system physical address and @x, @y, and
+ * @noc are unused and must be 0.
+ *
  * The KMD cannot validate that @addr refers to anything meaningful; it only
  * enforces that @addr is naturally aligned to @width.
  *

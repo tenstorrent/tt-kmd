@@ -14,4 +14,6 @@ jobs:
                 sudo apt update
                 sudo apt install -y dkms git libelf-dev
                 git clone https://github.com/gregkh/linux /tmp/linux
-                test/mass-build-test . /tmp/linux v5.4 v7.1
+                latest_release=$(git -C /tmp/linux tag --sort=-version:refname | awk '/^v[0-9]+\.[0-9]+$/ { print; exit }')
+                test -n "$latest_release"
+                test/mass-build-test . /tmp/linux v5.4 "$latest_release"

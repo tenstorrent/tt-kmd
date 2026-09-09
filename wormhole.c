@@ -1110,7 +1110,13 @@ static int wormhole_set_power_state(struct tenstorrent_device *tt_dev, struct te
 struct tenstorrent_device_class wormhole_class = {
 	.name = "Wormhole",
 	.instance_size = sizeof(struct wormhole_device),
-	.dma_address_bits = 32,
+	// Coherent is 32 because legacy software assumes it will get 32-bit
+	// addresses from ALLOCATE_DMA_BUF. Streaming is 64: pinned pages are
+	// reached through the iATU, which takes a full 64-bit target and is
+	// programmed per pinning, so there is nothing to cap. A 32-bit streaming
+	// mask would be too limiting for user pinnings under IOMMU.
+	.coherent_dma_bits = 32,
+	.streaming_dma_bits = 64,
 	.noc_dma_limit = (0xFFFE0000 - 1),
 	.noc_pcie_offset = 0x800000000ULL,
 	.tlb_kinds = NUM_TLB_KINDS,

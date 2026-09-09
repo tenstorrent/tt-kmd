@@ -523,7 +523,7 @@ struct tenstorrent_smc_msg {
  * The KMD cannot validate that @addr refers to anything meaningful; it only
  * enforces that @addr is naturally aligned to @width.
  *
- * @argsz: Must be sizeof(struct tenstorrent_noc_read/write).
+ * @argsz: Must be sizeof(struct tenstorrent_noc_io).
  * @flags: Reserved for future use, must be 0.
  * @x: X coordinate of the NOC endpoint; must be in the range 0-63.
  * @y: Y coordinate of the NOC endpoint; must be in the range 0-63.
@@ -534,19 +534,7 @@ struct tenstorrent_smc_msg {
  * @value: For NOC_READ, receives the value (zero-extended to 64 bits). For
  *         NOC_WRITE, the value to write (only the low @width bytes are used).
  */
-struct tenstorrent_noc_read {
-	__u32 argsz;
-	__u32 flags;
-	__u16 x;
-	__u16 y;
-	__u8 noc;
-	__u8 width;
-	__u8 reserved0[2];
-	__u64 addr;
-	__u64 value;
-};
-
-struct tenstorrent_noc_write {
+struct tenstorrent_noc_io {
 	__u32 argsz;
 	__u32 flags;
 	__u16 x;

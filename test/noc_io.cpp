@@ -32,7 +32,7 @@ uint64_t random_aligned_address(uint64_t maximum, uint64_t alignment)
 
 uint64_t noc_read(int fd, uint16_t x, uint16_t y, uint8_t noc, uint8_t width, uint64_t addr)
 {
-    tenstorrent_noc_read r{};
+    tenstorrent_noc_io r{};
     r.argsz = sizeof(r);
     r.x = x;
     r.y = y;
@@ -48,7 +48,7 @@ uint64_t noc_read(int fd, uint16_t x, uint16_t y, uint8_t noc, uint8_t width, ui
 
 void noc_write(int fd, uint16_t x, uint16_t y, uint8_t noc, uint8_t width, uint64_t addr, uint64_t value)
 {
-    tenstorrent_noc_write w{};
+    tenstorrent_noc_io w{};
     w.argsz = sizeof(w);
     w.x = x;
     w.y = y;
@@ -103,16 +103,16 @@ void VerifyRoundtrip(int fd, uint16_t x, uint16_t y)
     }
 }
 
-void ExpectReadRejected(int fd, const tenstorrent_noc_read &request, const char *what)
+void ExpectReadRejected(int fd, const tenstorrent_noc_io &request, const char *what)
 {
-    tenstorrent_noc_read r = request;
+    tenstorrent_noc_io r = request;
     if (ioctl(fd, TENSTORRENT_IOCTL_NOC_READ, &r) == 0)
         THROW_TEST_FAILURE(std::string("NOC_READ accepted invalid request: ") + what);
 }
 
-void ExpectWriteRejected(int fd, const tenstorrent_noc_write &request, const char *what)
+void ExpectWriteRejected(int fd, const tenstorrent_noc_io &request, const char *what)
 {
-    tenstorrent_noc_write w = request;
+    tenstorrent_noc_io w = request;
     if (ioctl(fd, TENSTORRENT_IOCTL_NOC_WRITE, &w) == 0)
         THROW_TEST_FAILURE(std::string("NOC_WRITE accepted invalid request: ") + what);
 }
@@ -120,7 +120,7 @@ void ExpectWriteRejected(int fd, const tenstorrent_noc_write &request, const cha
 void VerifyValidation(int fd)
 {
     auto good = [] {
-        tenstorrent_noc_read r{};
+        tenstorrent_noc_io r{};
         r.argsz = sizeof(r);
         r.x = 0;
         r.y = 0;
@@ -143,7 +143,7 @@ void VerifyValidation(int fd)
     { auto r = good(); r.width = 8; r.addr = 4;      ExpectReadRejected(fd, r, "misaligned 8-byte"); }
 
     // The write request shares the same layout and validation.
-    tenstorrent_noc_write w{};
+    tenstorrent_noc_io w{};
     w.argsz = sizeof(w) + 1;
     w.width = 4;
     ExpectWriteRejected(fd, w, "bad argsz");
@@ -151,7 +151,7 @@ void VerifyValidation(int fd)
 
 void VerifyWormholeAddressValidation(int fd)
 {
-    tenstorrent_noc_read r{};
+    tenstorrent_noc_io r{};
     r.argsz = sizeof(r);
     r.width = 4;
     r.addr = 1ULL << 36;

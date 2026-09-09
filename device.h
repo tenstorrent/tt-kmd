@@ -103,7 +103,8 @@ struct tlb_descriptor;
 struct tenstorrent_device_class {
 	const char *name;
 	u32 instance_size;
-	u32 dma_address_bits;
+	u32 coherent_dma_bits;	// mask for dma_alloc_coherent (ALLOCATE_DMA_BUF)
+	u32 streaming_dma_bits;	// mask for dma_map_* (PIN_PAGES); must be >= coherent_dma_bits
 	u64 noc_dma_limit;
 	u64 noc_pcie_offset;
 	u32 tlb_kinds;

@@ -931,7 +931,12 @@ static int blackhole_set_power_state(struct tenstorrent_device *tt_dev, struct t
 struct tenstorrent_device_class blackhole_class = {
 	.name = "Blackhole",
 	.instance_size = sizeof(struct blackhole_device),
-	.dma_address_bits = 58,
+	// An IOVA can be used directly as a NOC address, and the upper 6 bits of
+	// a 64-bit NOC-outbound address select the PCIe outbound TLB window. An
+	// IOVA wider than 58 bits would select the wrong window and silently
+	// misdirect the DMA. Same limit for both masks.
+	.coherent_dma_bits = 58,
+	.streaming_dma_bits = 58,
 	.noc_dma_limit = (1ULL << 58) - 1,
 	.noc_pcie_offset = (4ULL << 58),
 	.tlb_kinds = 2,

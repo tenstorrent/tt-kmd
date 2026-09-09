@@ -517,17 +517,18 @@ struct tenstorrent_smc_msg {
  * robustness, which suits long-running device management and telemetry tools.
  *
  * The target endpoint is identified by NOC coordinates (@x, @y) plus a local
- * @addr. @flags is reserved for future addressing modes (e.g. hardware without
- * X/Y coordinates) and must currently be 0.
+ * @addr.
  *
  * On Keraunos, @addr is a flat 52-bit system physical address and @x, @y, and
- * @noc are unused and must be 0.
+ * @noc are unused and must be 0. Setting TENSTORRENT_NOC_FLAG_KLA instead
+ * interprets @addr as a Keraunos-local address and accesses it through a SYSIN0
+ * TLB aperture. Wormhole and Blackhole reject this flag.
  *
  * The KMD cannot validate that @addr refers to anything meaningful; it only
  * enforces that @addr is naturally aligned to @width.
  *
  * @argsz: Must be sizeof(struct tenstorrent_noc_io).
- * @flags: Reserved for future use, must be 0.
+ * @flags: Zero or TENSTORRENT_NOC_FLAG_KLA.
  * @x: X coordinate of the NOC endpoint; must be in the range 0-63.
  * @y: Y coordinate of the NOC endpoint; must be in the range 0-63.
  * @noc: NOC ID to use; must be 0 or 1.
@@ -537,9 +538,11 @@ struct tenstorrent_smc_msg {
  * @value: For NOC_READ, receives the value (zero-extended to 64 bits). For
  *         NOC_WRITE, the value to write (only the low @width bytes are used).
  */
+
 struct tenstorrent_noc_io {
 	__u32 argsz;
 	__u32 flags;
+#define TENSTORRENT_NOC_FLAG_KLA	(1 << 0)
 	__u16 x;
 	__u16 y;
 	__u8 noc;

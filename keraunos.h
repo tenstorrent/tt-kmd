@@ -12,13 +12,14 @@
 struct keraunos_device {
 	struct tenstorrent_device tt;
 
-	// Kernel-owned TLB plumbing for NOC_READ/NOC_WRITE scalar SPA access.
+	// Kernel-owned TLB plumbing for NOC_READ/NOC_WRITE scalar SPA/KLA access.
 	//
 	// bar2 maps the BAR2 control plane (TLBSysIn0), through which the
 	// pre-programmed SysIn0[2] bootstrap window lets us (re)program any
 	// TLBAppIn0 config entry. bar0_kernel_tlb maps the single 16MB BAR0
 	// window belonging to our reserved AppIn0 entry; we point that entry
-	// at the target address, then access it through this window.
+	// at the target SPA, then access it through this window. A separate
+	// reserved SysIn0 entry provides a 16KB BAR2 aperture for KLA accesses.
 	//
 	// kernel_tlb_lock serializes the program-then-access sequence.
 	u8 __iomem *bar0_kernel_tlb;

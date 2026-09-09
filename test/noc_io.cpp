@@ -131,7 +131,7 @@ void VerifyValidation(int fd)
     };
 
     { auto r = good(); r.argsz = sizeof(r) - 1;     ExpectReadRejected(fd, r, "bad argsz"); }
-    { auto r = good(); r.flags = 1;                 ExpectReadRejected(fd, r, "nonzero flags"); }
+    { auto r = good(); r.flags = 1u << 1;            ExpectReadRejected(fd, r, "unknown flags"); }
     { auto r = good(); r.reserved0[0] = 1;          ExpectReadRejected(fd, r, "nonzero reserved0"); }
     { auto r = good(); r.x = 64;                    ExpectReadRejected(fd, r, "x > 63"); }
     { auto r = good(); r.y = 64;                    ExpectReadRejected(fd, r, "y > 63"); }
@@ -149,6 +149,21 @@ void VerifyValidation(int fd)
     ExpectWriteRejected(fd, w, "bad argsz");
 }
 
+void VerifyKlaFlagRejected(int fd)
+{
+    tenstorrent_noc_io r{};
+    r.argsz = sizeof(r);
+    r.flags = TENSTORRENT_NOC_FLAG_KLA;
+    r.width = 4;
+    ExpectReadRejected(fd, r, "KLA flag on WH/BH");
+
+    tenstorrent_noc_io w{};
+    w.argsz = sizeof(w);
+    w.flags = TENSTORRENT_NOC_FLAG_KLA;
+    w.width = 4;
+    ExpectWriteRejected(fd, w, "KLA flag on WH/BH");
+}
+
 void VerifyWormholeAddressValidation(int fd)
 {
     tenstorrent_noc_io r{};
@@ -163,6 +178,7 @@ void VerifyWormhole(const EnumeratedDevice &dev)
     DevFd dev_fd(dev.path);
     int fd = dev_fd.get();
 
+    VerifyKlaFlagRejected(fd);
     VerifyWormholeAddressValidation(fd);
 
     // ARC at (0,10) and DRAM at (0,11) expose node_id registers at these
@@ -179,6 +195,8 @@ void VerifyBlackhole(const EnumeratedDevice &dev)
     DevFd dev_fd(dev.path);
     int fd = dev_fd.get();
     bool translated = is_blackhole_noc_translation_enabled(dev);
+
+    VerifyKlaFlagRejected(fd);
 
     // ARC is at (8,0) regardless of NOC translation.
     VerifyNodeId(fd, 8, 0, 0x0000000080050044ULL);

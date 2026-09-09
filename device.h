@@ -132,6 +132,8 @@ struct tenstorrent_device_class {
 	// Return 0 on success or a negative errno.
 	int (*noc_read)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, void *value, u32 width, int noc);
 	int (*noc_write)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, const void *value, u32 width, int noc);
+	int (*kla_read)(struct tenstorrent_device *ttdev, u64 addr, void *value, u32 width);
+	int (*kla_write)(struct tenstorrent_device *ttdev, u64 addr, const void *value, u32 width);
 	int (*csm_read32)(struct tenstorrent_device *ttdev, u64 addr, u32 *value);
 	int (*csm_write32)(struct tenstorrent_device *ttdev, u64 addr, u32 value);
 	int (*arc_msg_locate_queue)(struct tenstorrent_device *ttdev, u32 *queue_base, u32 *num_entries);

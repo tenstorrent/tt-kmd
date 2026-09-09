@@ -550,7 +550,8 @@ static long validate_noc_io(u32 argsz, u32 flags, u16 x, u16 y, const u8 reserve
 	if (argsz != expected_argsz)
 		return -EINVAL;
 
-	if (flags != 0 || reserved0[0] != 0 || reserved0[1] != 0)
+	if ((flags & ~TENSTORRENT_NOC_FLAG_KLA) != 0 ||
+	    reserved0[0] != 0 || reserved0[1] != 0)
 		return -EINVAL;
 
 	if (x > 63 || y > 63)
@@ -579,9 +580,6 @@ static long ioctl_noc_read(struct chardev_private *priv, struct tenstorrent_noc_
 	u64 value = 0;
 	long ret;
 
-	if (!tt_dev->dev_class->noc_read)
-		return -EOPNOTSUPP;
-
 	if (copy_from_user(&data, arg, sizeof(data)) != 0)
 		return -EFAULT;
 
@@ -590,7 +588,19 @@ static long ioctl_noc_read(struct chardev_private *priv, struct tenstorrent_noc_
 	if (ret)
 		return ret;
 
-	ret = tt_dev->dev_class->noc_read(tt_dev, data.x, data.y, data.addr, &value, data.width, data.noc);
+	if (data.flags & TENSTORRENT_NOC_FLAG_KLA) {
+		if (data.x != 0 || data.y != 0 || data.noc != 0 ||
+		    !tt_dev->dev_class->kla_read)
+			return -EINVAL;
+
+		ret = tt_dev->dev_class->kla_read(tt_dev, data.addr, &value, data.width);
+	} else {
+		if (!tt_dev->dev_class->noc_read)
+			return -EOPNOTSUPP;
+
+		ret = tt_dev->dev_class->noc_read(tt_dev, data.x, data.y, data.addr,
+						 &value, data.width, data.noc);
+	}
 	if (ret)
 		return ret;
 
@@ -608,9 +618,6 @@ static long ioctl_noc_write(struct chardev_private *priv, struct tenstorrent_noc
 	struct tenstorrent_noc_io data = {0};
 	long ret;
 
-	if (!tt_dev->dev_class->noc_write)
-		return -EOPNOTSUPP;
-
 	if (copy_from_user(&data, arg, sizeof(data)) != 0)
 		return -EFAULT;
 
@@ -620,7 +627,19 @@ static long ioctl_noc_write(struct chardev_private *priv, struct tenstorrent_noc
 		return ret;
 
 	// Only the low data.width bytes of data.value are written.
-	return tt_dev->dev_class->noc_write(tt_dev, data.x, data.y, data.addr, &data.value, data.width, data.noc);
+	if (data.flags & TENSTORRENT_NOC_FLAG_KLA) {
+		if (data.x != 0 || data.y != 0 || data.noc != 0 ||
+		    !tt_dev->dev_class->kla_write)
+			return -EINVAL;
+
+		return tt_dev->dev_class->kla_write(tt_dev, data.addr, &data.value, data.width);
+	}
+
+	if (!tt_dev->dev_class->noc_write)
+		return -EOPNOTSUPP;
+
+	return tt_dev->dev_class->noc_write(tt_dev, data.x, data.y, data.addr,
+					    &data.value, data.width, data.noc);
 }
 
 static int tenstorrent_set_aggregated_power_state_locked(struct tenstorrent_device *tt_dev)

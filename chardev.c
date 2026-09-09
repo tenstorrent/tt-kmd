@@ -572,10 +572,10 @@ static long validate_noc_io(u32 argsz, u32 flags, u16 x, u16 y, const u8 reserve
 	return 0;
 }
 
-static long ioctl_noc_read(struct chardev_private *priv, struct tenstorrent_noc_read __user *arg)
+static long ioctl_noc_read(struct chardev_private *priv, struct tenstorrent_noc_io __user *arg)
 {
 	struct tenstorrent_device *tt_dev = priv->device;
-	struct tenstorrent_noc_read data = {0};
+	struct tenstorrent_noc_io data = {0};
 	u64 value = 0;
 	long ret;
 
@@ -602,10 +602,10 @@ static long ioctl_noc_read(struct chardev_private *priv, struct tenstorrent_noc_
 	return 0;
 }
 
-static long ioctl_noc_write(struct chardev_private *priv, struct tenstorrent_noc_write __user *arg)
+static long ioctl_noc_write(struct chardev_private *priv, struct tenstorrent_noc_io __user *arg)
 {
 	struct tenstorrent_device *tt_dev = priv->device;
-	struct tenstorrent_noc_write data = {0};
+	struct tenstorrent_noc_io data = {0};
 	long ret;
 
 	if (!tt_dev->dev_class->noc_write)
@@ -932,11 +932,11 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			break;
 
 		case TENSTORRENT_IOCTL_NOC_READ:
-			ret = ioctl_noc_read(priv, (struct tenstorrent_noc_read __user *)arg);
+			ret = ioctl_noc_read(priv, (struct tenstorrent_noc_io __user *)arg);
 			break;
 
 		case TENSTORRENT_IOCTL_NOC_WRITE:
-			ret = ioctl_noc_write(priv, (struct tenstorrent_noc_write __user *)arg);
+			ret = ioctl_noc_write(priv, (struct tenstorrent_noc_io __user *)arg);
 			break;
 
 		default:

@@ -12,7 +12,7 @@ The driver registers device files named `/dev/tenstorrent/%d`, one for each enum
 
 ## Supported kernels:
 
-Linux 5.4 or later. The driver is build-tested against mainline kernel versions from 5.4 through 6.18.
+Linux 5.4 or later. The driver is build-tested against mainline kernel versions from 5.4 through 7.2.
 
 ### To install:
 

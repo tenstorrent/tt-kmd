@@ -70,10 +70,6 @@ Description: Tenstorrent kernel mode driver (DKMS)
  The module will be built automatically by DKMS when installed.
 EOF
 
-# Install udev rules
-mkdir -p "${PACKAGE_DIR}/lib/udev/rules.d"
-cp -v udev-50-tenstorrent.rules "${PACKAGE_DIR}/lib/udev/rules.d/"
-
 # Create postinst script
 cat > "${DEBIAN_DIR}/postinst" << 'EOF'
 #!/bin/sh

@@ -130,6 +130,12 @@ jobs:
           echo "ERROR: udev rule file not found at /etc/udev/rules.d/50-tenstorrent.rules"
           exit 1
         fi
+        # A misnamed udev-50-* file sorts after administrator rules such
+        # as 60-tenstorrent.rules and would override them.
+        if [ -e /lib/udev/rules.d/udev-50-tenstorrent.rules ]; then
+          echo "ERROR: misnamed udev rule file /lib/udev/rules.d/udev-50-tenstorrent.rules"
+          exit 1
+        fi
         echo "✓ udev rule installed correctly"
         
     - name: Verify package installation

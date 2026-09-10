@@ -92,10 +92,6 @@ cp -a . %{buildroot}/usr/src/${MODULE_NAME}-${RPM_VERSION}/
 # Make dkms-post-install executable
 chmod 755 %{buildroot}/usr/src/${MODULE_NAME}-${RPM_VERSION}/dkms-post-install
 
-# Install udev rules
-mkdir -p %{buildroot}/lib/udev/rules.d
-cp udev-50-tenstorrent.rules %{buildroot}/lib/udev/rules.d/
-
 %post
 # Add module to DKMS
 dkms add -m ${MODULE_NAME} -v ${RPM_VERSION} || true
@@ -153,7 +149,6 @@ fi
 
 %files
 /usr/src/${MODULE_NAME}-${RPM_VERSION}
-/lib/udev/rules.d/udev-50-tenstorrent.rules
 
 %changelog
 * $(date '+%a %b %d %Y') Tenstorrent <releases@tenstorrent.com> - ${RPM_VERSION}-1

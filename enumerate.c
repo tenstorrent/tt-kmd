@@ -42,11 +42,11 @@ static DEFINE_XARRAY_ALLOC(tenstorrent_dev_xa);
 #define PCI_SUBSYSTEM_ID_GALAXY_WH 0x0035
 #define PCI_SUBSYSTEM_ID_GALAXY_BH 0x0047
 
-static const u8 wh_galaxy_ubb_bus_prefix[GALAXY_NUM_UBBS] = { 0xC, 0x8, 0x0, 0x4 };
-static const u8 bh_galaxy_ubb_bus_prefix[GALAXY_NUM_UBBS] = { 0x0, 0x4, 0xC, 0x8 };
-
 static int galaxy_bdf_to_ordinal(struct pci_dev *pdev)
 {
+	static const u8 wh_galaxy_ubb_bus_prefix[GALAXY_NUM_UBBS] = { 0xC, 0x8, 0x0, 0x4 };
+	static const u8 bh_galaxy_ubb_bus_prefix[GALAXY_NUM_UBBS] = { 0x0, 0x4, 0xC, 0x8 };
+
 	const u8 *ubb_table;
 	u8 bus = pdev->bus->number;
 	u8 high = bus >> 4;

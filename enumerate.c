@@ -41,6 +41,7 @@ static DEFINE_XARRAY_ALLOC(tenstorrent_dev_xa);
 
 #define PCI_SUBSYSTEM_ID_GALAXY_WH 0x0035
 #define PCI_SUBSYSTEM_ID_GALAXY_BH 0x0047
+#define PCI_SUBSYSTEM_ID_GALAXY_BH_BIN6 0x0202
 
 static int galaxy_bdf_to_ordinal(struct pci_dev *pdev)
 {
@@ -58,6 +59,7 @@ static int galaxy_bdf_to_ordinal(struct pci_dev *pdev)
 		ubb_table = wh_galaxy_ubb_bus_prefix;
 		break;
 	case PCI_SUBSYSTEM_ID_GALAXY_BH:
+	case PCI_SUBSYSTEM_ID_GALAXY_BH_BIN6:
 		ubb_table = bh_galaxy_ubb_bus_prefix;
 		break;
 	default:
@@ -81,6 +83,7 @@ static bool is_galaxy(struct pci_dev *pdev)
 	{
 		case PCI_SUBSYSTEM_ID_GALAXY_WH:
 		case PCI_SUBSYSTEM_ID_GALAXY_BH:
+		case PCI_SUBSYSTEM_ID_GALAXY_BH_BIN6:
 			return true;
 
 		default:

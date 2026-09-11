@@ -75,6 +75,19 @@ static int galaxy_bdf_to_ordinal(struct pci_dev *pdev)
 	return -1;
 }
 
+static bool is_galaxy(struct pci_dev *pdev)
+{
+	switch (pdev->subsystem_device)
+	{
+		case PCI_SUBSYSTEM_ID_GALAXY_WH:
+		case PCI_SUBSYSTEM_ID_GALAXY_BH:
+			return true;
+
+		default:
+			return false;
+	}
+}
+
 #if !IS_ENABLED(CONFIG_HWMON)
 struct device *devm_hwmon_device_register_with_info(struct device *,
 	const char *, void *, const struct hwmon_chip_info *, const struct
@@ -357,7 +370,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	pci_enable_pcie_error_reporting(dev);
 
 	// HACK: Suppress hotplug for Galaxy systems.
-	if (dev->subsystem_device == PCI_SUBSYSTEM_ID_GALAXY_WH || dev->subsystem_device == PCI_SUBSYSTEM_ID_GALAXY_BH)
+	if (is_galaxy(dev))
 		pci_ignore_hotplug(dev);
 
 	pci_set_drvdata(dev, tt_dev);

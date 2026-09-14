@@ -4,7 +4,9 @@
 // Prove that a Keraunos fabric firewall can make a window of SMC SRAM
 // read-only for the host, end to end:
 //
-//   1. inspect the firewall; refuse to run unless it is in the bring-up state
+//   1. inspect the firewall; refuse to run unless it is in the bring-up
+//      state (one or two whole-address-space RW blankets, everything else
+//      unprogrammed, nothing locked)
 //   2. read a word of SMC SRAM through the path under test; require zero
 //   3. write a pattern through that path and read it back (SRAM is writable)
 //   4. carve a read-only window around the word out of the blanket filters
@@ -33,9 +35,12 @@
 // 0xDEADBEEF) are never written. A denied posted write is dropped by the
 // fabric; the PCIe controller may log an error for it.
 //
-// If the tool dies between steps 4 and 8, `--restore-only` rewrites the
-// bring-up blankets into filters 0 and 15 and clears the filters this tool
-// uses (1, 2, 13, 14).
+// Which filters hold the blankets depends on the firmware: qsr1_boot uses 0
+// and 15, the chippy validation firmware uses 0 and 1. The tool finds them,
+// shrinks them to end just below the window, and borrows unprogrammed slots
+// for the read-only window and the RW range above it. If it dies between
+// steps 4 and 8, `--restore-only` widens any shrunk blanket back to the
+// bring-up END and clears any filter whose window lies inside the SPM.
 //
 // To compile:
 //   gcc -O2 -Wall -Wextra -o keraunos_firewall_ro tools/keraunos_firewall_ro.c
@@ -83,15 +88,18 @@
 /* What bring-up writes (open_filter in qsr1_boot main.c), less the RO width. */
 #define CFG_BRINGUP_RW		(CFG_READ_EN | CFG_WRITE_EN | CFG_ADDR_MODE | \
 				 CFG_ALLOW_BURST)
-#define CFG_BRINGUP_RO		(CFG_READ_EN | CFG_ADDR_MODE | CFG_ALLOW_BURST)
 
-/* Filters this tool owns while the window is in place. */
-#define F_NS_BLANKET		0
-#define F_NS_WINDOW_RO		1
-#define F_NS_ABOVE_RW		2
-#define F_S_ABOVE_RW		13
-#define F_S_WINDOW_RO		14
-#define F_S_BLANKET		15
+/*
+ * Bits that read back regardless of what was written: data_bus_width is a
+ * read-only hardware field, and 8-byte-granular blocks force END[2:0] high.
+ */
+#define CFG_HW_BITS		CFG_BUS_WIDTH_MASK
+#define END_GRANULE_BITS	UINT64_C(0x7)
+
+/* A blanket covers at least the whole 52-bit address space. */
+#define BLANKET_MIN_END		((UINT64_C(1) << 52) - 1)
+#define BRINGUP_BLANKET_END	UINT64_C(0x00FFFFFFFFFFFFFF)
+#define MAX_BLANKETS		2
 
 #define DEFAULT_ADDR		(SMC_SPM_BASE + SMC_SPM_SIZE / 2)
 #define DEFAULT_WINDOW		UINT64_C(0x1000)
@@ -156,6 +164,11 @@ struct ctx {
 	const char *fw_name;
 	uint64_t win_lo, win_hi;	/* inclusive KLA window */
 	struct filter saved[NUM_FILTERS];
+	unsigned int nblankets;
+	unsigned int blanket[MAX_BLANKETS];	/* bring-up RW blankets */
+	unsigned int ro_slot[MAX_BLANKETS];	/* window, read-only, per blanket */
+	unsigned int above_slot[MAX_BLANKETS];	/* above window, RW, per blanket */
+	int slots_assigned;
 	int firewall_programmed;
 	int sram_dirty;
 	uint32_t sram_original;
@@ -222,12 +235,27 @@ static void fake_init(void)
 	if (fake_ready)
 		return;
 	fake_ready = 1;
+	/* As observed on the emulator under the chippy firmware. */
 	for (i = 0; i < 2; i++) {
-		fake_fw[i][0].config = CFG_BRINGUP_RW | CFG_ALLOW_NS |
-				       (UINT64_C(3) << 12);
-		fake_fw[i][0].end = UINT64_MAX;
-		fake_fw[i][15].config = CFG_BRINGUP_RW | (UINT64_C(3) << 12);
-		fake_fw[i][15].end = UINT64_MAX;
+		int j;
+
+		for (j = 0; j < NUM_FILTERS; j++)
+			fake_fw[i][j].config = UINT64_C(3) << 12;
+		fake_fw[i][0].config |= CFG_BRINGUP_RW | CFG_ALLOW_NS;
+		fake_fw[i][0].end = BRINGUP_BLANKET_END;
+		fake_fw[i][1].config |= CFG_BRINGUP_RW;
+		fake_fw[i][1].end = BRINGUP_BLANKET_END;
+	}
+	/* FAKE_CARVED=1: as left behind by a run that died after step 4. */
+	if (getenv("FAKE_CARVED")) {
+		fake_fw[0][0].end = DEFAULT_ADDR - 1;
+		fake_fw[0][1].end = DEFAULT_ADDR - 1;
+		fake_fw[0][2].config |= CFG_BRINGUP_RW & ~CFG_WRITE_EN;
+		fake_fw[0][2].start = DEFAULT_ADDR;
+		fake_fw[0][2].end = DEFAULT_ADDR + DEFAULT_WINDOW - 1;
+		fake_fw[0][3].config |= CFG_BRINGUP_RW | CFG_ALLOW_NS;
+		fake_fw[0][3].start = DEFAULT_ADDR + DEFAULT_WINDOW;
+		fake_fw[0][3].end = BRINGUP_BLANKET_END;
 	}
 }
 
@@ -302,10 +330,14 @@ static int fake_access(uint64_t addr, uint32_t flags, uint32_t *value,
 		unsigned int shift = (word & 1) * 32;
 
 		if (write) {
+			uint64_t keep = *reg & CFG_HW_BITS;	/* RO width field */
+
 			if (fake_fw[fw][idx].config & CFG_LOCKED)
 				return 0;
 			*reg = (*reg & ~(UINT64_C(0xFFFFFFFF) << shift)) |
 			       ((uint64_t)*value << shift);
+			if (word < 2)
+				*reg = (*reg & ~CFG_HW_BITS) | keep;
 		} else {
 			*value = (uint32_t)(*reg >> shift);
 		}
@@ -471,41 +503,43 @@ static void print_filter(unsigned int idx, const struct filter *f)
 	       f->config & CFG_LOCKED ? " LOCKED" : "");
 }
 
-static int is_bringup_blanket(const struct filter *f, int ns)
+/* An RW filter over (at least) the whole 52-bit space, as bring-up leaves it. */
+static int is_blanket(const struct filter *f)
 {
-	uint64_t cfg = f->config & ~CFG_BUS_WIDTH_MASK;
-
-	return cfg == (CFG_BRINGUP_RW | (ns ? CFG_ALLOW_NS : 0)) &&
-	       f->start == 0 && f->end == UINT64_MAX;
+	return (f->config & (CFG_READ_EN | CFG_WRITE_EN | CFG_ADDR_MODE)) ==
+	       (CFG_READ_EN | CFG_WRITE_EN | CFG_ADDR_MODE) &&
+	       f->start == 0 && f->end >= BLANKET_MIN_END;
 }
 
 static int is_unprogrammed(const struct filter *f)
 {
-	return !(f->config & ~CFG_BUS_WIDTH_MASK) && !f->start && !f->end;
+	return !(f->config & ~CFG_HW_BITS) && !f->start &&
+	       !(f->end & ~END_GRANULE_BITS);
+}
+
+static int filters_equal(const struct filter *a, const struct filter *b)
+{
+	return (a->config & ~CFG_HW_BITS) == (b->config & ~CFG_HW_BITS) &&
+	       a->start == b->start &&
+	       (a->end & ~END_GRANULE_BITS) == (b->end & ~END_GRANULE_BITS);
 }
 
 /* ------------------------------------------------------------------------ */
 
 static int restore_firewall(struct ctx *c)
 {
-	static const unsigned int mine[] = {
-		F_NS_WINDOW_RO, F_NS_ABOVE_RW, F_S_ABOVE_RW, F_S_WINDOW_RO
-	};
-	unsigned int i;
+	unsigned int b;
 	int rc = 0;
 
 	/* Widen the blankets first so every address is permitted again. */
-	if (fw_write64(c, F_NS_BLANKET, 0x10, c->saved[F_NS_BLANKET].end))
-		rc = -1;
-	if (fw_write64(c, F_S_BLANKET, 0x10, c->saved[F_S_BLANKET].end))
-		rc = -1;
-	for (i = 0; i < sizeof(mine) / sizeof(mine[0]); i++) {
-		if (is_unprogrammed(&c->saved[mine[i]])) {
-			if (fw_clear_filter(c, mine[i]))
-				rc = -1;
-		} else if (fw_write_filter(c, mine[i], &c->saved[mine[i]])) {
+	for (b = 0; b < c->nblankets; b++)
+		if (fw_write64(c, c->blanket[b], 0x10, c->saved[c->blanket[b]].end))
 			rc = -1;
-		}
+	for (b = 0; b < c->nblankets; b++) {
+		if (fw_clear_filter(c, c->ro_slot[b]))
+			rc = -1;
+		if (fw_clear_filter(c, c->above_slot[b]))
+			rc = -1;
 	}
 	if (!rc)
 		c->firewall_programmed = 0;
@@ -524,7 +558,7 @@ static int verify_firewall_restored(struct ctx *c)
 
 		if (fw_read_filter(c, i, &f))
 			return -1;
-		if (memcmp(&f, &c->saved[i], sizeof(f))) {
+		if (!filters_equal(&f, &c->saved[i])) {
 			printf("      filter %u differs from the saved state:\n", i);
 			print_filter(i, &f);
 			mismatches++;
@@ -585,71 +619,106 @@ static int read_both(struct ctx *c, uint32_t *via_app, uint32_t *via_sys)
 	return rd32(c, PATH_SYS, path_addr(PATH_SYS, c->opt.addr), via_sys);
 }
 
+/*
+ * Read every filter, find the bring-up blankets, and pick unprogrammed slots
+ * for the window filters. Returns the number of problems found (0 = clean),
+ * or -1 on an I/O error.
+ */
 static int inspect_firewall(struct ctx *c)
 {
-	unsigned int i;
-	int problems = 0;
+	unsigned int free_slot[NUM_FILTERS];
+	unsigned int i, nfree = 0, needed;
+	int problems = 0, locked = 0;
 
+	c->nblankets = 0;
 	for (i = 0; i < NUM_FILTERS; i++) {
 		if (fw_read_filter(c, i, &c->saved[i]))
 			return -1;
-		if (c->saved[i].config & CFG_LOCKED) {
-			printf("      filter %u is locked; nothing can be "
-			       "changed on this firewall\n", i);
-			problems++;
-		}
+		if (c->saved[i].config & CFG_LOCKED)
+			locked++;
 	}
-	print_filter(F_NS_BLANKET, &c->saved[F_NS_BLANKET]);
-	print_filter(F_S_BLANKET, &c->saved[F_S_BLANKET]);
-	if (!is_bringup_blanket(&c->saved[F_NS_BLANKET], 1)) {
-		printf("      filter 0 is not the bring-up non-secure blanket\n");
-		problems++;
-	}
-	if (!is_bringup_blanket(&c->saved[F_S_BLANKET], 0)) {
-		printf("      filter 15 is not the bring-up secure-only blanket\n");
-		problems++;
-	}
-	for (i = 1; i < NUM_FILTERS - 1; i++) {
-		if (is_unprogrammed(&c->saved[i]))
+	for (i = 0; i < NUM_FILTERS; i++) {
+		const struct filter *f = &c->saved[i];
+
+		if (is_unprogrammed(f)) {
+			free_slot[nfree++] = i;
 			continue;
-		print_filter(i, &c->saved[i]);
-		if (i == F_NS_WINDOW_RO || i == F_NS_ABOVE_RW ||
-		    i == F_S_ABOVE_RW || i == F_S_WINDOW_RO) {
-			printf("      filter %u is in use; this tool needs it\n", i);
+		}
+		print_filter(i, f);
+		if (is_blanket(f) && c->nblankets < MAX_BLANKETS) {
+			c->blanket[c->nblankets++] = i;
+		} else {
+			printf("      filter %u is neither a bring-up blanket nor "
+			       "unprogrammed\n", i);
 			problems++;
 		}
+	}
+	if (locked) {
+		printf("      %d filter(s) locked; nothing can be changed on "
+		       "this firewall\n", locked);
+		problems++;
+	}
+	if (!c->nblankets) {
+		printf("      no RW blanket found; this is not the bring-up state\n");
+		problems++;
+	}
+	needed = 2 * c->nblankets;
+	if (nfree < needed) {
+		printf("      need %u unprogrammed filters, found %u\n",
+		       needed, nfree);
+		problems++;
+	} else {
+		for (i = 0; i < c->nblankets; i++) {
+			c->ro_slot[i] = free_slot[2 * i];
+			c->above_slot[i] = free_slot[2 * i + 1];
+		}
+		c->slots_assigned = 1;
+	}
+	if (!problems) {
+		printf("      blankets:");
+		for (i = 0; i < c->nblankets; i++)
+			printf(" #%u (%s)", c->blanket[i],
+			       c->saved[c->blanket[i]].config & CFG_ALLOW_NS ?
+				       "ns" : "S");
+		printf("; will use");
+		for (i = 0; i < c->nblankets; i++)
+			printf(" #%u/#%u", c->ro_slot[i], c->above_slot[i]);
+		printf(" for the window\n");
 	}
 	return problems;
 }
 
 static int carve_window(struct ctx *c)
 {
-	struct filter f;
+	unsigned int b;
 
-	/* Additive filters first: read-only window, RW above the window. */
-	f.start = c->win_lo;
-	f.end = c->win_hi;
-	f.config = CFG_BRINGUP_RO | CFG_ALLOW_NS;
-	if (fw_write_filter(c, F_NS_WINDOW_RO, &f))
-		return -1;
-	f.config = CFG_BRINGUP_RO;
-	if (fw_write_filter(c, F_S_WINDOW_RO, &f))
-		return -1;
+	/*
+	 * Additive filters first: for each blanket, a read-only copy over the
+	 * window and an RW copy above it, same attributes (allow_ns, burst).
+	 */
+	for (b = 0; b < c->nblankets; b++) {
+		const struct filter *blanket = &c->saved[c->blanket[b]];
+		struct filter f;
 
-	f.start = c->win_hi + 1;
-	f.end = UINT64_MAX;
-	f.config = CFG_BRINGUP_RW | CFG_ALLOW_NS;
-	if (fw_write_filter(c, F_NS_ABOVE_RW, &f))
-		return -1;
-	f.config = CFG_BRINGUP_RW;
-	if (fw_write_filter(c, F_S_ABOVE_RW, &f))
-		return -1;
+		f.config = (blanket->config & ~CFG_HW_BITS) & ~CFG_WRITE_EN;
+		f.start = c->win_lo;
+		f.end = c->win_hi;
+		if (fw_write_filter(c, c->ro_slot[b], &f))
+			return -1;
+
+		f.config = blanket->config & ~CFG_HW_BITS;
+		f.start = c->win_hi + 1;
+		f.end = blanket->end;
+		if (fw_write_filter(c, c->above_slot[b], &f))
+			return -1;
+	}
 
 	/* Now the blankets stop below the window. Only END changes. */
 	c->firewall_programmed = 1;
-	if (fw_write64(c, F_NS_BLANKET, 0x10, c->win_lo - 1))
-		return -1;
-	return fw_write64(c, F_S_BLANKET, 0x10, c->win_lo - 1);
+	for (b = 0; b < c->nblankets; b++)
+		if (fw_write64(c, c->blanket[b], 0x10, c->win_lo - 1))
+			return -1;
+	return 0;
 }
 
 static int dump_firewall(struct ctx *c)
@@ -696,19 +765,23 @@ static int run_test(struct ctx *c)
 	rc = inspect_firewall(c);
 	if (rc < 0)
 		return 3;
-	if (rc && !c->opt.force) {
-		printf("      refusing to continue (use --force to override "
-		       "the blanket/unused checks, never the lock)\n");
-		return 2;
-	}
 	if (rc) {
 		unsigned int i;
 
+		/* Locks and missing slots cannot be forced past. */
 		for (i = 0; i < NUM_FILTERS; i++)
 			if (c->saved[i].config & CFG_LOCKED)
 				return 2;
+		if (!c->nblankets || !c->slots_assigned)
+			return 2;
+		if (!c->opt.force) {
+			printf("      refusing to continue (--force overrides "
+			       "the extra-filter check only)\n");
+			return 2;
+		}
 	}
-	verdict(c, 1, "filters 0 and 15 are blankets, 1/2/13/14 free, nothing locked");
+	verdict(c, 1, "%u blanket(s), %u free slots, nothing locked",
+		c->nblankets, 2 * c->nblankets);
 
 	step(2, "read the test word through both paths (must be zero)");
 	if (read_both(c, &via_app, &via_sys))
@@ -749,7 +822,7 @@ static int run_test(struct ctx *c)
 		return 3;
 	if (dump_firewall(c))
 		return 3;
-	verdict(c, 1, "window programmed (filters 0,15 shrunk; 1,2,13,14 added)");
+	verdict(c, 1, "window programmed (blankets shrunk, window filters added)");
 
 	step(5, "write pattern B through the gated path (should be dropped)");
 	if (wr32(c, gated, gated_addr, PATTERN_B))
@@ -831,34 +904,53 @@ restore_sram:
 	return c->failures ? 1 : 0;
 }
 
+/*
+ * Recovery without saved state. A shrunk blanket is an RW filter from 0 to
+ * somewhere inside the SPM; widen it to the bring-up END. Anything that
+ * starts inside the SPM was placed by this tool; clear it. Everything else
+ * is left alone and reported.
+ */
 static int run_restore_only(struct ctx *c)
 {
-	unsigned int i;
+	uint64_t spm_end = SMC_SPM_BASE + SMC_SPM_SIZE;
+	unsigned int i, widened = 0, cleared = 0;
 
 	printf("Restoring %s to the bring-up state\n", c->fw_name);
 	for (i = 0; i < NUM_FILTERS; i++) {
 		if (fw_read_filter(c, i, &c->saved[i]))
 			return 3;
-		if (!is_unprogrammed(&c->saved[i]))
-			print_filter(i, &c->saved[i]);
 		if (c->saved[i].config & CFG_LOCKED) {
+			print_filter(i, &c->saved[i]);
 			printf("filter %u is locked; cannot restore\n", i);
 			return 2;
 		}
 	}
-	memset(c->saved, 0, sizeof(c->saved));
-	c->saved[F_NS_BLANKET].config = CFG_BRINGUP_RW | CFG_ALLOW_NS;
-	c->saved[F_NS_BLANKET].end = UINT64_MAX;
-	c->saved[F_S_BLANKET].config = CFG_BRINGUP_RW;
-	c->saved[F_S_BLANKET].end = UINT64_MAX;
-	if (fw_write_filter(c, F_NS_BLANKET, &c->saved[F_NS_BLANKET]))
-		return 3;
-	if (fw_write_filter(c, F_S_BLANKET, &c->saved[F_S_BLANKET]))
-		return 3;
-	if (fw_clear_filter(c, F_NS_WINDOW_RO) || fw_clear_filter(c, F_NS_ABOVE_RW) ||
-	    fw_clear_filter(c, F_S_ABOVE_RW) || fw_clear_filter(c, F_S_WINDOW_RO))
-		return 3;
-	printf("Now:\n");
+	for (i = 0; i < NUM_FILTERS; i++) {
+		const struct filter *f = &c->saved[i];
+		int rw = (f->config & (CFG_READ_EN | CFG_WRITE_EN)) ==
+			 (CFG_READ_EN | CFG_WRITE_EN);
+
+		if (is_unprogrammed(f))
+			continue;
+		print_filter(i, f);
+		if (rw && f->start == 0 && f->end + 1 >= SMC_SPM_BASE &&
+		    f->end < spm_end) {
+			printf("      -> shrunk blanket; widening END to "
+			       "0x%016llX\n",
+			       (unsigned long long)BRINGUP_BLANKET_END);
+			if (fw_write64(c, i, 0x10, BRINGUP_BLANKET_END))
+				return 3;
+			widened++;
+		} else if (f->start >= SMC_SPM_BASE && f->start < spm_end) {
+			printf("      -> window filter; clearing\n");
+			if (fw_clear_filter(c, i))
+				return 3;
+			cleared++;
+		} else {
+			printf("      -> left alone\n");
+		}
+	}
+	printf("Widened %u, cleared %u. Now:\n", widened, cleared);
 	if (dump_firewall(c))
 		return 3;
 	return 0;

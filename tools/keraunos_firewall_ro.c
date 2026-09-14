@@ -73,6 +73,7 @@
 #define SMC_SPM_TOP_RESERVED	UINT64_C(0x00010000)	/* fw_params, uRP, log */
 
 #define HSIO0_PCIE_FW_BASE	UINT64_C(0x23021000)
+#define HSIO0_NOC2AXI_FW_BASE	UINT64_C(0x23020000)
 #define PCIE_MGMT_SMN_FW_BASE	UINT64_C(0x18050000)
 #define FILTER_STRIDE		UINT64_C(0x20)
 #define NUM_FILTERS		16
@@ -168,6 +169,7 @@ struct options {
 	int force;
 	int dry_run;
 	int keep;
+	int regs_noc2axi;	/* program the block labelled noc2axi instead */
 	int restore_only;
 	int verbose;
 };
@@ -234,15 +236,25 @@ static int dev_write32(int fd, uint64_t addr, uint32_t flags, uint32_t value)
 }
 #else
 /*
- * Fake device: 1 MiB of SPM, two firewalls in bring-up state, lowest-index
- * precedence, allow_ns=0 filters ignore non-secure (PCIe) traffic. The APP
- * path is gated by the HSIO0 firewall, the SYS path by the PCIe mgmt one.
- * FAKE_LEAKY=1 in the environment makes the HSIO0 firewall ignore write_en,
- * to exercise the failure reporting.
+ * Fake device: 1 MiB of SPM, three firewall register blocks in bring-up
+ * state, lowest-index precedence, allow_ns=0 filters ignore non-secure
+ * (PCIe) traffic. As in the netlist, the APP path is gated by the block
+ * labelled noc2axi (FAKE_APP_BLOCK=pcie moves it to the pcie block); the
+ * SYS path is gated by the PCIe mgmt block. FAKE_LEAKY=1 makes the APP
+ * block ignore write_en, to exercise the failure reporting.
  */
+enum { FAKE_PCIE, FAKE_SMN, FAKE_NOC2AXI, FAKE_BLOCKS };
+
 static uint32_t fake_spm[SMC_SPM_SIZE / 4];
-static struct filter fake_fw[2][NUM_FILTERS];
+static struct filter fake_fw[FAKE_BLOCKS][NUM_FILTERS];
 static int fake_ready;
+
+static int fake_app_block(void)
+{
+	const char *b = getenv("FAKE_APP_BLOCK");
+
+	return b && !strcmp(b, "pcie") ? FAKE_PCIE : FAKE_NOC2AXI;
+}
 
 static void fake_init(void)
 {
@@ -252,7 +264,7 @@ static void fake_init(void)
 		return;
 	fake_ready = 1;
 	/* As observed on the emulator under the chippy firmware. */
-	for (i = 0; i < 2; i++) {
+	for (i = 0; i < FAKE_BLOCKS; i++) {
 		int j;
 
 		for (j = 0; j < NUM_FILTERS; j++)
@@ -264,30 +276,36 @@ static void fake_init(void)
 	}
 	/* FAKE_CARVED=1: as left behind by a run that died after step 4. */
 	if (getenv("FAKE_CARVED")) {
-		fake_fw[0][0].end = DEFAULT_ADDR - 1;
-		fake_fw[0][1].end = DEFAULT_ADDR - 1;
-		fake_fw[0][2].config |= CFG_BRINGUP_RW & ~CFG_WRITE_EN;
-		fake_fw[0][2].start = DEFAULT_ADDR;
-		fake_fw[0][2].end = DEFAULT_ADDR + DEFAULT_WINDOW - 1;
-		fake_fw[0][3].config |= CFG_BRINGUP_RW | CFG_ALLOW_NS;
-		fake_fw[0][3].start = DEFAULT_ADDR + DEFAULT_WINDOW;
-		fake_fw[0][3].end = BRINGUP_BLANKET_END;
+		struct filter *fw = fake_fw[FAKE_PCIE];
+
+		fw[0].end = DEFAULT_ADDR - 1;
+		fw[1].end = DEFAULT_ADDR - 1;
+		fw[2].config |= CFG_BRINGUP_RW & ~CFG_WRITE_EN;
+		fw[2].start = DEFAULT_ADDR;
+		fw[2].end = DEFAULT_ADDR + DEFAULT_WINDOW - 1;
+		fw[3].config |= CFG_BRINGUP_RW | CFG_ALLOW_NS;
+		fw[3].start = DEFAULT_ADDR + DEFAULT_WINDOW;
+		fw[3].end = BRINGUP_BLANKET_END;
 	}
 }
+
+static const uint64_t fake_base[FAKE_BLOCKS] = {
+	[FAKE_PCIE] = HSIO0_PCIE_FW_BASE,
+	[FAKE_SMN] = PCIE_MGMT_SMN_FW_BASE,
+	[FAKE_NOC2AXI] = HSIO0_NOC2AXI_FW_BASE,
+};
 
 static int fake_fw_index(uint64_t kla, unsigned int *idx, unsigned int *word)
 {
 	int which;
 
-	if (kla >= HSIO0_PCIE_FW_BASE &&
-	    kla < HSIO0_PCIE_FW_BASE + NUM_FILTERS * FILTER_STRIDE)
-		which = 0;
-	else if (kla >= PCIE_MGMT_SMN_FW_BASE &&
-		 kla < PCIE_MGMT_SMN_FW_BASE + NUM_FILTERS * FILTER_STRIDE)
-		which = 1;
-	else
+	for (which = 0; which < FAKE_BLOCKS; which++)
+		if (kla >= fake_base[which] &&
+		    kla < fake_base[which] + NUM_FILTERS * FILTER_STRIDE)
+			break;
+	if (which == FAKE_BLOCKS)
 		return -1;
-	kla -= which ? PCIE_MGMT_SMN_FW_BASE : HSIO0_PCIE_FW_BASE;
+	kla -= fake_base[which];
 	*idx = (unsigned int)(kla / FILTER_STRIDE);
 	*word = (unsigned int)((kla % FILTER_STRIDE) / 4);
 	return which;
@@ -305,18 +323,19 @@ static uint64_t *fake_fw_reg(int which, unsigned int idx, unsigned int word)
 }
 
 /*
- * FAKE_LEAKY=1: write_en ignored on the HSIO0 firewall.
- * FAKE_INERT=1: the HSIO0 firewall never blocks anything.
- * FAKE_DOMAIN=spa: the HSIO0 firewall compares the pre-fold SPA.
+ * FAKE_LEAKY=1: write_en ignored on the APP block.
+ * FAKE_INERT=1: the APP block never blocks anything.
+ * FAKE_DOMAIN=spa: the APP block compares the pre-fold SPA.
  */
 static int fake_permits(int which, uint64_t kla, int write)
 {
 	uint64_t addr = kla;
+	int app = which != FAKE_SMN;
 	int i;
 
-	if (which == 0 && getenv("FAKE_INERT"))
+	if (app && getenv("FAKE_INERT"))
 		return 1;
-	if (which == 0 && getenv("FAKE_DOMAIN") &&
+	if (app && getenv("FAKE_DOMAIN") &&
 	    !strcmp(getenv("FAKE_DOMAIN"), "spa"))
 		addr = SMC_SPA_BASE + (kla - SMC_KLA_BASE);
 	for (i = 0; i < NUM_FILTERS; i++) {
@@ -327,7 +346,7 @@ static int fake_permits(int which, uint64_t kla, int write)
 			continue;
 		if (!(f->config & CFG_ALLOW_NS))
 			continue;	/* PCIe traffic is non-secure */
-		if (which == 0 && getenv("FAKE_LEAKY"))
+		if (app && getenv("FAKE_LEAKY"))
 			return 1;
 		return write ? !!(f->config & CFG_WRITE_EN) :
 			       !!(f->config & CFG_READ_EN);
@@ -338,13 +357,14 @@ static int fake_permits(int which, uint64_t kla, int write)
 static int fake_access(uint64_t addr, uint32_t flags, uint32_t *value,
 		       int write)
 {
-	int which = flags & TENSTORRENT_NOC_FLAG_KLA ? 1 : 0;
+	int sys = !!(flags & TENSTORRENT_NOC_FLAG_KLA);
+	int which = sys ? FAKE_SMN : fake_app_block();
 	uint64_t kla;
 	unsigned int idx, word;
 	int fw;
 
 	fake_init();
-	if (which == 0) {
+	if (!sys) {
 		if (addr < SMC_SPA_BASE || addr >= SMC_SPA_BASE + SMC_SIZE)
 			return -EIO;	/* fake models only the SMC block on APP */
 		kla = SMC_KLA_BASE + (addr - SMC_SPA_BASE);
@@ -905,10 +925,16 @@ static int run_test(struct ctx *c)
 			verdict(c, 0, "unexpected value 0x%08X on %s", o,
 				path_name(other));
 
+		/*
+		 * A refused read comes back as all-ones (error completion on
+		 * the host side) or zero (measured on Mimir's ITN instance).
+		 * The patterns are neither.
+		 */
 		if (c->opt.mode == MODE_RO) {
-			if (g == UINT32_MAX)
-				verdict(c, 0, "read through %s denied: the read-only "
-					"filter did not match either", path_name(gated));
+			if (g == UINT32_MAX || g == 0)
+				verdict(c, 0, "read through %s denied (0x%08X): the "
+					"read-only filter did not match either",
+					path_name(gated), g);
 			else if (g != o)
 				verdict(c, 0, "paths disagree (gated 0x%08X, other "
 					"0x%08X)", g, o);
@@ -916,14 +942,16 @@ static int run_test(struct ctx *c)
 				verdict(c, 1, "read through %s still works",
 					path_name(gated));
 		} else {
-			if (g == UINT32_MAX && c->opt.mode == MODE_DENY_ALL)
-				verdict(c, 1, "read through %s denied: the firewall "
-					"gates this path", path_name(gated));
-			else if (g == UINT32_MAX)
-				verdict(c, 1, "read through %s denied: the firewall "
-					"gates this path and the address it compares "
-					"is at or above the %s window start",
-					path_name(gated), domain_name(c->opt.domain));
+			int denied = g == UINT32_MAX || g == 0;
+
+			if (denied && c->opt.mode == MODE_DENY_ALL)
+				verdict(c, 1, "read through %s denied (0x%08X): the "
+					"firewall gates this path", path_name(gated), g);
+			else if (denied)
+				verdict(c, 1, "read through %s denied (0x%08X): the "
+					"firewall gates this path and the address it "
+					"compares is at or above the %s window start",
+					path_name(gated), g, domain_name(c->opt.domain));
 			else
 				verdict(c, 0, "read through %s not denied (0x%08X): "
 					"the address the firewall compares is below "
@@ -1089,6 +1117,11 @@ static void usage(const char *prog)
 		"  -w, --window SIZE     read-only window size, power of two >= 4 (default 0x1000)\n"
 		"  -g, --gate app|sys    which path the firewall gates: app = BAR0 via\n"
 		"                        hsio0-pcie (default), sys = BAR2 via pcie-smn\n"
+		"  -r, --regs pcie|noc2axi\n"
+		"                        which HSIO0 register block to program: the one the\n"
+		"                        RDL labels pcie (0x2302_1000, default) or noc2axi\n"
+		"                        (0x2302_0000). The netlist feeds BAR0 traffic to the\n"
+		"                        unit named noc2axi_iniu_firewall.\n"
 		"  -d, --domain kla|spa  program the window as the post-remap KLA\n"
 		"                        (default) or the pre-remap SPA\n"
 		"  -m, --mode MODE       ro (default): read-only window, RW above it\n"
@@ -1134,6 +1167,16 @@ static int parse_options(int argc, char **argv, struct options *o)
 				o->gated = PATH_APP;
 			else if (!strcmp(argv[i], "sys"))
 				o->gated = PATH_SYS;
+			else
+				return -1;
+		} else if (!strcmp(arg, "-r") || !strcmp(arg, "--regs")) {
+			if (i + 1 >= argc)
+				return -1;
+			i++;
+			if (!strcmp(argv[i], "pcie"))
+				o->regs_noc2axi = 0;
+			else if (!strcmp(argv[i], "noc2axi"))
+				o->regs_noc2axi = 1;
 			else
 				return -1;
 		} else if (!strcmp(arg, "-d") || !strcmp(arg, "--domain")) {
@@ -1244,9 +1287,18 @@ int main(int argc, char **argv)
 	}
 
 	if (c.opt.gated == PATH_APP) {
-		c.fw_base = HSIO0_PCIE_FW_BASE;
-		c.fw_name = "hsio0-pcie";
+		if (c.opt.regs_noc2axi) {
+			c.fw_base = HSIO0_NOC2AXI_FW_BASE;
+			c.fw_name = "hsio0-noc2axi";
+		} else {
+			c.fw_base = HSIO0_PCIE_FW_BASE;
+			c.fw_name = "hsio0-pcie";
+		}
 	} else {
+		if (c.opt.regs_noc2axi) {
+			fprintf(stderr, "--regs noc2axi only applies to --gate app\n");
+			return 2;
+		}
 		c.fw_base = PCIE_MGMT_SMN_FW_BASE;
 		c.fw_name = "pcie-smn";
 	}

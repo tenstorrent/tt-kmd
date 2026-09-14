@@ -18,11 +18,13 @@
 #include <linux/dma-buf.h>
 #include <linux/module.h>
 #include <linux/dma-resv.h>
+#include <linux/capability.h>
 
 #include "chardev_private.h"
 #include "device.h"
 #include "memory.h"
 #include "ioctl.h"
+#include "module.h"
 #include "sg_helpers.h"
 #include "tlb.h"
 
@@ -1506,6 +1508,10 @@ static int map_pci_bar(struct chardev_private *priv, struct vm_area_struct *vma,
 	resource_size_t bar_len = pci_resource_len(pdev, bar);
 	struct tenstorrent_mmap_vma *mmap_vma;
 	int ret;
+
+	// Restrict Keraunos BAR2 mmaps to privileged users.
+	if (bar == 2 && priv->device->dev_class == &keraunos_class && !capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	mmap_vma = kzalloc(sizeof(*mmap_vma), GFP_KERNEL);
 	if (!mmap_vma)

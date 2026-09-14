@@ -19,9 +19,10 @@
 //   +0x08  START_ADDR     (64-bit)
 //   +0x10  END_ADDR       (64-bit)
 //
-// Reset state is all zero, which is deny-all. Bring-up opens filter 0
-// (non-secure allowed) and filter 15 (secure only) across the whole address
-// space on every HSIO/SMN/PCIe firewall, and filters 0/1 on the SMC and SEP.
+// Reset state is deny-all. Bring-up opens two blankets across the whole
+// address space on every firewall, one allowing non-secure and one secure
+// only: qsr1_boot uses filters 0 and 15 with END all-ones, the chippy
+// validation firmware uses filters 0 and 1 with END 0x00FF_FFFF_FFFF_FFFF.
 //
 // Semantics that the register model does not pin down and that this tool
 // therefore reports without deciding: whether END_ADDR is inclusive (bring-up
@@ -293,7 +294,14 @@ static void fake_init(void)
 	memset(fake, 0, sizeof(fake));
 	for (fw = 0; fw < firewall_count; fw++) {
 		const struct firewall_desc *d = &firewalls[fw];
+		unsigned int i;
 
+		/* Read-only width field, and END[2:0] high on the SMC block. */
+		for (i = 0; i < d->filters; i++) {
+			fake[fw][i].config = UINT64_C(3) << CFG_BUS_WIDTH_SHIFT;
+			if (!strcmp(d->name, "smc-in"))
+				fake[fw][i].end = 7;
+		}
 		if (!strcmp(d->name, "smc-in") || !strcmp(d->name, "sep-in")) {
 			fake_open(fw, 0, 0, UINT64_C(0xFFFFFFFFFFFFFF),
 				  CFG_READ_EN | CFG_WRITE_EN, 0);
@@ -544,17 +552,21 @@ static int read_one(int fd, uint64_t addr, uint32_t *value)
 	return 0;
 }
 
+/*
+ * A filter nobody has written still reads back non-zero: data_bus_width is
+ * a read-only hardware field (0x3000 or 0x4000), and blocks with 8-byte
+ * granularity read END's low three bits as ones. Neither means anything.
+ */
+#define CFG_HW_BITS		(CFG_BUS_WIDTH_MASK << CFG_BUS_WIDTH_SHIFT)
+#define END_GRANULE_BITS	UINT64_C(0x7)
+
 static void decode_filter(struct filter *f)
 {
-	unsigned int w;
-
 	f->config = ((uint64_t)f->raw[1] << 32) | f->raw[0];
 	f->start = ((uint64_t)f->raw[3] << 32) | f->raw[2];
 	f->end = ((uint64_t)f->raw[5] << 32) | f->raw[4];
-	f->programmed = 0;
-	for (w = 0; w < WORDS_PER_FILTER; w++)
-		if (f->raw[w])
-			f->programmed = 1;
+	f->programmed = (f->config & ~CFG_HW_BITS) || f->start ||
+			(f->end & ~END_GRANULE_BITS);
 }
 
 static int read_firewall(int fd, const struct firewall_desc *desc,

@@ -268,8 +268,8 @@ describe_package_spa(uint64_t addr)
 typedef int (*addrmap_read32_fn)(int fd, uint64_t addr, uint32_t flags,
 				 uint32_t *value);
 
-static int read_pcie_remap_table(int fd, int via_spa,
-				 addrmap_read32_fn read_word,
+static __attribute__((unused)) int
+read_pcie_remap_table(int fd, int via_spa, addrmap_read32_fn read_word,
 				 struct raw_entry table[ENTRY_COUNT],
 				 uint64_t *failed_addr)
 {
@@ -293,8 +293,9 @@ static int read_pcie_remap_table(int fd, int via_spa,
 	return 0;
 }
 
-static void decode_table(const struct raw_entry raw[ENTRY_COUNT],
-			 struct remap_entry table[ENTRY_COUNT])
+static __attribute__((unused)) void
+decode_table(const struct raw_entry raw[ENTRY_COUNT],
+	     struct remap_entry table[ENTRY_COUNT])
 {
 	int i;
 
@@ -310,8 +311,8 @@ static void decode_table(const struct raw_entry raw[ENTRY_COUNT],
 	}
 }
 
-static int first_matching_entry(const struct remap_entry table[ENTRY_COUNT],
-				uint64_t spa)
+static __attribute__((unused)) int
+first_matching_entry(const struct remap_entry table[ENTRY_COUNT], uint64_t spa)
 {
 	int i;
 

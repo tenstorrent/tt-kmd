@@ -146,10 +146,25 @@ struct filter {
 	uint64_t end;
 };
 
+/* Which address form the window is programmed in. */
+enum domain {
+	DOMAIN_KLA,	/* post-PCIE_REMAP, 0x0806_xxxx */
+	DOMAIN_SPA	/* pre-PCIE_REMAP, 0x12_0206_xxxx */
+};
+
+/* What is programmed in step 4. */
+enum mode {
+	MODE_RO,	/* read-only window, RW above; the real test */
+	MODE_DENY_ABOVE,/* blankets shrunk only: everything >= window denied */
+	MODE_DENY_ALL	/* blankets cover address 0 only */
+};
+
 struct options {
 	uint64_t addr;		/* KLA of the test word */
 	uint64_t window;	/* size of the read-only window */
 	enum path gated;	/* path the firewall under test gates */
+	enum domain domain;
+	enum mode mode;
 	int force;
 	int dry_run;
 	int keep;
@@ -163,6 +178,7 @@ struct ctx {
 	uint64_t fw_base;
 	const char *fw_name;
 	uint64_t win_lo, win_hi;	/* inclusive KLA window */
+	uint64_t fw_lo, fw_hi;		/* the same window as the firewall sees it */
 	struct filter saved[NUM_FILTERS];
 	unsigned int nblankets;
 	unsigned int blanket[MAX_BLANKETS];	/* bring-up RW blankets */
@@ -288,15 +304,26 @@ static uint64_t *fake_fw_reg(int which, unsigned int idx, unsigned int word)
 	}
 }
 
+/*
+ * FAKE_LEAKY=1: write_en ignored on the HSIO0 firewall.
+ * FAKE_INERT=1: the HSIO0 firewall never blocks anything.
+ * FAKE_DOMAIN=spa: the HSIO0 firewall compares the pre-fold SPA.
+ */
 static int fake_permits(int which, uint64_t kla, int write)
 {
+	uint64_t addr = kla;
 	int i;
 
+	if (which == 0 && getenv("FAKE_INERT"))
+		return 1;
+	if (which == 0 && getenv("FAKE_DOMAIN") &&
+	    !strcmp(getenv("FAKE_DOMAIN"), "spa"))
+		addr = SMC_SPA_BASE + (kla - SMC_KLA_BASE);
 	for (i = 0; i < NUM_FILTERS; i++) {
 		const struct filter *f = &fake_fw[which][i];
 
-		if (!(f->config & CFG_ADDR_MODE) || kla < f->start ||
-		    kla > f->end)
+		if (!(f->config & CFG_ADDR_MODE) || addr < f->start ||
+		    addr > f->end)
 			continue;
 		if (!(f->config & CFG_ALLOW_NS))
 			continue;	/* PCIe traffic is non-secure */
@@ -535,11 +562,13 @@ static int restore_firewall(struct ctx *c)
 	for (b = 0; b < c->nblankets; b++)
 		if (fw_write64(c, c->blanket[b], 0x10, c->saved[c->blanket[b]].end))
 			rc = -1;
-	for (b = 0; b < c->nblankets; b++) {
-		if (fw_clear_filter(c, c->ro_slot[b]))
-			rc = -1;
-		if (fw_clear_filter(c, c->above_slot[b]))
-			rc = -1;
+	if (c->opt.mode == MODE_RO) {
+		for (b = 0; b < c->nblankets; b++) {
+			if (fw_clear_filter(c, c->ro_slot[b]))
+				rc = -1;
+			if (fw_clear_filter(c, c->above_slot[b]))
+				rc = -1;
+		}
 	}
 	if (!rc)
 		c->firewall_programmed = 0;
@@ -690,35 +719,54 @@ static int inspect_firewall(struct ctx *c)
 
 static int carve_window(struct ctx *c)
 {
+	uint64_t blanket_end;
 	unsigned int b;
 
 	/*
-	 * Additive filters first: for each blanket, a read-only copy over the
-	 * window and an RW copy above it, same attributes (allow_ns, burst).
+	 * MODE_RO: additive filters first. For each blanket, a read-only copy
+	 * over the window and an RW copy above it, same attributes (allow_ns,
+	 * burst). The deny modes program no window filters at all.
 	 */
-	for (b = 0; b < c->nblankets; b++) {
-		const struct filter *blanket = &c->saved[c->blanket[b]];
-		struct filter f;
+	if (c->opt.mode == MODE_RO) {
+		for (b = 0; b < c->nblankets; b++) {
+			const struct filter *blanket = &c->saved[c->blanket[b]];
+			struct filter f;
 
-		f.config = (blanket->config & ~CFG_HW_BITS) & ~CFG_WRITE_EN;
-		f.start = c->win_lo;
-		f.end = c->win_hi;
-		if (fw_write_filter(c, c->ro_slot[b], &f))
-			return -1;
+			f.config = (blanket->config & ~CFG_HW_BITS) & ~CFG_WRITE_EN;
+			f.start = c->fw_lo;
+			f.end = c->fw_hi;
+			if (fw_write_filter(c, c->ro_slot[b], &f))
+				return -1;
 
-		f.config = blanket->config & ~CFG_HW_BITS;
-		f.start = c->win_hi + 1;
-		f.end = blanket->end;
-		if (fw_write_filter(c, c->above_slot[b], &f))
-			return -1;
+			f.config = blanket->config & ~CFG_HW_BITS;
+			f.start = c->fw_hi + 1;
+			f.end = blanket->end;
+			if (fw_write_filter(c, c->above_slot[b], &f))
+				return -1;
+		}
 	}
 
 	/* Now the blankets stop below the window. Only END changes. */
+	blanket_end = c->opt.mode == MODE_DENY_ALL ? 0 : c->fw_lo - 1;
 	c->firewall_programmed = 1;
 	for (b = 0; b < c->nblankets; b++)
-		if (fw_write64(c, c->blanket[b], 0x10, c->win_lo - 1))
+		if (fw_write64(c, c->blanket[b], 0x10, blanket_end))
 			return -1;
 	return 0;
+}
+
+static const char *domain_name(enum domain d)
+{
+	return d == DOMAIN_KLA ? "KLA" : "SPA";
+}
+
+static const char *mode_name(enum mode m)
+{
+	switch (m) {
+	case MODE_RO: return "ro";
+	case MODE_DENY_ABOVE: return "deny-above";
+	default: return "deny-all";
+	}
 }
 
 static int dump_firewall(struct ctx *c)
@@ -755,8 +803,13 @@ static int run_test(struct ctx *c)
 	format_addr(text, sizeof(text), c->fw_base);
 	printf("%s, gating the %s path\n", text, path_name(gated));
 	format_addr(text, sizeof(text), c->opt.addr);
-	printf("Test word: KLA %s (SMC SPM + 0x%llX); read-only window %s .. %s\n",
+	printf("Test word: KLA %s (SMC SPM + 0x%llX); window %s .. %s\n",
 	       text, (unsigned long long)(c->opt.addr - SMC_SPM_BASE),
+	       lo_text, hi_text);
+	format_addr(lo_text, sizeof(lo_text), c->fw_lo);
+	format_addr(hi_text, sizeof(hi_text), c->fw_hi);
+	printf("Mode: %s; window programmed as %s %s .. %s\n",
+	       mode_name(c->opt.mode), domain_name(c->opt.domain),
 	       lo_text, hi_text);
 	if (c->opt.dry_run)
 		printf("DRY RUN: no writes will be issued\n");
@@ -817,36 +870,66 @@ static int run_test(struct ctx *c)
 	}
 	verdict(c, 1, "SRAM is writable through %s", path_name(gated));
 
-	step(4, "carve the read-only window out of the blanket filters");
+	step(4, c->opt.mode == MODE_RO ?
+		"carve the read-only window out of the blanket filters" :
+		"shrink the blanket filters (no window filters)");
 	if (carve_window(c))
 		return 3;
 	if (dump_firewall(c))
 		return 3;
-	verdict(c, 1, "window programmed (blankets shrunk, window filters added)");
+	verdict(c, 1, "firewall programmed");
 
 	step(5, "write pattern B through the gated path (should be dropped)");
 	if (wr32(c, gated, gated_addr, PATTERN_B))
 		return 3;
 	printf("      wrote 0x%08X\n", PATTERN_B);
 
-	step(6, "read back through both paths (must still be pattern A)");
+	step(6, c->opt.mode == MODE_RO ?
+		"read back through both paths (must still be pattern A)" :
+		"read back: gated path must be denied (all-ones), other must show A");
 	if (read_both(c, &via_app, &via_sys))
 		return 3;
 	printf("      APP 0x%08X  SYS 0x%08X\n", via_app, via_sys);
 	if (!c->opt.dry_run) {
-		if (via_sys == PATTERN_A)
-			verdict(c, 1, "write through %s was blocked", path_name(gated));
-		else if (via_sys == PATTERN_B)
-			verdict(c, 0, "write through %s got through; the firewall "
-				"did not gate it", path_name(gated));
+		uint32_t g = gated == PATH_APP ? via_app : via_sys;
+		uint32_t o = gated == PATH_APP ? via_sys : via_app;
+
+		/* The ungated path is ground truth for what is in the SRAM. */
+		if (o == PATTERN_A)
+			verdict(c, 1, "write through %s was dropped", path_name(gated));
+		else if (o == PATTERN_B)
+			verdict(c, 0, "write through %s got through: the firewall "
+				"did not gate a %s-form address", path_name(gated),
+				domain_name(c->opt.domain));
 		else
-			verdict(c, 0, "unexpected value 0x%08X", via_sys);
-		if (gated == PATH_APP && via_app == UINT32_MAX)
-			verdict(c, 0, "read through the gated path returned all-ones; "
-				"the read-only filter did not match either");
-		else if (via_app != via_sys)
-			verdict(c, 0, "paths disagree (APP 0x%08X, SYS 0x%08X)",
-				via_app, via_sys);
+			verdict(c, 0, "unexpected value 0x%08X on %s", o,
+				path_name(other));
+
+		if (c->opt.mode == MODE_RO) {
+			if (g == UINT32_MAX)
+				verdict(c, 0, "read through %s denied: the read-only "
+					"filter did not match either", path_name(gated));
+			else if (g != o)
+				verdict(c, 0, "paths disagree (gated 0x%08X, other "
+					"0x%08X)", g, o);
+			else
+				verdict(c, 1, "read through %s still works",
+					path_name(gated));
+		} else {
+			if (g == UINT32_MAX && c->opt.mode == MODE_DENY_ALL)
+				verdict(c, 1, "read through %s denied: the firewall "
+					"gates this path", path_name(gated));
+			else if (g == UINT32_MAX)
+				verdict(c, 1, "read through %s denied: the firewall "
+					"gates this path and the address it compares "
+					"is at or above the %s window start",
+					path_name(gated), domain_name(c->opt.domain));
+			else
+				verdict(c, 0, "read through %s not denied (0x%08X): "
+					"the address the firewall compares is below "
+					"the cut, or the firewall is not blocking",
+					path_name(gated), g);
+		}
 	}
 
 	step(7, "control: write pattern B through the other path (not gated)");
@@ -1006,6 +1089,14 @@ static void usage(const char *prog)
 		"  -w, --window SIZE     read-only window size, power of two >= 4 (default 0x1000)\n"
 		"  -g, --gate app|sys    which path the firewall gates: app = BAR0 via\n"
 		"                        hsio0-pcie (default), sys = BAR2 via pcie-smn\n"
+		"  -d, --domain kla|spa  program the window as the post-remap KLA\n"
+		"                        (default) or the pre-remap SPA\n"
+		"  -m, --mode MODE       ro (default): read-only window, RW above it\n"
+		"                        deny-above: shrink blankets only; everything at\n"
+		"                          or above the window start is denied, so a read\n"
+		"                          through the gated path must return all-ones\n"
+		"                        deny-all: blankets cover address 0 only; a read\n"
+		"                          that still works means the firewall is inert\n"
 		"  -k, --keep            leave the window in place after step 7\n"
 		"      --restore-only    rewrite the bring-up blankets and clear 1/2/13/14\n"
 		"  -n, --dry-run         read everything, write nothing\n"
@@ -1043,6 +1134,28 @@ static int parse_options(int argc, char **argv, struct options *o)
 				o->gated = PATH_APP;
 			else if (!strcmp(argv[i], "sys"))
 				o->gated = PATH_SYS;
+			else
+				return -1;
+		} else if (!strcmp(arg, "-d") || !strcmp(arg, "--domain")) {
+			if (i + 1 >= argc)
+				return -1;
+			i++;
+			if (!strcmp(argv[i], "kla"))
+				o->domain = DOMAIN_KLA;
+			else if (!strcmp(argv[i], "spa"))
+				o->domain = DOMAIN_SPA;
+			else
+				return -1;
+		} else if (!strcmp(arg, "-m") || !strcmp(arg, "--mode")) {
+			if (i + 1 >= argc)
+				return -1;
+			i++;
+			if (!strcmp(argv[i], "ro"))
+				o->mode = MODE_RO;
+			else if (!strcmp(argv[i], "deny-above"))
+				o->mode = MODE_DENY_ABOVE;
+			else if (!strcmp(argv[i], "deny-all"))
+				o->mode = MODE_DENY_ALL;
 			else
 				return -1;
 		} else if (!strcmp(arg, "-k") || !strcmp(arg, "--keep")) {
@@ -1122,6 +1235,13 @@ int main(int argc, char **argv)
 	}
 	if (check_placement(&c.opt, &c.win_lo, &c.win_hi))
 		return 2;
+	if (c.opt.domain == DOMAIN_SPA) {
+		c.fw_lo = SMC_SPA_BASE + (c.win_lo - SMC_KLA_BASE);
+		c.fw_hi = SMC_SPA_BASE + (c.win_hi - SMC_KLA_BASE);
+	} else {
+		c.fw_lo = c.win_lo;
+		c.fw_hi = c.win_hi;
+	}
 
 	if (c.opt.gated == PATH_APP) {
 		c.fw_base = HSIO0_PCIE_FW_BASE;

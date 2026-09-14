@@ -18,12 +18,22 @@
 //   9. write through the path under test again; the readback must change
 //  10. restore the word to its original value
 //
-// The two host paths are BAR0/APPIN (SPA, gated by HSIO0's "pcie" firewall)
-// and BAR2/SYSIN (KLA, gated by the PCIe mgmt "smn" firewall). Both see the
+// The two host paths are BAR0/APPIN (SPA) and BAR2/SYSIN (KLA). Both see the
 // post-PCIE_REMAP address, i.e. the KLA: the remapper sits in
 // keraunos_pcie_subsystem_struct_wrap.sv ahead of the fabric. The default
 // gates the BAR0 path and uses BAR2 for the control write and for the
 // firewall registers themselves, so a mistake cannot lock the tool out.
+//
+// MEASURED (emulator, chippy firmware): BAR0 traffic into HSIO0 is gated by
+// the register block the RDL labels hsio_noc2axi_firewall (0x2302_0000), not
+// the one labelled hsio_pcie_firewall (0x2302_1000). The FlexNoC netlist
+// (keraunos_hsio_noc_main.v) has the unit named noc2axi_iniu_firewall fed by
+// i_pcie2hsio and the unit named pcie_iniu_firewall fed by i_noc2axi2hsio;
+// the names are crossed relative to the traffic. With the pcie block's
+// blankets shrunk to cover only address 0, BAR0 reads and writes still
+// passed; with the noc2axi block carved, the write was dropped and reads
+// kept working. The PCIe mgmt SMN firewall (0x1805_0000) reads all-ones over
+// BAR2 and has not been tested.
 //
 // SAFETY (emulation): the SMC runs bring-up firmware out of this SRAM
 // (reset vector 0xC006_0000 = KLA 0x0806_0000). Code, data, stacks and heap
@@ -1117,11 +1127,12 @@ static void usage(const char *prog)
 		"  -w, --window SIZE     read-only window size, power of two >= 4 (default 0x1000)\n"
 		"  -g, --gate app|sys    which path the firewall gates: app = BAR0 via\n"
 		"                        hsio0-pcie (default), sys = BAR2 via pcie-smn\n"
-		"  -r, --regs pcie|noc2axi\n"
-		"                        which HSIO0 register block to program: the one the\n"
-		"                        RDL labels pcie (0x2302_1000, default) or noc2axi\n"
-		"                        (0x2302_0000). The netlist feeds BAR0 traffic to the\n"
-		"                        unit named noc2axi_iniu_firewall.\n"
+		"  -r, --regs noc2axi|pcie\n"
+		"                        which HSIO0 register block to program. The RDL labels\n"
+		"                        0x2302_0000 noc2axi and 0x2302_1000 pcie, but the\n"
+		"                        netlist feeds BAR0 traffic to the unit behind the\n"
+		"                        noc2axi block, and that is what the emulator measured.\n"
+		"                        Default noc2axi; pcie reproduces the negative result.\n"
 		"  -d, --domain kla|spa  program the window as the post-remap KLA\n"
 		"                        (default) or the pre-remap SPA\n"
 		"  -m, --mode MODE       ro (default): read-only window, RW above it\n"
@@ -1150,6 +1161,7 @@ static int parse_options(int argc, char **argv, struct options *o)
 	o->addr = DEFAULT_ADDR;
 	o->window = DEFAULT_WINDOW;
 	o->gated = PATH_APP;
+	o->regs_noc2axi = 1;	/* measured: this block gates BAR0 */
 	for (i = 2; i < argc; i++) {
 		const char *arg = argv[i];
 

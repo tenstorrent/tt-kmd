@@ -7,8 +7,9 @@
 // to a Keraunos target, and they are the only place in the path that carries
 // read/write permissions. The TLBs translate; the firewalls decide.
 //
-//   BAR0/BAR4 (APPIN) -> HSIO<n> "pcie" firewall -> SMN<n> "hsio2smn" -> SMC/SEP inbound
-//   BAR2      (SYSIN) -> PCIe mgmt "smn" firewall               -> SMC/SEP inbound
+//   BAR0/BAR4 (APPIN) -> HSIO<n> firewall (the block labelled "noc2axi"; see
+//                        build_inventory) -> SMN<n> "hsio2smn" -> SMC/SEP inbound
+//   BAR2      (SYSIN) -> PCIe mgmt "smn" firewall -> SMC/SEP inbound
 //
 // Each firewall is an array of filters; each filter is 0x20 bytes:
 //
@@ -201,19 +202,28 @@ static void build_inventory(void)
 	unsigned int n;
 
 	firewall_count = 0;
+	/*
+	 * Names follow the RDL labels. The traffic each block gates is the
+	 * other way round: the FlexNoC netlist feeds i_pcie2hsio into the unit
+	 * named noc2axi_iniu_firewall and i_noc2axi2hsio into the unit named
+	 * pcie_iniu_firewall, and keraunos_firewall_ro measured exactly that
+	 * on the emulator (tile 0). The "what" column says what is measured
+	 * or implied by the netlist, not what the label says.
+	 */
 	for (n = 0; n < HSIO_TILES; n++) {
 		snprintf(name, sizeof(name), "hsio%u-pcie", n);
 		snprintf(what, sizeof(what),
-			 "PCIe APP inbound (BAR0/BAR4) -> HSIO%u fabric", n);
+			 "labelled pcie; netlist: NoC -> HSIO%u fabric", n);
 		add_firewall(name, HSIO_PCIE_FW_BASE + n * HSIO_TILE_STRIDE,
 			     MAX_FILTERS, what, "hsio", hsio_tag[n], "pcie",
-			     n == 0 ? "host" : NULL);
+			     NULL);
 		snprintf(name, sizeof(name), "hsio%u-noc2axi", n);
 		snprintf(what, sizeof(what),
-			 "NoC (NOC2AXI initiator) -> HSIO%u fabric", n);
+			 "labelled noc2axi; gates BAR0/BAR4 -> HSIO%u fabric%s",
+			 n, n == 0 ? " (measured)" : "");
 		add_firewall(name, HSIO_NOC2AXI_FW_BASE + n * HSIO_TILE_STRIDE,
 			     MAX_FILTERS, what, "hsio", hsio_tag[n], "noc2axi",
-			     NULL);
+			     n == 0 ? "host" : NULL);
 	}
 	for (n = 0; n < SMN_TILES; n++) {
 		snprintf(name, sizeof(name), "smn%u-hsio2smn", n);
@@ -467,7 +477,7 @@ static void usage(const char *prog)
 		fprintf(stderr, "%s%s", i ? " " : "", firewalls[i].name);
 	fprintf(stderr,
 		"\n"
-		"  'host' is the BAR0/BAR2 -> SMC path: hsio0-pcie smn0-hsio2smn "
+		"  'host' is the BAR0/BAR2 -> SMC path: hsio0-noc2axi smn0-hsio2smn "
 		"pcie-smn smc-in\n"
 		"\n"
 		"Options:\n"

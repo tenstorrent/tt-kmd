@@ -28,6 +28,32 @@
 #define KERAUNOS_BAR2_WC_OFFSET		(KERAUNOS_BAR2_WC_FIRST_ENTRY << KERAUNOS_SYSIN0_WINDOW_SHIFT)	// 0xF0000
 #define KERAUNOS_BAR2_WC_SIZE		(KERAUNOS_BAR2_WC_ENTRIES << KERAUNOS_SYSIN0_WINDOW_SHIFT)	// 64KB
 
+// --- SMC scratch registers / host-visible boot state -------------------------
+// SMC CPU-control scratch registers: 16 x 32-bit at SMC-local 0xC001_0100,
+// 8-byte stride; SMC-local 0xC000_0000 is KLA 0x0800_0000.
+//
+// K-SMC scratch[12] is the host-visible boot state word of the Grendel Boot
+// Specification §6.6 (the host staging handshake). The host reads it to
+// learn when a firmware bundle staging window is open and writes exactly
+// one value, BUNDLE_STAGED, after copying a bundle in.
+#define KERAUNOS_SMC_SCRATCH_KLA(n)	(0x08010100u + 8u * (n))
+#define KERAUNOS_SMC_BOOT_STATE_KLA	KERAUNOS_SMC_SCRATCH_KLA(12)
+
+#define KERAUNOS_BOOT_STATE_MASK	0x0000000Fu	// HOST_BOOT_STATE
+#define KERAUNOS_BOOT_BUNDLE_SEQ_MASK	0x000000F0u	// HOST_BUNDLE_SEQ
+#define KERAUNOS_BOOT_BUNDLE_SEQ_SHIFT	4
+#define KERAUNOS_BOOT_ERROR_CODE_MASK	0x0000FF00u	// BOOT_ERROR_CODE, valid in BOOT_ERROR
+#define KERAUNOS_BOOT_ERROR_CODE_SHIFT	8
+
+enum keraunos_host_boot_state {
+	KERAUNOS_BOOT_RESET_OR_UNINITIALIZED	= 0,
+	KERAUNOS_BOOT_WAIT_FOR_BUNDLE		= 1,	// window for HOST_BUNDLE_SEQ open, host-writable
+	KERAUNOS_BOOT_BUNDLE_STAGED		= 2,	// written by the host, nothing else is
+	KERAUNOS_BOOT_BUNDLE_CONSUMED		= 3,
+	KERAUNOS_BOOT_SIP_READY			= 4,
+	KERAUNOS_BOOT_ERROR			= 15,
+};
+
 struct keraunos_device {
 	struct tenstorrent_device tt;
 
@@ -48,6 +74,8 @@ struct keraunos_device {
 	u8 __iomem *bar2;
 	u8 __iomem *bar2_wc;
 	spinlock_t kernel_tlb_lock;
+
+	bool boot_group_registered;
 };
 
 #define tt_dev_to_keraunos_dev(tt_dev) container_of((tt_dev), struct keraunos_device, tt)

@@ -18,7 +18,6 @@
 #include <linux/dma-buf.h>
 #include <linux/module.h>
 #include <linux/dma-resv.h>
-#include <linux/capability.h>
 
 #include "chardev_private.h"
 #include "device.h"
@@ -1534,8 +1533,10 @@ static int map_pci_bar(struct chardev_private *priv, struct vm_area_struct *vma,
 	struct tenstorrent_mmap_vma *mmap_vma;
 	int ret;
 
-	// Restrict Keraunos BAR2 mmaps to privileged users.
-	if (bar == 2 && priv->device->dev_class == &keraunos_class && !capable(CAP_SYS_ADMIN))
+	// Keraunos BAR2 is kernel-internal: the driver splits it into UC and WC
+	// mappings that a user mapping could alias with the wrong attribute,
+	// and the layout is not described by QUERY_MAPPINGS. Use the ioctls.
+	if (bar == 2 && priv->device->dev_class == &keraunos_class)
 		return -EPERM;
 
 	mmap_vma = kzalloc(sizeof(*mmap_vma), GFP_KERNEL);

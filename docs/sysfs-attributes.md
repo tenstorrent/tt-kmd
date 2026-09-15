@@ -148,3 +148,33 @@ To read the number of posted write data words sent by the master interface via N
 ```bash
 cat '/sys/class/tenstorrent/tenstorrent!0/pcie_perf_counters/mst_posted_wr_data_word_sent0'
 ```
+
+---
+
+## Keraunos Boot State
+
+Keraunos devices expose the SMC's host-visible boot state word, K-SMC
+`scratch[12]` as defined by the Grendel Boot Specification host staging
+handshake. It reports whether the SMC is waiting for the host to stage a
+firmware bundle, has consumed one, has completed boot, or has failed.
+
+**Location**: Directly within each Keraunos device's sysfs entry.
+
+| sysfs Filename | Description                                                       | Device Support |
+|----------------|-------------------------------------------------------------------|----------------|
+| `boot_state`   | Raw 32-bit boot state word, printed as `0x%08x`. Read-only.       | Keraunos       |
+
+### Notes:
+
+* The value is the raw register contents; the driver does not decode it. The
+field layout (`HOST_BOOT_STATE` in bits 3:0, `HOST_BUNDLE_SEQ` in bits 7:4,
+`BOOT_ERROR_CODE` in bits 15:8) is owned by the boot specification and may
+change before silicon.
+* Each read performs a live register access through BAR2. If BAR2 is
+unavailable the read fails with `ENODEV`.
+
+### Example Usage:
+
+```bash
+cat '/sys/class/tenstorrent/tenstorrent!0/boot_state'
+```

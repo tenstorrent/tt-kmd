@@ -330,10 +330,73 @@ static bool keraunos_init_hardware(struct tenstorrent_device *tt_dev)
 	return true;
 }
 
+// --- SMC host-visible boot state --------------------------------------------
+
+// Read K-SMC scratch[12], the host-visible boot state word. Raw; callers
+// decode with the KERAUNOS_BOOT_* masks. Fails if BAR2 is unmapped.
+static int keraunos_read_boot_state(struct keraunos_device *kd, u32 *word)
+{
+	return keraunos_kla_read(&kd->tt, KERAUNOS_SMC_BOOT_STATE_KLA, word, sizeof(*word));
+}
+
+// Raw hex on purpose: the field layout is the boot spec's ABI, not ours, and
+// it is still moving pre-silicon. Decode in userspace.
+static ssize_t boot_state_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
+	struct keraunos_device *kd = tt_dev_to_keraunos_dev(tt_dev);
+	u32 word;
+	int ret;
+
+	ret = keraunos_read_boot_state(kd, &word);
+	if (ret)
+		return ret;
+
+	return scnprintf(buf, PAGE_SIZE, "0x%08x\n", word);
+}
+static DEVICE_ATTR_RO(boot_state);
+
+static struct attribute *keraunos_boot_attrs[] = {
+	&dev_attr_boot_state.attr,
+	NULL,
+};
+
+// Unnamed: attributes appear directly in the device's sysfs directory.
+static const struct attribute_group keraunos_boot_group = {
+	.attrs = keraunos_boot_attrs,
+};
+
 static bool keraunos_init_telemetry(struct tenstorrent_device *tt_dev)
 {
-	dev_info(&tt_dev->pdev->dev, "Keraunos init_telemetry (stub)\n");
+	struct keraunos_device *kd = tt_dev_to_keraunos_dev(tt_dev);
+	u32 word;
+	int r;
+
+	r = device_add_group(&tt_dev->dev, &keraunos_boot_group);
+	if (r)
+		dev_err(&tt_dev->pdev->dev, "Keraunos: boot state sysfs unavailable: %d\n", r);
+	else
+		kd->boot_group_registered = true;
+
+	r = keraunos_read_boot_state(kd, &word);
+	if (r)
+		dev_info(&tt_dev->pdev->dev, "Keraunos: SMC boot state unreadable: %d\n", r);
+	else
+		dev_info(&tt_dev->pdev->dev, "Keraunos: SMC boot state 0x%08x (state %u, bundle seq %u)\n",
+			 word, word & KERAUNOS_BOOT_STATE_MASK,
+			 (word & KERAUNOS_BOOT_BUNDLE_SEQ_MASK) >> KERAUNOS_BOOT_BUNDLE_SEQ_SHIFT);
+
 	return true;
+}
+
+static void keraunos_cleanup_telemetry(struct tenstorrent_device *tt_dev)
+{
+	struct keraunos_device *kd = tt_dev_to_keraunos_dev(tt_dev);
+
+	if (kd->boot_group_registered) {
+		device_remove_group(&tt_dev->dev, &keraunos_boot_group);
+		kd->boot_group_registered = false;
+	}
 }
 
 static void keraunos_save_reset_state(struct tenstorrent_device *tt_dev)
@@ -385,6 +448,7 @@ struct tenstorrent_device_class keraunos_class = {
 	.cleanup_device = keraunos_cleanup,
 	.set_power_state = keraunos_set_power_state,
 	.init_telemetry = keraunos_init_telemetry,
+	.cleanup_telemetry = keraunos_cleanup_telemetry,
 	.noc_read = keraunos_noc_read,
 	.noc_write = keraunos_noc_write,
 	.kla_read = keraunos_kla_read,

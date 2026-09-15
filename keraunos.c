@@ -30,8 +30,8 @@
 // BAR2 offset = (sysin0_entry << 14) | within_16KB_window. Bring-up programs
 // SysIn0[2] -> 0x1804_4000, the base of the four APPIN0 config banks, so a
 // write into that window reaches any AppIn0 entry's config registers.
-#define SYSIN0_WINDOW_SHIFT	14
-#define SYSIN0_WINDOW_SIZE	(1u << SYSIN0_WINDOW_SHIFT)	// 16KB
+#define SYSIN0_WINDOW_SHIFT	KERAUNOS_SYSIN0_WINDOW_SHIFT
+#define SYSIN0_WINDOW_SIZE	KERAUNOS_SYSIN0_WINDOW_SIZE
 #define SYSIN0_WINDOW_MASK	(SYSIN0_WINDOW_SIZE - 1)
 #define SYSIN0_TLBCFG_ENTRY	1
 #define SYSIN0_APPIN0_ENTRY	2
@@ -59,6 +59,19 @@ static u32 keraunos_sysin0_cfg_offset(u32 entry)
 {
 	return (SYSIN0_TLBCFG_ENTRY << SYSIN0_WINDOW_SHIFT)
 	       + TLBCFG_SYSIN0_OFFSET + entry * TLB_CFG_ENTRY_SIZE;
+}
+
+// iomem base of SysIn0 entry's 16KB BAR2 window. Windows at or above
+// KERAUNOS_BAR2_WC_FIRST_ENTRY come from the write-combining mapping; the
+// rest from the uncached one. NULL if the relevant mapping is absent.
+static u8 __iomem *keraunos_sysin0_window(struct keraunos_device *kd, u32 entry)
+{
+	u32 off = entry << SYSIN0_WINDOW_SHIFT;
+
+	if (entry >= KERAUNOS_BAR2_WC_FIRST_ENTRY)
+		return kd->bar2_wc ? kd->bar2_wc + (off - KERAUNOS_BAR2_WC_OFFSET) : NULL;
+
+	return kd->bar2 ? kd->bar2 + off : NULL;
 }
 
 // Keraunos uses a flat SPA rather than NOC coordinates. Validate both the
@@ -139,7 +152,7 @@ static u8 __iomem *keraunos_program_window(struct keraunos_device *kd, u64 addr)
 static u8 __iomem *keraunos_program_kla_window(struct keraunos_device *kd, u64 addr)
 {
 	keraunos_program_sysin0(kd, KERNEL_SYSIN0_ENTRY, addr);
-	return kd->bar2 + (KERNEL_SYSIN0_ENTRY << SYSIN0_WINDOW_SHIFT)
+	return keraunos_sysin0_window(kd, KERNEL_SYSIN0_ENTRY)
 	       + (addr & SYSIN0_WINDOW_MASK);
 }
 
@@ -267,22 +280,31 @@ static bool keraunos_init(struct tenstorrent_device *tt_dev)
 	resource_size_t bar0_len = pci_resource_len(pdev, 0);
 	resource_size_t bar2_len = pci_resource_len(pdev, 2);
 	unsigned long window_off = (unsigned long)KERNEL_APPIN0_ENTRY << APPIN0_WINDOW_SHIFT;
-	unsigned long sysin0_window_end =
-		(unsigned long)(KERNEL_SYSIN0_ENTRY + 1) << SYSIN0_WINDOW_SHIFT;
+
+	// The UC and WC halves of BAR2 must not share a page (see keraunos.h),
+	// and the kernel's scalar KLA aperture must live in the UC half.
+	BUILD_BUG_ON(!IS_ALIGNED(KERAUNOS_BAR2_WC_OFFSET, PAGE_SIZE));
+	BUILD_BUG_ON(KERNEL_SYSIN0_ENTRY >= KERAUNOS_BAR2_WC_FIRST_ENTRY);
 
 	dev_info(&pdev->dev, "Keraunos init_device\n");
 
 	spin_lock_init(&kd->kernel_tlb_lock);
 
-	// Map BAR2 (control plane) so we can reprogram TLB config via SysIn0.
-	if (sysin0_window_end <= bar2_len) {
-		kd->bar2 = pci_iomap(pdev, 2, 0);
+	// Map BAR2 (control plane) in two pieces: the uncached low part, through
+	// which we reprogram TLB config via SysIn0, and the write-combining top
+	// windows reserved for bulk kernel transfers.
+	if (bar2_len >= KERAUNOS_BAR2_SIZE) {
+		kd->bar2 = pci_iomap_range(pdev, 2, 0, KERAUNOS_BAR2_WC_OFFSET);
 		if (!kd->bar2)
 			dev_warn(&pdev->dev, "Keraunos: BAR2 iomap failed; NOC access disabled\n");
+
+		kd->bar2_wc = pci_iomap_wc_range(pdev, 2, KERAUNOS_BAR2_WC_OFFSET, KERAUNOS_BAR2_WC_SIZE);
+		if (!kd->bar2_wc)
+			dev_warn(&pdev->dev, "Keraunos: BAR2 WC iomap failed; WC aperture unavailable\n");
 	} else {
 		dev_warn(&pdev->dev,
-			 "Keraunos: BAR2 (0x%llx) too small for SysIn0 entry %u window; NOC access disabled\n",
-			 (unsigned long long)bar2_len, KERNEL_SYSIN0_ENTRY);
+			 "Keraunos: BAR2 (0x%llx) smaller than SysIn0 (0x%x); NOC access disabled\n",
+			 (unsigned long long)bar2_len, KERAUNOS_BAR2_SIZE);
 	}
 
 	// Map just the 16MB BAR0 window owned by our reserved AppIn0 entry.
@@ -333,6 +355,10 @@ static void keraunos_cleanup(struct tenstorrent_device *tt_dev)
 	if (kd->bar0_kernel_tlb) {
 		pci_iounmap(tt_dev->pdev, kd->bar0_kernel_tlb);
 		kd->bar0_kernel_tlb = NULL;
+	}
+	if (kd->bar2_wc) {
+		pci_iounmap(tt_dev->pdev, kd->bar2_wc);
+		kd->bar2_wc = NULL;
 	}
 	if (kd->bar2) {
 		pci_iounmap(tt_dev->pdev, kd->bar2);

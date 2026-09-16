@@ -50,6 +50,10 @@ unsigned char auto_reset_timeout = 10;
 module_param(auto_reset_timeout, byte, 0444);
 MODULE_PARM_DESC(auto_reset_timeout, "Timeout duration in seconds for M3 auto reset to occur.");
 
+uint post_reset_timeout_ms = 15000;
+module_param(post_reset_timeout_ms, uint, 0644);
+MODULE_PARM_DESC(post_reset_timeout_ms, "How long POST_RESET waits for the device to come back on the bus, in milliseconds.");
+
 bool power_policy = true;
 module_param(power_policy, bool, 0444);
 MODULE_PARM_DESC(power_policy, "Enable power policy: low power at probe, re-aggregate on close (default=on).");

@@ -25,6 +25,7 @@
 extern uint dma_address_bits;
 extern uint reset_limit;
 extern unsigned char auto_reset_timeout;
+extern uint post_reset_timeout_ms;
 extern bool power_policy;
 extern uint idle_power_down_grace_ms;
 extern bool fw_logging;

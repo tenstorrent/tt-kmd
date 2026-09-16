@@ -334,7 +334,13 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {
-		ok = is_reset_marker_zero(pdev);
+		// Block until the chip has actually come back rather than making
+		// every caller guess how long to sleep before asking. A timeout is
+		// reported through out.result like any other failed reset step.
+		int r = wait_reset_marker_clear(pdev, post_reset_timeout_ms);
+		if (r == -EINTR)
+			return r;
+		ok = (r == 0);
 
 		// In the hotplug case, needs_hw_init is false and there is nothing to
 		// do here. Otherwise this was an in-place reset, so re-initialize now.

@@ -21,6 +21,10 @@
 #define INTERFACE_TIMER_EN 0x1
 #define INTERFACE_FORCE_PENDING 0x10
 
+// Ceiling on the exponential backoff in wait_reset_marker_clear(). This is also
+// the worst-case latency between the link coming back and us noticing.
+#define RESET_MARKER_POLL_MAX_MS 512
+
 static bool poll_pcie_link_up(struct pci_dev *pdev, u32 timeout_ms) {
 	u16 tt_vendor_id;
 	ktime_t end_time = ktime_add_ms(ktime_get(), timeout_ms);
@@ -148,11 +152,58 @@ bool set_reset_marker(struct pci_dev *pdev)
 	return true;
 }
 
-bool is_reset_marker_zero(struct pci_dev *pdev)
+// The marker is clear once the device answers config reads with its own vendor
+// ID and PCI_COMMAND_PARITY is zero. Checking the vendor ID guards against root
+// ports that return zeros rather than all-ones while the link is down, which
+// would otherwise look like a cleared marker.
+static bool reset_marker_is_clear(struct pci_dev *pdev)
 {
+	u16 vendor_id;
 	u16 pci_command;
 
-	// Read the reset marker
-	pci_read_config_word(pdev, PCI_COMMAND, &pci_command);
+	if (pci_read_config_word(pdev, PCI_VENDOR_ID, &vendor_id) != PCIBIOS_SUCCESSFUL
+	    || vendor_id != PCI_VENDOR_ID_TENSTORRENT)
+		return false;
+
+	if (pci_read_config_word(pdev, PCI_COMMAND, &pci_command) != PCIBIOS_SUCCESSFUL)
+		return false;
+
 	return (pci_command & PCI_COMMAND_PARITY) == 0;
+}
+
+// Wait for the marker set by set_reset_marker() to clear, which happens when the
+// device's config space is reset and the link comes back up. The poll interval
+// starts at 1 ms and doubles on each miss up to RESET_MARKER_POLL_MAX_MS, so a
+// chip that comes back quickly is seen quickly and one that takes seconds (a
+// Galaxy tray after an IPMI reset) is not hammered with config reads meanwhile.
+//
+// Returns 0 when the marker is clear, -ETIMEDOUT after timeout_ms, or -EINTR
+// if the caller was signalled. The caller holds reset_rwsem exclusive, so
+// open()/release() on this device block for the duration of the wait.
+int wait_reset_marker_clear(struct pci_dev *pdev, u32 timeout_ms)
+{
+	ktime_t start = ktime_get();
+	ktime_t end_time = ktime_add_ms(start, timeout_ms);
+	u32 interval_ms = 1;
+	unsigned int polls = 0;
+
+	for (;;) {
+		polls++;
+		if (reset_marker_is_clear(pdev)) {
+			dev_dbg(&pdev->dev, "reset marker cleared after %lld ms, %u polls\n",
+				ktime_ms_delta(ktime_get(), start), polls);
+			return 0;
+		}
+
+		if (ktime_after(ktime_get(), end_time)) {
+			dev_dbg(&pdev->dev, "reset marker still set after %u ms, %u polls\n",
+				timeout_ms, polls);
+			return -ETIMEDOUT;
+		}
+
+		if (msleep_interruptible(interval_ms) != 0)
+			return -EINTR;
+
+		interval_ms = min(interval_ms * 2, (u32)RESET_MARKER_POLL_MAX_MS);
+	}
 }

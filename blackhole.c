@@ -725,9 +725,11 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 // end of its boot, after GDDR training, well after the PCIe link is up and the
 // driver can see the chip.  A chip that does not get there within
 // FW_READY_TIMEOUT_MS is unwell; carry on and let the individual messages
-// fail and report as they do today.  An all-ones read means the NOC path is
-// dead, and waiting will not fix that.
-static void blackhole_wait_fw_ready(struct blackhole_device *bh)
+// fail and report as they do today.
+//
+// Returns false if the chip is hung: an all-ones read means the NOC path is
+// dead, and nothing that follows can work.
+static bool blackhole_wait_fw_ready(struct blackhole_device *bh)
 {
 	struct pci_dev *pdev = bh->tt.pdev;
 	unsigned long timeout = jiffies + msecs_to_jiffies(FW_READY_TIMEOUT_MS);
@@ -736,22 +738,26 @@ static void blackhole_wait_fw_ready(struct blackhole_device *bh)
 		u32 boot_status;
 
 		if (bh->tt.detached)
-			return;
+			return false;
 
 		boot_status = noc_read32(bh, ARC_X, ARC_Y, ARC_BOOT_STATUS, 0);
-		if (boot_status == 0xFFFFFFFFu || (boot_status & ARC_BOOT_STATUS_READY_FOR_MSG))
-			return;
+		if (boot_status == 0xFFFFFFFFu)
+			return false;
+		if (boot_status & ARC_BOOT_STATUS_READY_FOR_MSG)
+			return true;
 
 		if (time_after(jiffies, timeout)) {
 			dev_warn(&pdev->dev, "Firmware not ready after %u ms\n", FW_READY_TIMEOUT_MS);
-			return;
+			return true;
 		}
 
 		if (msleep_interruptible(100))
-			return;
+			return true;
 	}
 }
 
+// Returns false if the chip is hung.  The device is still registered so it can
+// be identified and a reset attempted.
 static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
@@ -760,7 +766,10 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 
 	pcie_set_readrq(pdev, MAX_MRRS);
 
-	blackhole_wait_fw_ready(bh);
+	if (!blackhole_wait_fw_ready(bh)) {
+		dev_err(&tt_dev->pdev->dev, "Device is unresponsive; skipping firmware init\n");
+		return false;
+	}
 
 	msg.header = ARC_MSG_TYPE_ASIC_STATE0;
 	if (arc_msg_send_sync(&bh->tt, &msg) != 0)

@@ -336,10 +336,12 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {
 		ok = is_reset_marker_zero(pdev);
 
-		// In the hotplug case, needs_hw_init is false and there is nothing to
-		// do here. Otherwise this was an in-place reset, so re-initialize now.
+		// needs_hw_init means the hardware is uninitialized: an in-place
+		// reset set it, or probe found the chip hung.  Re-initialize now
+		// and clear the flag only if that succeeds.  If it is already
+		// clear, probe (e.g. after hotplug) initialized the chip and there
+		// is nothing to do here.
 		if (priv->device->needs_hw_init) {
-			priv->device->needs_hw_init = false;
 			if (ok && safe_pci_restore_state(pdev)) {
 				priv->device->dev_class->restore_reset_state(priv->device);
 				ok = priv->device->dev_class->init_hardware(priv->device);
@@ -351,6 +353,9 @@ static long ioctl_reset_device(struct chardev_private *priv,
 			} else {
 				ok = false;
 			}
+
+			if (ok)
+				priv->device->needs_hw_init = false;
 		}
 	} else {
 		return -EINVAL;

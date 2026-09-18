@@ -719,7 +719,10 @@ fail_bar2:
 // avoid the "FW not running" warning while the bootrom is still in charge.
 // A chip that does not answer within FW_READY_TIMEOUT_MS is unwell; carry on
 // and let the individual messages fail and report as they do today.
-static void wormhole_wait_fw_ready(struct wormhole_device *wh_dev)
+//
+// Returns false if the chip is hung: register reads come back all-ones and
+// nothing that follows can work.
+static bool wormhole_wait_fw_ready(struct wormhole_device *wh_dev)
 {
 	struct pci_dev *pdev = wh_dev->tt.pdev;
 	u8 __iomem *regs = reset_unit_regs(wh_dev);
@@ -727,32 +730,37 @@ static void wormhole_wait_fw_ready(struct wormhole_device *wh_dev)
 
 	for (;;) {
 		if (wh_dev->tt.detached)
-			return;
+			return false;
 
 		if (arc_l2_is_running(regs) &&
 		    wormhole_send_arc_fw_message(pdev, regs, WH_FW_MSG_NOP, 50000, NULL))
-			return;
+			return true;
 
 		if (is_hardware_hung(pdev, regs))
-			return;
+			return false;
 
 		if (time_after(jiffies, timeout)) {
 			dev_warn(&pdev->dev, "Firmware not ready after %u ms\n", FW_READY_TIMEOUT_MS);
-			return;
+			return true;
 		}
 
 		if (msleep_interruptible(100))
-			return;
+			return true;
 	}
 }
 
+// Returns false if the chip is hung.  The device is still registered so it can
+// be identified and a reset attempted.
 static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev)
 {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
 	map_bar4_to_system_registers(wh_dev);
 
-	wormhole_wait_fw_ready(wh_dev);
+	if (!wormhole_wait_fw_ready(wh_dev)) {
+		dev_err(&tt_dev->pdev->dev, "Device is unresponsive; skipping firmware init\n");
+		return false;
+	}
 
 	if (arc_l2_is_running(reset_unit_regs(wh_dev))) {
 		wormhole_send_curr_date(tt_dev->pdev, reset_unit_regs(wh_dev));

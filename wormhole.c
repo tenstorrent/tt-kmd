@@ -85,6 +85,7 @@
 
 #define ARC_TELEMETRY_PTR  (RESET_UNIT_START + 0x01D0)
 #define ARC_TELEMETRY_DATA (RESET_UNIT_START + 0x01D4)
+#define TELEMETRY_READY_TIMEOUT_MS 5000
 
 // kernel TLB is the last 16MB TLB
 #define KERNEL_TLB_INDEX (TLB_WINDOW_COUNT - 1)
@@ -650,40 +651,27 @@ static bool is_fw_ready_for_telemetry(struct wormhole_device *wh)
 	return ready;
 }
 
-// On some WH systems, ARC firmware may not have finished initializing by the
-// time the PCI driver probes or a reset completes. This work function polls for
-// firmware readiness, then scans the telemetry tag table. On first init it also
-// registers the sysfs group and hwmon device; on re-probe after reset it just
-// refreshes the tag cache (sysfs/hwmon are already registered).
-static void fw_ready_work_func(struct work_struct *work)
+// ARC firmware publishes the telemetry table late in its init, after GDDR
+// training. A healthy chip gets there within a couple of seconds of coming up;
+// one that takes much longer is unwell, and we go without telemetry rather
+// than keep waiting. Returns false on timeout, signal, or device removal.
+static bool wormhole_wait_telemetry_ready(struct wormhole_device *wh)
 {
-	struct delayed_work *dwork = to_delayed_work(work);
-	struct wormhole_device *wh = container_of(dwork, struct wormhole_device, fw_ready_work);
-	struct tenstorrent_device *tt_dev = &wh->tt;
+	unsigned long timeout = jiffies + msecs_to_jiffies(TELEMETRY_READY_TIMEOUT_MS);
 
-	if (tt_dev->detached)
-		return;
+	for (;;) {
+		if (wh->tt.detached)
+			return false;
 
-	if (!is_fw_ready_for_telemetry(wh)) {
-		if (wh->telemetry_retries-- > 0)
-			schedule_delayed_work(&wh->fw_ready_work, msecs_to_jiffies(1000));
-		else
-			dev_err(&tt_dev->pdev->dev, "Timed out waiting for FW telemetry\n");
-		return;
+		if (is_fw_ready_for_telemetry(wh))
+			return true;
+
+		if (time_after(jiffies, timeout))
+			return false;
+
+		if (msleep_interruptible(100))
+			return false;
 	}
-
-	down_write(&tt_dev->reset_rwsem);
-	tt_telemetry_probe(tt_dev);
-	up_write(&tt_dev->reset_rwsem);
-
-	// First-time init: register sysfs and hwmon if not already done.
-	if (!wh->telemetry_group_registered) {
-		if (!device_add_group(&tt_dev->dev, &tt_dev->telemetry_group))
-			wh->telemetry_group_registered = true;
-	}
-
-	if (!tt_dev->hwmon_dev)
-		wormhole_hwmon_init(wh);
 }
 
 static bool wormhole_init(struct tenstorrent_device *tt_dev)
@@ -691,8 +679,6 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev)
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 	struct device *dev = &tt_dev->pdev->dev;
 	int i;
-
-	INIT_DELAYED_WORK(&wh_dev->fw_ready_work, fw_ready_work_func);
 
 	tt_dev->telemetry_attrs = devm_kcalloc(dev, ARRAY_SIZE(wh_sysfs_attributes) + 1, sizeof(struct attribute *), GFP_KERNEL);
 
@@ -745,15 +731,16 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 	return true;
 }
 
-// Re-probe telemetry after reset. If FW is ready, scan immediately.
-// If not (slow ARC init on some WH boards), defer and poll via fw_ready_work.
+// Scan the telemetry tag table. Used at probe and again after an in-place
+// reset, when firmware has just rebooted and may not have published the table
+// yet. On failure the tag cache is emptied, so stale addresses from a previous
+// firmware are never read.
 static int wormhole_probe_telemetry(struct tenstorrent_device *tt_dev)
 {
 	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
 
-	wh->telemetry_retries = 120;
-	schedule_delayed_work(&wh->fw_ready_work, 0);
-	return 0;
+	wormhole_wait_telemetry_ready(wh);
+	return tt_telemetry_probe(tt_dev);
 }
 
 static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev)
@@ -767,9 +754,14 @@ static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev)
 	else
 		wh_dev->pcie_perf_group_registered = true;
 
-	// Probe telemetry and register sysfs/hwmon. On some WH systems the ARC
-	// firmware may still be initializing, so fw_ready_work polls until ready.
-	wormhole_probe_telemetry(tt_dev);
+	r = wormhole_probe_telemetry(tt_dev);
+	if (!r) {
+		r = device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
+		if (!r)
+			wh_dev->telemetry_group_registered = true;
+
+		wormhole_hwmon_init(wh_dev);
+	}
 
 	return true;
 }
@@ -777,8 +769,6 @@ static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev)
 static void wormhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
 {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
-
-	cancel_delayed_work_sync(&wh_dev->fw_ready_work);
 
 	if (tt_dev->hwmon_dev) {
 		hwmon_device_unregister(tt_dev->hwmon_dev);

@@ -16,9 +16,6 @@ struct wormhole_device {
 
 	u8 saved_mps;
 
-	struct delayed_work fw_ready_work;
-	int telemetry_retries;
-
 	bool pcie_perf_group_registered;
 	bool telemetry_group_registered;
 };

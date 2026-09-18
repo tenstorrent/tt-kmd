@@ -721,6 +721,37 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	return true;
 }
 
+// Wait for firmware to flag its message queue ready.  ARC sets the bit at the
+// end of its boot, after GDDR training, well after the PCIe link is up and the
+// driver can see the chip.  A chip that does not get there within
+// FW_READY_TIMEOUT_MS is unwell; carry on and let the individual messages
+// fail and report as they do today.  An all-ones read means the NOC path is
+// dead, and waiting will not fix that.
+static void blackhole_wait_fw_ready(struct blackhole_device *bh)
+{
+	struct pci_dev *pdev = bh->tt.pdev;
+	unsigned long timeout = jiffies + msecs_to_jiffies(FW_READY_TIMEOUT_MS);
+
+	for (;;) {
+		u32 boot_status;
+
+		if (bh->tt.detached)
+			return;
+
+		boot_status = noc_read32(bh, ARC_X, ARC_Y, ARC_BOOT_STATUS, 0);
+		if (boot_status == 0xFFFFFFFFu || (boot_status & ARC_BOOT_STATUS_READY_FOR_MSG))
+			return;
+
+		if (time_after(jiffies, timeout)) {
+			dev_warn(&pdev->dev, "Firmware not ready after %u ms\n", FW_READY_TIMEOUT_MS);
+			return;
+		}
+
+		if (msleep_interruptible(100))
+			return;
+	}
+}
+
 static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
@@ -728,6 +759,8 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 	struct arc_msg msg = { 0 };
 
 	pcie_set_readrq(pdev, MAX_MRRS);
+
+	blackhole_wait_fw_ready(bh);
 
 	msg.header = ARC_MSG_TYPE_ASIC_STATE0;
 	if (arc_msg_send_sync(&bh->tt, &msg) != 0)

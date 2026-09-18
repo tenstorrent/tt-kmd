@@ -21,6 +21,11 @@
 
 #define MAX_TLB_KINDS 4
 
+// How long init_hardware waits for firmware to start accepting messages
+// before carrying on without it.  Covers the time from PCIe link-up to the
+// end of ARC firmware init; a healthy chip needs a few seconds at most.
+#define FW_READY_TIMEOUT_MS 10000
+
 struct tenstorrent_device_class;
 struct chardev_private;
 

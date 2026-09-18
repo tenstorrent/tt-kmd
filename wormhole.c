@@ -712,10 +712,47 @@ fail_bar2:
 	return false;
 }
 
-static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
+// Wait for firmware to answer a NOP.  The post code says L2 firmware has
+// started long before it is listening for messages, and a message written
+// while it is still initializing is discarded, so answering is the only
+// reliable sign that it is ready.  The post code is checked first only to
+// avoid the "FW not running" warning while the bootrom is still in charge.
+// A chip that does not answer within FW_READY_TIMEOUT_MS is unwell; carry on
+// and let the individual messages fail and report as they do today.
+static void wormhole_wait_fw_ready(struct wormhole_device *wh_dev)
+{
+	struct pci_dev *pdev = wh_dev->tt.pdev;
+	u8 __iomem *regs = reset_unit_regs(wh_dev);
+	unsigned long timeout = jiffies + msecs_to_jiffies(FW_READY_TIMEOUT_MS);
+
+	for (;;) {
+		if (wh_dev->tt.detached)
+			return;
+
+		if (arc_l2_is_running(regs) &&
+		    wormhole_send_arc_fw_message(pdev, regs, WH_FW_MSG_NOP, 50000, NULL))
+			return;
+
+		if (is_hardware_hung(pdev, regs))
+			return;
+
+		if (time_after(jiffies, timeout)) {
+			dev_warn(&pdev->dev, "Firmware not ready after %u ms\n", FW_READY_TIMEOUT_MS);
+			return;
+		}
+
+		if (msleep_interruptible(100))
+			return;
+	}
+}
+
+static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev)
+{
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
 	map_bar4_to_system_registers(wh_dev);
+
+	wormhole_wait_fw_ready(wh_dev);
 
 	if (arc_l2_is_running(reset_unit_regs(wh_dev))) {
 		wormhole_send_curr_date(tt_dev->pdev, reset_unit_regs(wh_dev));

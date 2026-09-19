@@ -15,6 +15,7 @@ struct wormhole_device {
 	u8 __iomem *bar4_mapping;
 
 	u8 saved_mps;
+	bool mps_saved;	// saved_mps is valid; set by save_reset_state
 };
 
 #define tt_dev_to_wh_dev(ttdev) \

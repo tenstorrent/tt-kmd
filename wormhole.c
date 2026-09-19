@@ -1005,29 +1005,37 @@ static void noc_write32(struct wormhole_device *wh, u32 x, u32 y, u64 addr, u32 
 
 // open_dbi disrupts normal NOC DMA because all outbound traffic are routed to DBI
 // only invokes open_dbi when there is no outbound traffic
-static void open_dbi(struct wormhole_device *wh) {
+static void open_dbi(struct wormhole_device *wh)
+{
 	iowrite32(DBI_ENABLE, reset_unit_regs(wh) + PCIE_ARMISC_INFO_REG);
 	iowrite32(DBI_ENABLE, reset_unit_regs(wh) + PCIE_AWMISC_INFO_REG);
 }
 
-static void close_dbi(struct wormhole_device *wh) {
+static void close_dbi(struct wormhole_device *wh)
+{
 	iowrite32(0x0, reset_unit_regs(wh) + PCIE_ARMISC_INFO_REG);
 	iowrite32(0x0, reset_unit_regs(wh) + PCIE_AWMISC_INFO_REG);
 }
 
-static void wormhole_save_reset_state(struct tenstorrent_device *tt_dev) {
+static void wormhole_save_reset_state(struct tenstorrent_device *tt_dev)
+{
 	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
 	u32 device_control;
 
 	open_dbi(wh);
 	device_control = noc_read32(wh, PCIE_NOC_X, PCIE_NOC_Y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, 0);
 	wh->saved_mps = FIELD_GET(PCI_EXP_DEVCTL_PAYLOAD, device_control);
+	wh->mps_saved = true;
 	close_dbi(wh);
 }
 
-static void wormhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
+static void wormhole_restore_reset_state(struct tenstorrent_device *tt_dev)
+{
 	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
 	u32 device_control;
+
+	if (!wh->mps_saved)
+		return;
 
 	open_dbi(wh);
 	device_control = noc_read32(wh, PCIE_NOC_X, PCIE_NOC_Y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, 0);

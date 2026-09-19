@@ -381,7 +381,11 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	tt_dev->needs_hw_init = !device_class->init_hardware(tt_dev);
 
 	pci_save_state(dev);
-	device_class->save_reset_state(tt_dev);
+
+	// The saved MPS is read from the chip's PCIe controller through the
+	// NOC, so it is only meaningful if NOC reads are working.
+	if (!tt_dev->needs_hw_init)
+		device_class->save_reset_state(tt_dev);
 
 	tenstorrent_register_device(tt_dev);
 

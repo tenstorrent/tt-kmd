@@ -354,12 +354,14 @@ static int blackhole_csm_write32(struct tenstorrent_device *tt_dev, u64 addr, u3
 }
 
 // BH has two PCIE instances, the function reads NOC ID to find out which one is active
-static bool blackhole_detect_pcie_noc_x(struct blackhole_device *bh, u32 *noc_x) {
+static bool blackhole_detect_pcie_noc_x(struct blackhole_device *bh, u32 *noc_x)
+{
 	*noc_x = ioread32(bh->noc2axi_cfg + NOC_ID_OFFSET) & 0x3F;
 	return (*noc_x == 2 || *noc_x == 11);
 }
 
-static void blackhole_save_reset_state(struct tenstorrent_device *tt_dev) {
+static void blackhole_save_reset_state(struct tenstorrent_device *tt_dev)
+{
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	u32 x;
 	u32 y = 0;
@@ -370,13 +372,18 @@ static void blackhole_save_reset_state(struct tenstorrent_device *tt_dev) {
 
 	device_control = noc_read32(bh, x, y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, 0);
 	bh->saved_mps = FIELD_GET(PCI_EXP_DEVCTL_PAYLOAD, device_control);
+	bh->mps_saved = true;
 }
 
-static void blackhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
+static void blackhole_restore_reset_state(struct tenstorrent_device *tt_dev)
+{
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	u32 x;
 	u32 y = 0;
 	u32 device_control;
+
+	if (!bh->mps_saved)
+		return;
 
 	if (!blackhole_detect_pcie_noc_x(bh, &x))
 		return;

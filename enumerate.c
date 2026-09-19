@@ -261,6 +261,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	u32 ordinal;
 	int galaxy_ord;
 	int err;
+	u16 vendor_id;
 	const struct tenstorrent_device_class *device_class;
 
 	if (!id->driver_data) {
@@ -271,6 +272,12 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	device_class = (const struct tenstorrent_device_class *)id->driver_data;
 
 	dev_info(&dev->dev, "Found a Tenstorrent %s device\n", device_class->name);
+
+	if (pci_read_config_word(dev, PCI_VENDOR_ID, &vendor_id) != PCIBIOS_SUCCESSFUL ||
+	    vendor_id != PCI_VENDOR_ID_TENSTORRENT) {
+		dev_err(&dev->dev, "Config space unreadable\n");
+		return -ENODEV;
+	}
 
 	// During pre-test, unflashed boards have no class code which trips up __dev_sort_resources.
 	// Assign the proper class code and rerun resource assignment to clear things up.

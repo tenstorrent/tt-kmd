@@ -392,7 +392,17 @@ static ssize_t bh_show_pcie_single_counter(struct device *dev, char *buf, u32 co
 	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	u64 offset = NOC_STATUS_OFFSET + (4 * counter_offset) + (noc * NOC1_NOC2AXI_OFFSET);
-	u32 value = ioread32(bh->noc2axi_cfg + offset);
+	u32 value;
+
+	// The group outlives cleanup_device; serialize against the BAR unmap.
+	down_read(&tt_dev->reset_rwsem);
+	if (tt_dev->detached) {
+		up_read(&tt_dev->reset_rwsem);
+		return -ENODEV;
+	}
+	value = ioread32(bh->noc2axi_cfg + offset);
+	up_read(&tt_dev->reset_rwsem);
+
 	return scnprintf(buf, PAGE_SIZE, "%u\n", value);
 }
 
@@ -444,6 +454,11 @@ static struct attribute *bh_pcie_perf_counters_attrs[] = {
 static const struct attribute_group bh_pcie_perf_counters_group = {
 	.name = "pcie_perf_counters",
 	.attrs = bh_pcie_perf_counters_attrs,
+};
+
+static const struct attribute_group *bh_dev_groups[] = {
+	&bh_pcie_perf_counters_group,
+	NULL,
 };
 
 static const struct tt_hwmon_label bh_hwmon_labels[] = {
@@ -794,12 +809,6 @@ static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	int r;
 
-	r = device_add_group(&tt_dev->dev, &bh_pcie_perf_counters_group);
-	if (r)
-		dev_err(&tt_dev->pdev->dev, "PCIe perf counters unavailable: %d\n", r);
-	else
-		bh->pcie_perf_group_registered = true;
-
 	r = tt_telemetry_probe(tt_dev);
 	if (!r) {
 		struct device *dev = &tt_dev->pdev->dev;
@@ -834,11 +843,6 @@ static void blackhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
 	if (bh->telemetry_group_registered) {
 		device_remove_group(&tt_dev->dev, &tt_dev->telemetry_group);
 		bh->telemetry_group_registered = false;
-	}
-
-	if (bh->pcie_perf_group_registered) {
-		device_remove_group(&tt_dev->dev, &bh_pcie_perf_counters_group);
-		bh->pcie_perf_group_registered = false;
 	}
 }
 
@@ -984,6 +988,7 @@ struct tenstorrent_device_class blackhole_class = {
 	.tlb_kinds = 2,
 	.tlb_counts = { TLB_2M_WINDOW_COUNT, TLB_4G_WINDOW_COUNT },
 	.tlb_sizes = { TLB_2M_WINDOW_SIZE, TLB_4G_WINDOW_SIZE },
+	.dev_groups = bh_dev_groups,
 	.reset = blackhole_reset,
 	.init_device = blackhole_init,
 	.init_hardware = blackhole_init_hardware,

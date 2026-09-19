@@ -115,6 +115,11 @@ struct tenstorrent_device_class {
 	u32 tlb_kinds;
 	u32 tlb_counts[MAX_TLB_KINDS];
 	u64 tlb_sizes[MAX_TLB_KINDS];
+	// Attribute groups created with the device and removed with it.  The group
+	// exists from device_add until device_del, which is after cleanup_device
+	// has unmapped the BARs, so show functions must take reset_rwsem shared and
+	// check the detached flag before touching hardware.
+	const struct attribute_group **dev_groups;
 	bool (*reset)(struct tenstorrent_device *ttdev, u32 reset_flag);
 	bool (*init_device)(struct tenstorrent_device *ttdev);
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);

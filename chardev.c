@@ -104,7 +104,7 @@ int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 	tt_dev->dev.devt = devt;
 	tt_dev->dev.class = tt_dev_class;
 	tt_dev->dev.parent = &tt_dev->pdev->dev;
-	tt_dev->dev.groups = NULL;
+	tt_dev->dev.groups = tt_dev->dev_class->dev_groups;
 	tt_dev->dev.release = tt_dev_release;
 
 	tt_dev->dev.id = tt_dev->ordinal;

@@ -120,12 +120,71 @@ replace:
 	return r;
 }
 
-// Reverse the work of tt_telemetry_probe: tear down arch-specific telemetry
-// state, then free the HW-independent telemetry cache.
+// Bring up telemetry: scan the tag table, then expose it through sysfs and
+// hwmon.  This is the single entry point for both probe and POST_RESET, so a
+// device whose firmware was not ready at probe gets its telemetry on the
+// first successful re-initialization, and a re-probe after a firmware update
+// refreshes the tag cache.
+//
+// sysfs and hwmon are registered once, after the first successful probe.
+// Both is_visible callbacks consult the tag cache when the attributes are
+// created, so registering before a probe has filled the cache would hide
+// everything permanently.  They do not consult needs_hw_init, which is still
+// set when POST_RESET calls this.
+//
+// Returns the probe result.  A failed probe leaves any existing sysfs and
+// hwmon in place with an empty cache, so reads return -ENODATA.
+int tt_telemetry_init(struct tenstorrent_device *tt_dev)
+{
+	struct device *dev = &tt_dev->pdev->dev;
+	bool added = false;
+	int r;
+
+	r = tt_dev->dev_class->probe_telemetry(tt_dev);
+	if (r)
+		return r;
+
+	if (!tt_dev->telemetry_group_registered) {
+		r = device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
+		if (r)
+			dev_warn(dev, "Failed to register telemetry attributes: %d\n", r);
+		else
+			tt_dev->telemetry_group_registered = added = true;
+	}
+
+	if (!tt_dev->hwmon_dev) {
+		struct device *hwmon_dev;
+
+		hwmon_dev = hwmon_device_register_with_info(dev, tt_dev->dev_class->hwmon_name, tt_dev,
+							    tt_dev->dev_class->hwmon_chip_info, NULL);
+		if (IS_ERR(hwmon_dev)) {
+			dev_warn(dev, "Failed to initialize hwmon: %ld\n", PTR_ERR(hwmon_dev));
+		} else {
+			tt_dev->hwmon_dev = hwmon_dev;
+			added = true;
+		}
+	}
+
+	// Notify udev that telemetry attributes are now available.
+	if (added)
+		kobject_uevent(&tt_dev->dev.kobj, KOBJ_CHANGE);
+
+	return 0;
+}
+
+// Reverse the work of tt_telemetry_init: unregister hwmon and the sysfs
+// group, then free the telemetry cache.
 void tt_telemetry_cleanup(struct tenstorrent_device *tt_dev)
 {
-	if (tt_dev->dev_class->cleanup_telemetry)
-		tt_dev->dev_class->cleanup_telemetry(tt_dev);
+	if (tt_dev->hwmon_dev) {
+		hwmon_device_unregister(tt_dev->hwmon_dev);
+		tt_dev->hwmon_dev = NULL;
+	}
+
+	if (tt_dev->telemetry_group_registered) {
+		device_remove_group(&tt_dev->dev, &tt_dev->telemetry_group);
+		tt_dev->telemetry_group_registered = false;
+	}
 
 	kfree(tt_dev->telemetry_cache);
 	tt_dev->telemetry_cache = NULL;

@@ -15,8 +15,6 @@ struct wormhole_device {
 	u8 __iomem *bar4_mapping;
 
 	u8 saved_mps;
-
-	bool telemetry_group_registered;
 };
 
 #define tt_dev_to_wh_dev(ttdev) \

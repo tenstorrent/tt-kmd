@@ -637,24 +637,6 @@ static const struct hwmon_chip_info wh_hwmon_chip_info = {
 	.info = wh_hwmon_info,
 };
 
-static void wormhole_hwmon_init(struct wormhole_device *wh_dev)
-{
-	struct tenstorrent_device *tt_dev = &wh_dev->tt;
-	struct device *dev = &tt_dev->pdev->dev;
-	struct device *hwmon_device;
-
-	hwmon_device = hwmon_device_register_with_info(dev, "wormhole", tt_dev, &wh_hwmon_chip_info, NULL);
-	if (IS_ERR(hwmon_device)) {
-		dev_warn(dev, "Failed to initialize hwmon.\n");
-		return;
-	}
-
-	tt_dev->hwmon_dev = hwmon_device;
-
-	// Notify udev that telemetry attributes are now available.
-	kobject_uevent(&tt_dev->dev.kobj, KOBJ_CHANGE);
-}
-
 static bool is_fw_ready_for_telemetry(struct wormhole_device *wh)
 {
 	u32 base_addr = ioread32(wh->bar4_mapping + ARC_TELEMETRY_PTR);
@@ -801,38 +783,6 @@ static int wormhole_probe_telemetry(struct tenstorrent_device *tt_dev)
 
 	wormhole_wait_telemetry_ready(wh);
 	return tt_telemetry_probe(tt_dev);
-}
-
-static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev)
-{
-	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
-	int r;
-
-	r = wormhole_probe_telemetry(tt_dev);
-	if (!r) {
-		r = device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
-		if (!r)
-			wh_dev->telemetry_group_registered = true;
-
-		wormhole_hwmon_init(wh_dev);
-	}
-
-	return true;
-}
-
-static void wormhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
-{
-	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
-
-	if (tt_dev->hwmon_dev) {
-		hwmon_device_unregister(tt_dev->hwmon_dev);
-		tt_dev->hwmon_dev = NULL;
-	}
-
-	if (wh_dev->telemetry_group_registered) {
-		device_remove_group(&tt_dev->dev, &tt_dev->telemetry_group);
-		wh_dev->telemetry_group_registered = false;
-	}
 }
 
 static void wormhole_cleanup_hardware(struct tenstorrent_device *tt_dev) {
@@ -1165,11 +1115,11 @@ struct tenstorrent_device_class wormhole_class = {
 	.reset = wormhole_reset,
 	.init_device = wormhole_init,
 	.init_hardware = wormhole_init_hardware,
-	.init_telemetry = wormhole_init_telemetry,
-	.cleanup_telemetry = wormhole_cleanup_telemetry,
 	.read_telemetry_tag = wormhole_read_telemetry_tag,
 	.populate_telemetry_cache = wormhole_populate_telemetry_cache,
 	.probe_telemetry = wormhole_probe_telemetry,
+	.hwmon_name = "wormhole",
+	.hwmon_chip_info = &wh_hwmon_chip_info,
 	.cleanup_hardware = wormhole_cleanup_hardware,
 	.cleanup_device = wormhole_cleanup,
 	.reboot = wormhole_cleanup_hardware,

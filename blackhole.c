@@ -804,48 +804,6 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 	return true;
 }
 
-static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
-{
-	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-	int r;
-
-	r = tt_telemetry_probe(tt_dev);
-	if (!r) {
-		struct device *dev = &tt_dev->pdev->dev;
-		struct device *hwmon_device;
-
-		r = device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
-		if (!r)
-			bh->telemetry_group_registered = true;
-
-		hwmon_device = hwmon_device_register_with_info(dev, "blackhole", tt_dev, &bh_hwmon_chip_info, NULL);
-		if (IS_ERR(hwmon_device))
-			return false;
-
-		tt_dev->hwmon_dev = hwmon_device;
-
-		// Notify udev that telemetry attributes are now available.
-		kobject_uevent(&tt_dev->dev.kobj, KOBJ_CHANGE);
-	}
-
-	return true;
-}
-
-static void blackhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
-{
-	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-
-	if (tt_dev->hwmon_dev) {
-		hwmon_device_unregister(tt_dev->hwmon_dev);
-		tt_dev->hwmon_dev = NULL;
-	}
-
-	if (bh->telemetry_group_registered) {
-		device_remove_group(&tt_dev->dev, &tt_dev->telemetry_group);
-		bh->telemetry_group_registered = false;
-	}
-}
-
 static void blackhole_cleanup_hardware(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
@@ -992,11 +950,11 @@ struct tenstorrent_device_class blackhole_class = {
 	.reset = blackhole_reset,
 	.init_device = blackhole_init,
 	.init_hardware = blackhole_init_hardware,
-	.init_telemetry = blackhole_init_telemetry,
-	.cleanup_telemetry = blackhole_cleanup_telemetry,
 	.read_telemetry_tag = blackhole_read_telemetry_tag,
 	.populate_telemetry_cache = blackhole_populate_telemetry_cache,
 	.probe_telemetry = tt_telemetry_probe,
+	.hwmon_name = "blackhole",
+	.hwmon_chip_info = &bh_hwmon_chip_info,
 	.cleanup_hardware = blackhole_cleanup_hardware,
 	.cleanup_device = blackhole_cleanup,
 	.configure_tlb = blackhole_configure_tlb,

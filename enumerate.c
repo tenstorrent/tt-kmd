@@ -261,6 +261,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	u32 ordinal;
 	int galaxy_ord;
 	int err;
+	u16 vendor_id;
 	const struct tenstorrent_device_class *device_class;
 
 	if (!id->driver_data) {
@@ -271,6 +272,12 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	device_class = (const struct tenstorrent_device_class *)id->driver_data;
 
 	dev_info(&dev->dev, "Found a Tenstorrent %s device\n", device_class->name);
+
+	if (pci_read_config_word(dev, PCI_VENDOR_ID, &vendor_id) != PCIBIOS_SUCCESSFUL ||
+	    vendor_id != PCI_VENDOR_ID_TENSTORRENT) {
+		dev_err(&dev->dev, "Config space unreadable\n");
+		return -ENODEV;
+	}
 
 	// During pre-test, unflashed boards have no class code which trips up __dev_sort_resources.
 	// Assign the proper class code and rerun resource assignment to clear things up.
@@ -374,7 +381,11 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	tt_dev->needs_hw_init = !device_class->init_hardware(tt_dev);
 
 	pci_save_state(dev);
-	device_class->save_reset_state(tt_dev);
+
+	// The saved MPS is read from the chip's PCIe controller through the
+	// NOC, so it is only meaningful if NOC reads are working.
+	if (!tt_dev->needs_hw_init)
+		device_class->save_reset_state(tt_dev);
 
 	tenstorrent_register_device(tt_dev);
 
@@ -384,12 +395,12 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	}
 
 	if (!tt_dev->needs_hw_init)
-		device_class->init_telemetry(tt_dev);
+		tt_telemetry_init(tt_dev);
 
 	debugfs_create_file("mappings", 0444, tt_dev->debugfs_root, tt_dev, &mappings_fops);
 
 	// Set initial low-power state via aggregation logic.
-	if (power_policy)
+	if (power_policy && !tt_dev->needs_hw_init)
 		tenstorrent_set_aggregated_power_state(tt_dev);
 
 	return 0;

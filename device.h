@@ -21,6 +21,11 @@
 
 #define MAX_TLB_KINDS 4
 
+// How long init_hardware waits for firmware to start accepting messages
+// before carrying on without it.  Covers the time from PCIe link-up to the
+// end of ARC firmware init; a healthy chip needs a few seconds at most.
+#define FW_READY_TIMEOUT_MS 10000
+
 struct tenstorrent_device_class;
 struct chardev_private;
 
@@ -57,7 +62,8 @@ struct tenstorrent_device {
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
 	wait_queue_head_t resource_lock_waitqueue;
 
-	struct device *hwmon_dev;
+	struct device *hwmon_dev;	// NULL until registered by tt_telemetry_init
+	bool telemetry_group_registered;
 	const struct tenstorrent_sysfs_attr *telemetry_sysfs;
 	u16 telemetry_sysfs_count;
 	const struct tt_hwmon_attr *hwmon_attributes;
@@ -110,11 +116,14 @@ struct tenstorrent_device_class {
 	u32 tlb_kinds;
 	u32 tlb_counts[MAX_TLB_KINDS];
 	u64 tlb_sizes[MAX_TLB_KINDS];
+	// Attribute groups created with the device and removed with it.  The group
+	// exists from device_add until device_del, which is after cleanup_device
+	// has unmapped the BARs, so show functions must take reset_rwsem shared and
+	// check the detached flag before touching hardware.
+	const struct attribute_group **dev_groups;
 	bool (*reset)(struct tenstorrent_device *ttdev, u32 reset_flag);
 	bool (*init_device)(struct tenstorrent_device *ttdev);
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);
-	bool (*init_telemetry)(struct tenstorrent_device *ttdev);
-	void (*cleanup_telemetry)(struct tenstorrent_device *ttdev);
 	void (*cleanup_hardware)(struct tenstorrent_device *ttdev);
 	void (*cleanup_device)(struct tenstorrent_device *ttdev);
 	void (*reboot)(struct tenstorrent_device *ttdev);
@@ -140,7 +149,12 @@ struct tenstorrent_device_class {
 	int (*read_telemetry_tag)(struct tenstorrent_device *ttdev, u64 address, u32 *value);
 	int (*populate_telemetry_cache)(struct tenstorrent_device *ttdev,
 				       struct telem_cache_entry *cache, u16 count);
+	// Scan the telemetry tag table into the cache, waiting for firmware to
+	// publish it if the architecture needs that.  Called by tt_telemetry_init.
 	int (*probe_telemetry)(struct tenstorrent_device *ttdev);
+	// hwmon registration parameters; the callbacks are the shared tt_hwmon_ops.
+	const char *hwmon_name;
+	const struct hwmon_chip_info *hwmon_chip_info;
 
 	// If true, the idle power-down message is sent from a delayed work
 	// item armed when the last fd closes, rather than synchronously from

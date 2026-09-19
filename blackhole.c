@@ -354,12 +354,14 @@ static int blackhole_csm_write32(struct tenstorrent_device *tt_dev, u64 addr, u3
 }
 
 // BH has two PCIE instances, the function reads NOC ID to find out which one is active
-static bool blackhole_detect_pcie_noc_x(struct blackhole_device *bh, u32 *noc_x) {
+static bool blackhole_detect_pcie_noc_x(struct blackhole_device *bh, u32 *noc_x)
+{
 	*noc_x = ioread32(bh->noc2axi_cfg + NOC_ID_OFFSET) & 0x3F;
 	return (*noc_x == 2 || *noc_x == 11);
 }
 
-static void blackhole_save_reset_state(struct tenstorrent_device *tt_dev) {
+static void blackhole_save_reset_state(struct tenstorrent_device *tt_dev)
+{
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	u32 x;
 	u32 y = 0;
@@ -370,13 +372,18 @@ static void blackhole_save_reset_state(struct tenstorrent_device *tt_dev) {
 
 	device_control = noc_read32(bh, x, y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, 0);
 	bh->saved_mps = FIELD_GET(PCI_EXP_DEVCTL_PAYLOAD, device_control);
+	bh->mps_saved = true;
 }
 
-static void blackhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
+static void blackhole_restore_reset_state(struct tenstorrent_device *tt_dev)
+{
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	u32 x;
 	u32 y = 0;
 	u32 device_control;
+
+	if (!bh->mps_saved)
+		return;
 
 	if (!blackhole_detect_pcie_noc_x(bh, &x))
 		return;
@@ -392,7 +399,17 @@ static ssize_t bh_show_pcie_single_counter(struct device *dev, char *buf, u32 co
 	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	u64 offset = NOC_STATUS_OFFSET + (4 * counter_offset) + (noc * NOC1_NOC2AXI_OFFSET);
-	u32 value = ioread32(bh->noc2axi_cfg + offset);
+	u32 value;
+
+	// The group outlives cleanup_device; serialize against the BAR unmap.
+	down_read(&tt_dev->reset_rwsem);
+	if (tt_dev->detached) {
+		up_read(&tt_dev->reset_rwsem);
+		return -ENODEV;
+	}
+	value = ioread32(bh->noc2axi_cfg + offset);
+	up_read(&tt_dev->reset_rwsem);
+
 	return scnprintf(buf, PAGE_SIZE, "%u\n", value);
 }
 
@@ -444,6 +461,11 @@ static struct attribute *bh_pcie_perf_counters_attrs[] = {
 static const struct attribute_group bh_pcie_perf_counters_group = {
 	.name = "pcie_perf_counters",
 	.attrs = bh_pcie_perf_counters_attrs,
+};
+
+static const struct attribute_group *bh_dev_groups[] = {
+	&bh_pcie_perf_counters_group,
+	NULL,
 };
 
 static const struct tt_hwmon_label bh_hwmon_labels[] = {
@@ -721,6 +743,43 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	return true;
 }
 
+// Wait for firmware to flag its message queue ready.  ARC sets the bit at the
+// end of its boot, after GDDR training, well after the PCIe link is up and the
+// driver can see the chip.  A chip that does not get there within
+// FW_READY_TIMEOUT_MS is unwell; carry on and let the individual messages
+// fail and report as they do today.
+//
+// Returns false if the chip is hung: an all-ones read means the NOC path is
+// dead, and nothing that follows can work.
+static bool blackhole_wait_fw_ready(struct blackhole_device *bh)
+{
+	struct pci_dev *pdev = bh->tt.pdev;
+	unsigned long timeout = jiffies + msecs_to_jiffies(FW_READY_TIMEOUT_MS);
+
+	for (;;) {
+		u32 boot_status;
+
+		if (bh->tt.detached)
+			return false;
+
+		boot_status = noc_read32(bh, ARC_X, ARC_Y, ARC_BOOT_STATUS, 0);
+		if (boot_status == 0xFFFFFFFFu)
+			return false;
+		if (boot_status & ARC_BOOT_STATUS_READY_FOR_MSG)
+			return true;
+
+		if (time_after(jiffies, timeout)) {
+			dev_warn(&pdev->dev, "Firmware not ready after %u ms\n", FW_READY_TIMEOUT_MS);
+			return true;
+		}
+
+		if (msleep_interruptible(100))
+			return true;
+	}
+}
+
+// Returns false if the chip is hung.  The device is still registered so it can
+// be identified and a reset attempted.
 static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
@@ -728,6 +787,11 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 	struct arc_msg msg = { 0 };
 
 	pcie_set_readrq(pdev, MAX_MRRS);
+
+	if (!blackhole_wait_fw_ready(bh)) {
+		dev_err(&tt_dev->pdev->dev, "Device is unresponsive; skipping firmware init\n");
+		return false;
+	}
 
 	msg.header = ARC_MSG_TYPE_ASIC_STATE0;
 	if (arc_msg_send_sync(&bh->tt, &msg) != 0)
@@ -745,59 +809,6 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 	fw_log_setup(&tt_dev->fw_log);
 
 	return true;
-}
-
-static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
-{
-	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-	int r;
-
-	r = device_add_group(&tt_dev->dev, &bh_pcie_perf_counters_group);
-	if (r)
-		dev_err(&tt_dev->pdev->dev, "PCIe perf counters unavailable: %d\n", r);
-	else
-		bh->pcie_perf_group_registered = true;
-
-	r = tt_telemetry_probe(tt_dev);
-	if (!r) {
-		struct device *dev = &tt_dev->pdev->dev;
-		struct device *hwmon_device;
-
-		r = device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
-		if (!r)
-			bh->telemetry_group_registered = true;
-
-		hwmon_device = hwmon_device_register_with_info(dev, "blackhole", tt_dev, &bh_hwmon_chip_info, NULL);
-		if (IS_ERR(hwmon_device))
-			return false;
-
-		tt_dev->hwmon_dev = hwmon_device;
-
-		// Notify udev that telemetry attributes are now available.
-		kobject_uevent(&tt_dev->dev.kobj, KOBJ_CHANGE);
-	}
-
-	return true;
-}
-
-static void blackhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
-{
-	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-
-	if (tt_dev->hwmon_dev) {
-		hwmon_device_unregister(tt_dev->hwmon_dev);
-		tt_dev->hwmon_dev = NULL;
-	}
-
-	if (bh->telemetry_group_registered) {
-		device_remove_group(&tt_dev->dev, &tt_dev->telemetry_group);
-		bh->telemetry_group_registered = false;
-	}
-
-	if (bh->pcie_perf_group_registered) {
-		device_remove_group(&tt_dev->dev, &bh_pcie_perf_counters_group);
-		bh->pcie_perf_group_registered = false;
-	}
 }
 
 static void blackhole_cleanup_hardware(struct tenstorrent_device *tt_dev)
@@ -942,14 +953,15 @@ struct tenstorrent_device_class blackhole_class = {
 	.tlb_kinds = 2,
 	.tlb_counts = { TLB_2M_WINDOW_COUNT, TLB_4G_WINDOW_COUNT },
 	.tlb_sizes = { TLB_2M_WINDOW_SIZE, TLB_4G_WINDOW_SIZE },
+	.dev_groups = bh_dev_groups,
 	.reset = blackhole_reset,
 	.init_device = blackhole_init,
 	.init_hardware = blackhole_init_hardware,
-	.init_telemetry = blackhole_init_telemetry,
-	.cleanup_telemetry = blackhole_cleanup_telemetry,
 	.read_telemetry_tag = blackhole_read_telemetry_tag,
 	.populate_telemetry_cache = blackhole_populate_telemetry_cache,
 	.probe_telemetry = tt_telemetry_probe,
+	.hwmon_name = "blackhole",
+	.hwmon_chip_info = &bh_hwmon_chip_info,
 	.cleanup_hardware = blackhole_cleanup_hardware,
 	.cleanup_device = blackhole_cleanup,
 	.configure_tlb = blackhole_configure_tlb,

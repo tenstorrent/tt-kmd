@@ -104,7 +104,7 @@ int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 	tt_dev->dev.devt = devt;
 	tt_dev->dev.class = tt_dev_class;
 	tt_dev->dev.parent = &tt_dev->pdev->dev;
-	tt_dev->dev.groups = NULL;
+	tt_dev->dev.groups = tt_dev->dev_class->dev_groups;
 	tt_dev->dev.release = tt_dev_release;
 
 	tt_dev->dev.id = tt_dev->ordinal;
@@ -336,21 +336,28 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {
 		ok = is_reset_marker_zero(pdev);
 
-		// In the hotplug case, needs_hw_init is false and there is nothing to
-		// do here. Otherwise this was an in-place reset, so re-initialize now.
+		// needs_hw_init means the hardware is uninitialized: an in-place
+		// reset set it, or probe found the chip hung.  Re-initialize now
+		// and clear the flag only if that succeeds.  If it is already
+		// clear, probe (e.g. after hotplug) initialized the chip and there
+		// is nothing to do here.
 		if (priv->device->needs_hw_init) {
-			priv->device->needs_hw_init = false;
 			if (ok && safe_pci_restore_state(pdev)) {
 				priv->device->dev_class->restore_reset_state(priv->device);
 				ok = priv->device->dev_class->init_hardware(priv->device);
 
-				// Re-probe telemetry tag addresses in case
-				// firmware was updated before this reset.
-				if (ok && priv->device->dev_class->probe_telemetry)
-					priv->device->dev_class->probe_telemetry(priv->device);
+				// Same telemetry bring-up as probe: re-scans the
+				// tag table in case firmware was updated before
+				// this reset, and registers sysfs/hwmon if probe
+				// never got to.
+				if (ok)
+					tt_telemetry_init(priv->device);
 			} else {
 				ok = false;
 			}
+
+			if (ok)
+				priv->device->needs_hw_init = false;
 		}
 	} else {
 		return -EINVAL;

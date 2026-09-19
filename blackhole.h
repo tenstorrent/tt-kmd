@@ -17,9 +17,7 @@ struct blackhole_device {
 	u8 __iomem *bar2_mapping;
 
 	u8 saved_mps;
-
-	bool pcie_perf_group_registered;
-	bool telemetry_group_registered;
+	bool mps_saved;	// saved_mps is valid; set by save_reset_state
 };
 
 #define tt_dev_to_bh_dev(ttdev) \

@@ -85,6 +85,7 @@
 
 #define ARC_TELEMETRY_PTR  (RESET_UNIT_START + 0x01D0)
 #define ARC_TELEMETRY_DATA (RESET_UNIT_START + 0x01D4)
+#define TELEMETRY_READY_TIMEOUT_MS 5000
 
 // kernel TLB is the last 16MB TLB
 #define KERNEL_TLB_INDEX (TLB_WINDOW_COUNT - 1)
@@ -394,7 +395,17 @@ static ssize_t wh_show_pcie_single_counter(struct device *dev, char *buf, u32 co
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 	u8 __iomem *noc2axi = wh_dev->bar4_mapping + NIU_COUNTERS_START;
 	u64 addr = (4 * counter_offset) + (noc * NIU_NOC1_OFFSET);
-	u32 value = ioread32(noc2axi + addr);
+	u32 value;
+
+	// The group outlives cleanup_device; serialize against the BAR unmap.
+	down_read(&tt_dev->reset_rwsem);
+	if (tt_dev->detached) {
+		up_read(&tt_dev->reset_rwsem);
+		return -ENODEV;
+	}
+	value = ioread32(noc2axi + addr);
+	up_read(&tt_dev->reset_rwsem);
+
 	return scnprintf(buf, PAGE_SIZE, "%u\n", value);
 }
 
@@ -446,6 +457,11 @@ static struct attribute *wh_pcie_perf_counters_attrs[] = {
 static const struct attribute_group wh_pcie_perf_counters_group = {
 	.name = "pcie_perf_counters",
 	.attrs = wh_pcie_perf_counters_attrs,
+};
+
+static const struct attribute_group *wh_dev_groups[] = {
+	&wh_pcie_perf_counters_group,
+	NULL,
 };
 
 // Program the iATU so that BAR4 is directed to the system registers.
@@ -621,24 +637,6 @@ static const struct hwmon_chip_info wh_hwmon_chip_info = {
 	.info = wh_hwmon_info,
 };
 
-static void wormhole_hwmon_init(struct wormhole_device *wh_dev)
-{
-	struct tenstorrent_device *tt_dev = &wh_dev->tt;
-	struct device *dev = &tt_dev->pdev->dev;
-	struct device *hwmon_device;
-
-	hwmon_device = hwmon_device_register_with_info(dev, "wormhole", tt_dev, &wh_hwmon_chip_info, NULL);
-	if (IS_ERR(hwmon_device)) {
-		dev_warn(dev, "Failed to initialize hwmon.\n");
-		return;
-	}
-
-	tt_dev->hwmon_dev = hwmon_device;
-
-	// Notify udev that telemetry attributes are now available.
-	kobject_uevent(&tt_dev->dev.kobj, KOBJ_CHANGE);
-}
-
 static bool is_fw_ready_for_telemetry(struct wormhole_device *wh)
 {
 	u32 base_addr = ioread32(wh->bar4_mapping + ARC_TELEMETRY_PTR);
@@ -650,40 +648,27 @@ static bool is_fw_ready_for_telemetry(struct wormhole_device *wh)
 	return ready;
 }
 
-// On some WH systems, ARC firmware may not have finished initializing by the
-// time the PCI driver probes or a reset completes. This work function polls for
-// firmware readiness, then scans the telemetry tag table. On first init it also
-// registers the sysfs group and hwmon device; on re-probe after reset it just
-// refreshes the tag cache (sysfs/hwmon are already registered).
-static void fw_ready_work_func(struct work_struct *work)
+// ARC firmware publishes the telemetry table late in its init, after GDDR
+// training. A healthy chip gets there within a couple of seconds of coming up;
+// one that takes much longer is unwell, and we go without telemetry rather
+// than keep waiting. Returns false on timeout, signal, or device removal.
+static bool wormhole_wait_telemetry_ready(struct wormhole_device *wh)
 {
-	struct delayed_work *dwork = to_delayed_work(work);
-	struct wormhole_device *wh = container_of(dwork, struct wormhole_device, fw_ready_work);
-	struct tenstorrent_device *tt_dev = &wh->tt;
+	unsigned long timeout = jiffies + msecs_to_jiffies(TELEMETRY_READY_TIMEOUT_MS);
 
-	if (tt_dev->detached)
-		return;
+	for (;;) {
+		if (wh->tt.detached)
+			return false;
 
-	if (!is_fw_ready_for_telemetry(wh)) {
-		if (wh->telemetry_retries-- > 0)
-			schedule_delayed_work(&wh->fw_ready_work, msecs_to_jiffies(1000));
-		else
-			dev_err(&tt_dev->pdev->dev, "Timed out waiting for FW telemetry\n");
-		return;
+		if (is_fw_ready_for_telemetry(wh))
+			return true;
+
+		if (time_after(jiffies, timeout))
+			return false;
+
+		if (msleep_interruptible(100))
+			return false;
 	}
-
-	down_write(&tt_dev->reset_rwsem);
-	tt_telemetry_probe(tt_dev);
-	up_write(&tt_dev->reset_rwsem);
-
-	// First-time init: register sysfs and hwmon if not already done.
-	if (!wh->telemetry_group_registered) {
-		if (!device_add_group(&tt_dev->dev, &tt_dev->telemetry_group))
-			wh->telemetry_group_registered = true;
-	}
-
-	if (!tt_dev->hwmon_dev)
-		wormhole_hwmon_init(wh);
 }
 
 static bool wormhole_init(struct tenstorrent_device *tt_dev)
@@ -691,8 +676,6 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev)
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 	struct device *dev = &tt_dev->pdev->dev;
 	int i;
-
-	INIT_DELAYED_WORK(&wh_dev->fw_ready_work, fw_ready_work_func);
 
 	tt_dev->telemetry_attrs = devm_kcalloc(dev, ARRAY_SIZE(wh_sysfs_attributes) + 1, sizeof(struct attribute *), GFP_KERNEL);
 
@@ -726,10 +709,55 @@ fail_bar2:
 	return false;
 }
 
-static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
+// Wait for firmware to answer a NOP.  The post code says L2 firmware has
+// started long before it is listening for messages, and a message written
+// while it is still initializing is discarded, so answering is the only
+// reliable sign that it is ready.  The post code is checked first only to
+// avoid the "FW not running" warning while the bootrom is still in charge.
+// A chip that does not answer within FW_READY_TIMEOUT_MS is unwell; carry on
+// and let the individual messages fail and report as they do today.
+//
+// Returns false if the chip is hung: register reads come back all-ones and
+// nothing that follows can work.
+static bool wormhole_wait_fw_ready(struct wormhole_device *wh_dev)
+{
+	struct pci_dev *pdev = wh_dev->tt.pdev;
+	u8 __iomem *regs = reset_unit_regs(wh_dev);
+	unsigned long timeout = jiffies + msecs_to_jiffies(FW_READY_TIMEOUT_MS);
+
+	for (;;) {
+		if (wh_dev->tt.detached)
+			return false;
+
+		if (arc_l2_is_running(regs) &&
+		    wormhole_send_arc_fw_message(pdev, regs, WH_FW_MSG_NOP, 50000, NULL))
+			return true;
+
+		if (is_hardware_hung(pdev, regs))
+			return false;
+
+		if (time_after(jiffies, timeout)) {
+			dev_warn(&pdev->dev, "Firmware not ready after %u ms\n", FW_READY_TIMEOUT_MS);
+			return true;
+		}
+
+		if (msleep_interruptible(100))
+			return true;
+	}
+}
+
+// Returns false if the chip is hung.  The device is still registered so it can
+// be identified and a reset attempted.
+static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev)
+{
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
 	map_bar4_to_system_registers(wh_dev);
+
+	if (!wormhole_wait_fw_ready(wh_dev)) {
+		dev_err(&tt_dev->pdev->dev, "Device is unresponsive; skipping firmware init\n");
+		return false;
+	}
 
 	if (arc_l2_is_running(reset_unit_regs(wh_dev))) {
 		wormhole_send_curr_date(tt_dev->pdev, reset_unit_regs(wh_dev));
@@ -745,55 +773,16 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 	return true;
 }
 
-// Re-probe telemetry after reset. If FW is ready, scan immediately.
-// If not (slow ARC init on some WH boards), defer and poll via fw_ready_work.
+// Scan the telemetry tag table. Used at probe and again after an in-place
+// reset, when firmware has just rebooted and may not have published the table
+// yet. On failure the tag cache is emptied, so stale addresses from a previous
+// firmware are never read.
 static int wormhole_probe_telemetry(struct tenstorrent_device *tt_dev)
 {
 	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
 
-	wh->telemetry_retries = 120;
-	schedule_delayed_work(&wh->fw_ready_work, 0);
-	return 0;
-}
-
-static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev)
-{
-	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
-	int r;
-
-	r = device_add_group(&tt_dev->dev, &wh_pcie_perf_counters_group);
-	if (r)
-		dev_err(&tt_dev->pdev->dev, "PCIe perf counters unavailable: %d\n", r);
-	else
-		wh_dev->pcie_perf_group_registered = true;
-
-	// Probe telemetry and register sysfs/hwmon. On some WH systems the ARC
-	// firmware may still be initializing, so fw_ready_work polls until ready.
-	wormhole_probe_telemetry(tt_dev);
-
-	return true;
-}
-
-static void wormhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
-{
-	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
-
-	cancel_delayed_work_sync(&wh_dev->fw_ready_work);
-
-	if (tt_dev->hwmon_dev) {
-		hwmon_device_unregister(tt_dev->hwmon_dev);
-		tt_dev->hwmon_dev = NULL;
-	}
-
-	if (wh_dev->telemetry_group_registered) {
-		device_remove_group(&tt_dev->dev, &tt_dev->telemetry_group);
-		wh_dev->telemetry_group_registered = false;
-	}
-
-	if (wh_dev->pcie_perf_group_registered) {
-		device_remove_group(&tt_dev->dev, &wh_pcie_perf_counters_group);
-		wh_dev->pcie_perf_group_registered = false;
-	}
+	wormhole_wait_telemetry_ready(wh);
+	return tt_telemetry_probe(tt_dev);
 }
 
 static void wormhole_cleanup_hardware(struct tenstorrent_device *tt_dev) {
@@ -1016,29 +1005,37 @@ static void noc_write32(struct wormhole_device *wh, u32 x, u32 y, u64 addr, u32 
 
 // open_dbi disrupts normal NOC DMA because all outbound traffic are routed to DBI
 // only invokes open_dbi when there is no outbound traffic
-static void open_dbi(struct wormhole_device *wh) {
+static void open_dbi(struct wormhole_device *wh)
+{
 	iowrite32(DBI_ENABLE, reset_unit_regs(wh) + PCIE_ARMISC_INFO_REG);
 	iowrite32(DBI_ENABLE, reset_unit_regs(wh) + PCIE_AWMISC_INFO_REG);
 }
 
-static void close_dbi(struct wormhole_device *wh) {
+static void close_dbi(struct wormhole_device *wh)
+{
 	iowrite32(0x0, reset_unit_regs(wh) + PCIE_ARMISC_INFO_REG);
 	iowrite32(0x0, reset_unit_regs(wh) + PCIE_AWMISC_INFO_REG);
 }
 
-static void wormhole_save_reset_state(struct tenstorrent_device *tt_dev) {
+static void wormhole_save_reset_state(struct tenstorrent_device *tt_dev)
+{
 	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
 	u32 device_control;
 
 	open_dbi(wh);
 	device_control = noc_read32(wh, PCIE_NOC_X, PCIE_NOC_Y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, 0);
 	wh->saved_mps = FIELD_GET(PCI_EXP_DEVCTL_PAYLOAD, device_control);
+	wh->mps_saved = true;
 	close_dbi(wh);
 }
 
-static void wormhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
+static void wormhole_restore_reset_state(struct tenstorrent_device *tt_dev)
+{
 	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
 	u32 device_control;
+
+	if (!wh->mps_saved)
+		return;
 
 	open_dbi(wh);
 	device_control = noc_read32(wh, PCIE_NOC_X, PCIE_NOC_Y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, 0);
@@ -1122,14 +1119,15 @@ struct tenstorrent_device_class wormhole_class = {
 	.tlb_kinds = NUM_TLB_KINDS,
 	.tlb_counts = { TLB_1M_WINDOW_COUNT, TLB_2M_WINDOW_COUNT, TLB_16M_WINDOW_COUNT },
 	.tlb_sizes = { TLB_1M_WINDOW_SIZE, TLB_2M_WINDOW_SIZE, TLB_16M_WINDOW_SIZE },
+	.dev_groups = wh_dev_groups,
 	.reset = wormhole_reset,
 	.init_device = wormhole_init,
 	.init_hardware = wormhole_init_hardware,
-	.init_telemetry = wormhole_init_telemetry,
-	.cleanup_telemetry = wormhole_cleanup_telemetry,
 	.read_telemetry_tag = wormhole_read_telemetry_tag,
 	.populate_telemetry_cache = wormhole_populate_telemetry_cache,
 	.probe_telemetry = wormhole_probe_telemetry,
+	.hwmon_name = "wormhole",
+	.hwmon_chip_info = &wh_hwmon_chip_info,
 	.cleanup_hardware = wormhole_cleanup_hardware,
 	.cleanup_device = wormhole_cleanup,
 	.reboot = wormhole_cleanup_hardware,

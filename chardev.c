@@ -822,11 +822,39 @@ static long ioctl_arc_msg(struct chardev_private *priv, struct tenstorrent_smc_m
 	return ret;
 }
 
+// Decide whether ioctl cmd may proceed on this fd.  Caller holds reset_rwsem
+// (either mode).
+static long tt_cdev_ioctl_check(struct chardev_private *priv, unsigned int cmd)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+
+	lockdep_assert_held(&tt_dev->reset_rwsem);
+
+	// File descriptor from a removed/hotplugged device is permanently invalid.
+	if (tt_dev->detached)
+		return -ENODEV;
+
+	// File descriptor opened before the reset is permanently invalid.
+	if (atomic_long_read(&tt_dev->reset_gen) != priv->open_reset_gen)
+		return -ENODEV;
+
+	// During reset window, only allow info queries and reset operations.
+	if (tt_dev->needs_hw_init) {
+		bool allowed = (cmd == TENSTORRENT_IOCTL_GET_DEVICE_INFO ||
+				cmd == TENSTORRENT_IOCTL_GET_DRIVER_INFO ||
+				cmd == TENSTORRENT_IOCTL_RESET_DEVICE);
+		if (!allowed)
+			return -ENODEV;
+	}
+
+	return 0;
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	struct chardev_private *priv = f->private_data;
 	struct tenstorrent_device *tt_dev = priv->device;
-	long ret = -EINVAL;
+	long ret;
 	bool is_reset_ioctl = (cmd == TENSTORRENT_IOCTL_RESET_DEVICE);
 
 	if (is_reset_ioctl)
@@ -834,28 +862,9 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	else
 		down_read(&tt_dev->reset_rwsem);	// Shared
 
-	// File descriptor from a removed/hotplugged device is permanently invalid.
-	if (priv->device->detached) {
-		ret = -ENODEV;
+	ret = tt_cdev_ioctl_check(priv, cmd);
+	if (ret)
 		goto out;
-	}
-
-	// File descriptor opened before the reset is permanently invalid.
-	if (atomic_long_read(&priv->device->reset_gen) != priv->open_reset_gen) {
-		ret = -ENODEV;
-		goto out;
-	}
-
-	// During reset window, only allow info queries and reset operations.
-	if (priv->device->needs_hw_init) {
-		bool allowed = (cmd == TENSTORRENT_IOCTL_GET_DEVICE_INFO ||
-				cmd == TENSTORRENT_IOCTL_GET_DRIVER_INFO ||
-				cmd == TENSTORRENT_IOCTL_RESET_DEVICE);
-		if (!allowed) {
-			ret = -ENODEV;
-			goto out;
-		}
-	}
 
 	switch (cmd) {
 		case TENSTORRENT_IOCTL_GET_DEVICE_INFO:
@@ -863,6 +872,7 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			break;
 
 		case TENSTORRENT_IOCTL_GET_HARVESTING:
+			ret = -EINVAL;
 			break;
 
 		case TENSTORRENT_IOCTL_QUERY_MAPPINGS:

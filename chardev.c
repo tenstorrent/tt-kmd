@@ -642,8 +642,6 @@ static int tenstorrent_set_aggregated_power_state_locked(struct tenstorrent_devi
 		if (atomic_long_read(&tt_dev->reset_gen) != priv->open_reset_gen)
 			continue;
 
-		mutex_lock(&priv->mutex);
-
 		// Extract validity counts from the packed validity field.
 		// Bits 0-3: number of valid flags (0-15)
 		// Bits 4-7: number of valid settings (0-14)
@@ -669,8 +667,6 @@ static int tenstorrent_set_aggregated_power_state_locked(struct tenstorrent_devi
 		settings_count = min_t(u8, settings_count, ARRAY_SIZE(power_state.power_settings));
 		for (i = 0; i < settings_count; i++)
 			power_state.power_settings[i] = max(power_state.power_settings[i], priv->power_state.power_settings[i]);
-
-		mutex_unlock(&priv->mutex);
 	}
 
 	// Always send maximum validity (15 flags, max_settings_count settings) to
@@ -711,6 +707,7 @@ static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorre
 {
 	struct tenstorrent_device *tt_dev = priv->device;
 	struct tenstorrent_power_state data = {0};
+	int ret;
 
 	if (copy_from_user(&data, arg, sizeof(data)) != 0)
 		return -EFAULT;
@@ -729,11 +726,12 @@ static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorre
 	dev_dbg(&tt_dev->pdev->dev, "Power state request: validity=0x%x flags=0x%x\n",
 		data.validity, data.power_flags);
 
-	mutex_lock(&priv->mutex);
+	mutex_lock(&tt_dev->chardev_mutex);
 	priv->power_state = data;
-	mutex_unlock(&priv->mutex);
+	ret = tenstorrent_set_aggregated_power_state_locked(tt_dev);
+	mutex_unlock(&tt_dev->chardev_mutex);
 
-	return tenstorrent_set_aggregated_power_state(tt_dev);
+	return ret;
 }
 
 static long ioctl_arc_msg(struct chardev_private *priv, struct tenstorrent_smc_msg __user *arg)

@@ -105,5 +105,6 @@ struct chardev_private {
 };
 
 struct chardev_private *get_tenstorrent_priv(struct file *f);
+long tt_cdev_ioctl_check(struct chardev_private *priv, unsigned int cmd);
 
 #endif

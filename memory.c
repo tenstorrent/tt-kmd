@@ -591,6 +591,20 @@ static bool is_pin_pages_size_safe(u64 size)
 #endif
 }
 
+static bool pinning_exists(struct chardev_private *priv, u64 virtual_address, unsigned long nr_pages)
+{
+	struct pinned_page_range *pinning;
+
+	lockdep_assert_held(&priv->mutex);
+
+	list_for_each_entry(pinning, &priv->pinnings, list) {
+		if (pinning->virtual_address == virtual_address && pinning->page_count == nr_pages)
+			return true;
+	}
+
+	return false;
+}
+
 long ioctl_pin_pages(struct chardev_private *priv,
 		     struct tenstorrent_pin_pages __user *arg)
 {
@@ -608,6 +622,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	bool noc_dma = false;
 	bool top_down = false;
 	bool read_only = false;
+	bool duplicate;
 	unsigned int gup_flags;
 	enum dma_data_direction dir;
 
@@ -640,27 +655,24 @@ long ioctl_pin_pages(struct chardev_private *priv,
 
 	gup_flags = read_only ? 0 : FOLL_WRITE;
 	dir = read_only ? DMA_TO_DEVICE : DMA_BIDIRECTIONAL;
-
-	mutex_lock(&priv->mutex);
+	nr_pages = PAGE_ALIGN(in.size) >> PAGE_SHIFT;
 
 	// Block duplicate (VA/size) pinnings. Prevents ambiguity in UNPIN_PAGES
 	// regarding iATU teardown if the same range were pinned multiple times with
-	// different NOC_DMA flags.
-	list_for_each_entry(pinning, &priv->pinnings, list) {
-		if (pinning->virtual_address == in.virtual_address &&
-		    pinning->page_count == PAGE_ALIGN(in.size) >> PAGE_SHIFT) {
-			mutex_unlock(&priv->mutex);
-			return -EEXIST;
-		}
-	}
+	// different NOC_DMA flags.  priv->mutex is not held across the pin, which
+	// can take unbounded time, so this early check only fails the common case
+	// cheaply; the check at insertion is authoritative.
+	mutex_lock(&priv->mutex);
+	duplicate = pinning_exists(priv, in.virtual_address, nr_pages);
+	mutex_unlock(&priv->mutex);
+
+	if (duplicate)
+		return -EEXIST;
 
 	pinning = kmalloc(sizeof(*pinning), GFP_KERNEL);
-	if (!pinning) {
-		mutex_unlock(&priv->mutex);
+	if (!pinning)
 		return -ENOMEM;
-	}
 
-	nr_pages = PAGE_ALIGN(in.size) >> PAGE_SHIFT;
 	pages = vzalloc(nr_pages * sizeof(struct page *));
 	if (!pages) {
 		dev_err(&priv->device->pdev->dev, "vzalloc failed for %lu page pointers\n", nr_pages);
@@ -668,7 +680,16 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		goto err_free_pinning;
 	}
 
+	// Pinning can take unbounded time and needs nothing from the device.
+	// Holding reset_rwsem across it would block RESET_DEVICE and PCI remove
+	// and, because the rwsem is writer-fair, every ioctl, open() and close()
+	// queued behind them.  Drop it for the pin and reacquire before touching
+	// the device, so the caller's matching up_read in tt_cdev_ioctl stays
+	// balanced.
+	up_read(&priv->device->reset_rwsem);
 	pages_pinned = pin_user_pages_fast_longterm(in.virtual_address, nr_pages, gup_flags, pages);
+	down_read(&priv->device->reset_rwsem);
+
 	if (pages_pinned < 0) {
 		dev_warn(&priv->device->pdev->dev, "pin_user_pages_longterm failed: %d\n", pages_pinned);
 		ret = pages_pinned;
@@ -680,6 +701,11 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		ret = -EINVAL;
 		goto err_unpin_pages;
 	}
+
+	// A reset or remove may have happened while reset_rwsem was dropped.
+	ret = tt_cdev_ioctl_check(priv, TENSTORRENT_IOCTL_PIN_PAGES);
+	if (ret)
+		goto err_unpin_pages;
 
 	if (is_iommu_translated(&priv->device->pdev->dev)) {
 		struct scatterlist *sg;
@@ -698,7 +724,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 
 		if (ret != 0) {
 			dev_err(&priv->device->pdev->dev, "dma_map_sg failed\n");
-			goto err_unlock_priv;
+			goto err_free_sgt;
 		}
 
 		// This can only happen due to a misconfiguration or a bug.
@@ -769,8 +795,16 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	pinning->outbound_iatu_region = iatu_region;
 	pinning->read_only = read_only;
 
-	list_add(&pinning->list, &priv->pinnings);
+	mutex_lock(&priv->mutex);
+	duplicate = pinning_exists(priv, in.virtual_address, nr_pages);
+	if (!duplicate)
+		list_add(&pinning->list, &priv->pinnings);
 	mutex_unlock(&priv->mutex);
+
+	if (duplicate) {
+		ret = -EEXIST;
+		goto err_teardown_iatu;
+	}
 
 	return 0;
 
@@ -781,7 +815,7 @@ err_teardown_iatu:
 	teardown_outbound_iatu(priv, iatu_region);
 err_dma_unmap:
 	dma_unmap_sgtable(&priv->device->pdev->dev, &dma_mapping, dir, 0);
-err_unlock_priv:
+err_free_sgt:
 	free_chained_sgt(&dma_mapping);
 err_unpin_pages:
 	unpin_user_pages_dirty_lock(pages, pages_pinned, false);
@@ -789,7 +823,6 @@ err_vfree_pages:
 	vfree(pages);
 err_free_pinning:
 	kfree(pinning);
-	mutex_unlock(&priv->mutex);
 	return ret;
 }
 
@@ -1597,8 +1630,8 @@ static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *v
 		return -EINVAL;
 
 	// tlb_mutex (not priv->mutex) so the mmap path never nests the general
-	// per-fd mutex inside mmap_lock; priv->mutex is held across GUP and
-	// uaccess elsewhere (e.g. PIN_PAGES), which nests it outside mmap_lock.
+	// per-fd mutex inside mmap_lock; priv->mutex is held across uaccess
+	// elsewhere (e.g. ALLOCATE_DMA_BUF), which nests it outside mmap_lock.
 	mutex_lock(&priv->tlb_mutex);
 
 	if (!test_bit(id, priv->tlbs)) {
@@ -1650,8 +1683,8 @@ int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 	struct pci_dev *pdev = priv->device->pdev;
 
 	// The mmap path must never take priv->mutex: we are called with
-	// mmap_lock held, and priv->mutex is held across GUP and uaccess
-	// elsewhere (e.g. PIN_PAGES), which nests it outside mmap_lock.
+	// mmap_lock held, and priv->mutex is held across uaccess elsewhere
+	// (e.g. ALLOCATE_DMA_BUF), which nests it outside mmap_lock.
 	// Taking it here would complete an ABBA deadlock cycle.
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 13, 0)
 	lockdep_assert_not_held(&priv->mutex);

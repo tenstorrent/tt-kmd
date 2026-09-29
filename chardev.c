@@ -824,7 +824,7 @@ static long ioctl_arc_msg(struct chardev_private *priv, struct tenstorrent_smc_m
 
 // Decide whether ioctl cmd may proceed on this fd.  Caller holds reset_rwsem
 // (either mode).
-static long tt_cdev_ioctl_check(struct chardev_private *priv, unsigned int cmd)
+long tt_cdev_ioctl_check(struct chardev_private *priv, unsigned int cmd)
 {
 	struct tenstorrent_device *tt_dev = priv->device;
 

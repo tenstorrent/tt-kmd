@@ -668,7 +668,16 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		goto err_free_pinning;
 	}
 
+	// Pinning can take unbounded time and needs nothing from the device.
+	// Holding reset_rwsem across it would block RESET_DEVICE and PCI remove
+	// and, because the rwsem is writer-fair, every ioctl, open() and close()
+	// queued behind them.  Drop it for the pin and reacquire before touching
+	// the device, so the caller's matching up_read in tt_cdev_ioctl stays
+	// balanced.
+	up_read(&priv->device->reset_rwsem);
 	pages_pinned = pin_user_pages_fast_longterm(in.virtual_address, nr_pages, gup_flags, pages);
+	down_read(&priv->device->reset_rwsem);
+
 	if (pages_pinned < 0) {
 		dev_warn(&priv->device->pdev->dev, "pin_user_pages_longterm failed: %d\n", pages_pinned);
 		ret = pages_pinned;
@@ -680,6 +689,11 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		ret = -EINVAL;
 		goto err_unpin_pages;
 	}
+
+	// A reset or remove may have happened while reset_rwsem was dropped.
+	ret = tt_cdev_ioctl_check(priv, TENSTORRENT_IOCTL_PIN_PAGES);
+	if (ret)
+		goto err_unpin_pages;
 
 	if (is_iommu_translated(&priv->device->pdev->dev)) {
 		struct scatterlist *sg;

@@ -113,17 +113,26 @@ static int keraunos_check_kla_access(struct keraunos_device *kd, u64 addr, u32 w
 	return 0;
 }
 
+// Write one inbound TLB config entry in 32-bit pieces: libttsim's Keraunos
+// model rejects 64-bit accesses to TLB config. The high address word goes
+// first so the entry never turns valid with a stale upper address.
+static void keraunos_write_tlb_cfg(u8 __iomem *cfg, u64 aligned)
+{
+	writel(upper_32_bits(aligned), cfg + TLB_CFG_ADDR_OFFSET + 4);
+	writel(lower_32_bits(aligned) | TLB_CFG_VALID, cfg + TLB_CFG_ADDR_OFFSET);
+	writel(0, cfg + TLB_CFG_ATTR_OFFSET);
+	writel(0, cfg + TLB_CFG_ATTR_OFFSET + 4);
+
+	(void)readl(cfg + TLB_CFG_ADDR_OFFSET);
+}
+
 // Point an AppIn0 entry at addr's 16MB window. The caller owns the entry and
 // must serialize programming against data-side accesses through that aperture.
 static void keraunos_program_appin0(struct keraunos_device *kd, u32 entry, u64 addr)
 {
 	u64 aligned = addr & ~(u64)APPIN0_WINDOW_MASK;
-	u32 cfg_off = keraunos_appin0_cfg_offset(entry);
 
-	writeq(aligned | TLB_CFG_VALID, kd->bar2 + cfg_off + TLB_CFG_ADDR_OFFSET);
-	writeq(0, kd->bar2 + cfg_off + TLB_CFG_ATTR_OFFSET);
-
-	(void)readq(kd->bar2 + cfg_off + TLB_CFG_ADDR_OFFSET);
+	keraunos_write_tlb_cfg(kd->bar2 + keraunos_appin0_cfg_offset(entry), aligned);
 }
 
 // Point a SysIn0 entry at addr's 16KB KLA window. The caller owns the entry
@@ -131,12 +140,8 @@ static void keraunos_program_appin0(struct keraunos_device *kd, u32 entry, u64 a
 static void keraunos_program_sysin0(struct keraunos_device *kd, u32 entry, u64 addr)
 {
 	u64 aligned = addr & ~(u64)SYSIN0_WINDOW_MASK;
-	u32 cfg_off = keraunos_sysin0_cfg_offset(entry);
 
-	writeq(aligned | TLB_CFG_VALID, kd->bar2 + cfg_off + TLB_CFG_ADDR_OFFSET);
-	writeq(0, kd->bar2 + cfg_off + TLB_CFG_ATTR_OFFSET);
-
-	(void)readq(kd->bar2 + cfg_off + TLB_CFG_ADDR_OFFSET);
+	keraunos_write_tlb_cfg(kd->bar2 + keraunos_sysin0_cfg_offset(entry), aligned);
 }
 
 // Point the reserved kernel entry at addr and return its BAR0 iomem address.

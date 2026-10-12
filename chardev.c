@@ -532,7 +532,7 @@ static long ioctl_set_noc_cleanup(struct chardev_private *priv,
 		return -EINVAL;
 
 	// TODO: Implement a more robust coordinate validation scheme.
-	if (data.x > 64 || data.y > 64)
+	if (data.x > 63 || data.y > 63)
 		return -EINVAL;
 
 	mutex_lock(&priv->mutex);

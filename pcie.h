@@ -13,6 +13,7 @@ bool pcie_hot_reset_and_restore_state(struct pci_dev *pdev);
 bool pcie_timer_interrupt(struct pci_dev *pdev);
 bool set_reset_marker(struct pci_dev *pdev);
 bool is_reset_marker_zero(struct pci_dev *pdev);
+int wait_reset_marker_zero(struct tenstorrent_device *tt_dev);
 void pcie_retrain_link_to_max_speed(struct pci_dev *pdev);
 
 #endif

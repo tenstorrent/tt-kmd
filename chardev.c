@@ -337,22 +337,25 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		priv->device->needs_hw_init = true;
 		priv->device->fw_ready = false;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {
-		ok = is_reset_marker_zero(pdev);
-
 		// In the hotplug case, needs_hw_init is false and there is nothing to
 		// do here. Otherwise this was an in-place reset, so re-initialize now,
-		// and clear the flag only if that succeeds so a premature POST_RESET
-		// can be retried.
+		// and clear the flag only if that succeeds so a failed POST_RESET can
+		// be retried.
 		if (priv->device->needs_hw_init) {
-			ok = ok && safe_pci_restore_state(pdev);
+			int r = wait_reset_marker_zero(priv->device);
+
+			// needs_hw_init is still set, so a restart redoes the waits
+			// and the restore.
+			if (r == -EINTR)
+				return -ERESTARTSYS;
+
+			ok = (r == 0) && safe_pci_restore_state(pdev);
 
 			// A hung or removed chip cannot be initialized. Firmware that
 			// does not come up is handled below.
 			if (ok) {
-				int r = tt_dev_wait_fw_ready(priv->device);
+				r = tt_dev_wait_fw_ready(priv->device);
 
-				// needs_hw_init is still set, so a restart redoes the
-				// restore and the wait.
 				if (r == -EINTR)
 					return -ERESTARTSYS;
 
@@ -371,6 +374,8 @@ static long ioctl_reset_device(struct chardev_private *priv,
 
 			if (ok)
 				priv->device->needs_hw_init = false;
+		} else {
+			ok = is_reset_marker_zero(pdev);
 		}
 
 		// A chip whose firmware did not come up is left accessible to

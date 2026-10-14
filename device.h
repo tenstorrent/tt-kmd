@@ -39,6 +39,7 @@ struct tenstorrent_device {
 	const struct tenstorrent_device_class *dev_class;
 	bool detached; // No longer valid for hardware access
 	bool needs_hw_init;
+	bool fw_ready; // Firmware answered the last wait_fw_ready; cleared by reset
 	atomic_long_t reset_gen; // Generation counter, incremented on reset
 	struct rw_semaphore reset_rwsem;
 	struct dentry *debugfs_root;
@@ -117,6 +118,11 @@ struct tenstorrent_device_class {
 	const struct attribute_group **dev_groups;
 	bool (*reset)(struct tenstorrent_device *ttdev, u32 reset_flag);
 	bool (*init_device)(struct tenstorrent_device *ttdev);
+	// Optional. Wait for firmware to finish booting and accept messages.
+	// Returns 0 when ready, -ETIMEDOUT, -EIO if the chip is hung, -EINTR on a
+	// signal, or -ENODEV if the device is detached. A class without this hook
+	// is assumed ready.
+	int (*wait_fw_ready)(struct tenstorrent_device *ttdev);
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);
 	bool (*init_telemetry)(struct tenstorrent_device *ttdev);
 	void (*cleanup_telemetry)(struct tenstorrent_device *ttdev);
@@ -157,5 +163,12 @@ struct tenstorrent_device_class {
 };
 
 void tt_dev_release(struct device *dev);
+
+static inline void tt_dev_wait_fw_ready(struct tenstorrent_device *tt_dev)
+{
+	const struct tenstorrent_device_class *cls = tt_dev->dev_class;
+
+	tt_dev->fw_ready = !cls->wait_fw_ready || cls->wait_fw_ready(tt_dev) == 0;
+}
 
 #endif

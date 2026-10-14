@@ -319,6 +319,7 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		tenstorrent_reset_reclaim_iatus(tt_dev);
 		ok = set_reset_marker(pdev);
 		priv->device->needs_hw_init = true;
+		priv->device->fw_ready = false;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
@@ -326,6 +327,7 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		tenstorrent_reset_reclaim_iatus(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
+		priv->device->fw_ready = false;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
@@ -333,6 +335,7 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		tenstorrent_reset_reclaim_iatus(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
+		priv->device->fw_ready = false;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {
 		ok = is_reset_marker_zero(pdev);
 
@@ -342,6 +345,7 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		// can be retried.
 		if (priv->device->needs_hw_init) {
 			if (ok && safe_pci_restore_state(pdev)) {
+				tt_dev_wait_fw_ready(priv->device);
 				priv->device->dev_class->restore_reset_state(priv->device);
 				ok = priv->device->dev_class->init_hardware(priv->device);
 

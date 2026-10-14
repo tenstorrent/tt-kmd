@@ -371,6 +371,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 		goto fail_init_device;
 	}
 
+	tt_dev_wait_fw_ready(tt_dev);
 	tt_dev->needs_hw_init = !device_class->init_hardware(tt_dev);
 
 	pci_save_state(dev);

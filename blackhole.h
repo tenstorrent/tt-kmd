@@ -18,7 +18,6 @@ struct blackhole_device {
 
 	u8 saved_mps;
 
-	bool pcie_perf_group_registered;
 	bool telemetry_group_registered;
 };
 

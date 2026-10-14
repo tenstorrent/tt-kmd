@@ -394,8 +394,29 @@ static ssize_t wh_show_pcie_single_counter(struct device *dev, char *buf, u32 co
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 	u8 __iomem *noc2axi = wh_dev->bar4_mapping + NIU_COUNTERS_START;
 	u64 addr = (4 * counter_offset) + (noc * NIU_NOC1_OFFSET);
-	u32 value = ioread32(noc2axi + addr);
-	return scnprintf(buf, PAGE_SIZE, "%u\n", value);
+	u32 value;
+	ssize_t r;
+
+	// The group outlives cleanup_device and spans resets; serialize against
+	// both the BAR unmap and the reset window.
+	down_read(&tt_dev->reset_rwsem);
+
+	if (tt_dev->detached) {
+		r = -ENODEV;
+		goto out;
+	}
+
+	if (tt_dev->needs_hw_init) {
+		r = -ENODATA;
+		goto out;
+	}
+
+	value = ioread32(noc2axi + addr);
+	r = scnprintf(buf, PAGE_SIZE, "%u\n", value);
+
+out:
+	up_read(&tt_dev->reset_rwsem);
+	return r;
 }
 
 // The pair are for NOC0 and NOC1; counters for each NOC exposed separately.
@@ -446,6 +467,11 @@ static struct attribute *wh_pcie_perf_counters_attrs[] = {
 static const struct attribute_group wh_pcie_perf_counters_group = {
 	.name = "pcie_perf_counters",
 	.attrs = wh_pcie_perf_counters_attrs,
+};
+
+static const struct attribute_group *wh_dev_groups[] = {
+	&wh_pcie_perf_counters_group,
+	NULL,
 };
 
 // Program the iATU so that BAR4 is directed to the system registers.
@@ -758,15 +784,6 @@ static int wormhole_probe_telemetry(struct tenstorrent_device *tt_dev)
 
 static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev)
 {
-	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
-	int r;
-
-	r = device_add_group(&tt_dev->dev, &wh_pcie_perf_counters_group);
-	if (r)
-		dev_err(&tt_dev->pdev->dev, "PCIe perf counters unavailable: %d\n", r);
-	else
-		wh_dev->pcie_perf_group_registered = true;
-
 	// Probe telemetry and register sysfs/hwmon. On some WH systems the ARC
 	// firmware may still be initializing, so fw_ready_work polls until ready.
 	wormhole_probe_telemetry(tt_dev);
@@ -788,11 +805,6 @@ static void wormhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
 	if (wh_dev->telemetry_group_registered) {
 		device_remove_group(&tt_dev->dev, &tt_dev->telemetry_group);
 		wh_dev->telemetry_group_registered = false;
-	}
-
-	if (wh_dev->pcie_perf_group_registered) {
-		device_remove_group(&tt_dev->dev, &wh_pcie_perf_counters_group);
-		wh_dev->pcie_perf_group_registered = false;
 	}
 }
 
@@ -1122,6 +1134,7 @@ struct tenstorrent_device_class wormhole_class = {
 	.tlb_kinds = NUM_TLB_KINDS,
 	.tlb_counts = { TLB_1M_WINDOW_COUNT, TLB_2M_WINDOW_COUNT, TLB_16M_WINDOW_COUNT },
 	.tlb_sizes = { TLB_1M_WINDOW_SIZE, TLB_2M_WINDOW_SIZE, TLB_16M_WINDOW_SIZE },
+	.dev_groups = wh_dev_groups,
 	.reset = wormhole_reset,
 	.init_device = wormhole_init,
 	.init_hardware = wormhole_init_hardware,

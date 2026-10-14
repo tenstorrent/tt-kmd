@@ -346,10 +346,15 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		if (priv->device->needs_hw_init) {
 			ok = ok && safe_pci_restore_state(pdev);
 
-			// A hung or removed chip cannot be initialized. Slow firmware
-			// is not fatal: init_hardware skips firmware messages.
+			// A hung or removed chip cannot be initialized. Firmware that
+			// does not come up is handled below.
 			if (ok) {
 				int r = tt_dev_wait_fw_ready(priv->device);
+
+				// needs_hw_init is still set, so a restart redoes the
+				// restore and the wait.
+				if (r == -EINTR)
+					return -ERESTARTSYS;
 
 				ok = (r != -EIO && r != -ENODEV);
 			}
@@ -367,6 +372,10 @@ static long ioctl_reset_device(struct chardev_private *priv,
 			if (ok)
 				priv->device->needs_hw_init = false;
 		}
+
+		// A chip whose firmware did not come up is left accessible to
+		// low-level tools, but the reset did not produce a working device.
+		ok = ok && priv->device->fw_ready;
 	} else {
 		return -EINVAL;
 	}

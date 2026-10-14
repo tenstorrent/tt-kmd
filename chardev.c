@@ -799,6 +799,9 @@ static int tenstorrent_update_power_state_locked(struct tenstorrent_device *tt_d
 	if (tt_dev->detached || tt_dev->needs_hw_init)
 		return 0;
 
+	if (!tt_dev->fw_ready)
+		return -EIO;
+
 	aggregate_power_state_locked(tt_dev, &power_state);
 
 	if (power_state_is_idle(&power_state) && tt_dev->dev_class->defer_idle_powerdown
@@ -837,7 +840,7 @@ void tenstorrent_power_down_work_func(struct work_struct *work)
 
 	mutex_lock(&tt_dev->chardev_mutex);
 
-	if (!tt_dev->detached && !tt_dev->needs_hw_init) {
+	if (!tt_dev->detached && !tt_dev->needs_hw_init && tt_dev->fw_ready) {
 		aggregate_power_state_locked(tt_dev, &power_state);
 		if (power_state_is_idle(&power_state))
 			tt_dev->dev_class->set_power_state(tt_dev, &power_state);
@@ -1241,8 +1244,11 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	down_read(&tt_dev->reset_rwsem);
 
 	// A power-aware fd votes nothing until it asks, so only a legacy open
-	// changes the vote.
-	if (!power_aware) {
+	// changes the vote.  Skip a device whose firmware isn't ready, so that
+	// opening it doesn't warn.
+	// TODO: Replace the ad-hoc device validity checks with a single predicate
+	// (https://github.com/tenstorrent/tt-kmd/issues/280).
+	if (!power_aware && tt_dev->fw_ready) {
 		ret = tenstorrent_update_power_state(tt_dev);
 		if (ret < 0)
 			dev_warn(&tt_dev->pdev->dev, "Failed to set initial power state: %d\n", ret);

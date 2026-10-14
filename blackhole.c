@@ -20,6 +20,9 @@
 
 #define MAX_MRRS 4096
 
+// Covers the GDDR training fallback, which can take up to 40 seconds.
+#define BH_FW_READY_TIMEOUT_MS 60000
+
 #define TLB_2M_WINDOW_COUNT 202
 #define TLB_2M_SHIFT 21
 #define TLB_2M_WINDOW_SIZE (1 << TLB_2M_SHIFT)
@@ -76,6 +79,8 @@
 #define ARC_MSG_TYPE_FW_LOG 0xC7          // TT_SMC_MSG_TT_PCIE_LOG
 #define ARC_BOOT_STATUS RESET_SCRATCH(2)
 #define ARC_BOOT_STATUS_READY_FOR_MSG 0x1
+#define ARC_BOOT_STATUS_HW_INIT GENMASK(2, 1)
+#define ARC_BOOT_STATUS_HW_INIT_STARTED 1
 #define ARC_ERROR_STATUS0 RESET_SCRATCH(4)
 #define ARC_ERROR_STATUS0_CABLE_FAULT BIT(1)
 
@@ -747,6 +752,58 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	return true;
 }
 
+// Firmware sets msg_queue_ready before it publishes telemetry and the error
+// status, and hw_init_status only at the very end of init. msg_queue_ready
+// can be left over from before a reset, but hw_init_status is set to started
+// before the PCIe link comes up, so waiting for it to move on is reliable.
+// Firmware too old to report hw_init_status leaves it zero, which reduces
+// this to the msg_queue_ready check alone.
+static int blackhole_wait_fw_ready(struct tenstorrent_device *tt_dev)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	struct pci_dev *pdev = tt_dev->pdev;
+	ktime_t start = ktime_get();
+	ktime_t end = ktime_add_ms(start, BH_FW_READY_TIMEOUT_MS);
+	u32 boot_status;
+	int r;
+
+	for (;;) {
+		if (tt_dev->detached) {
+			r = -ENODEV;
+			break;
+		}
+
+		boot_status = noc_read32(bh, ARC_X, ARC_Y, ARC_BOOT_STATUS, 0);
+
+		if (boot_status == 0xFFFFFFFF) {
+			r = -EIO;
+			break;
+		}
+
+		if ((boot_status & ARC_BOOT_STATUS_READY_FOR_MSG) &&
+		    FIELD_GET(ARC_BOOT_STATUS_HW_INIT, boot_status) != ARC_BOOT_STATUS_HW_INIT_STARTED) {
+			r = 0;
+			break;
+		}
+
+		if (ktime_after(ktime_get(), end)) {
+			r = -ETIMEDOUT;
+			break;
+		}
+
+		if (msleep_interruptible(100)) {
+			r = -EINTR;
+			break;
+		}
+	}
+
+	if (r)
+		dev_warn(&pdev->dev, "Firmware not ready after %lld ms (boot status %08X): %d\n",
+			 ktime_ms_delta(ktime_get(), start), boot_status, r);
+
+	return r;
+}
+
 static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
@@ -754,6 +811,9 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 	struct arc_msg msg = { 0 };
 
 	pcie_set_readrq(pdev, MAX_MRRS);
+
+	if (!tt_dev->fw_ready)
+		return true;
 
 	msg.header = ARC_MSG_TYPE_ASIC_STATE0;
 	if (arc_msg_send_sync(&bh->tt, &msg) != 0)
@@ -960,6 +1020,7 @@ struct tenstorrent_device_class blackhole_class = {
 	.dev_groups = bh_dev_groups,
 	.reset = blackhole_reset,
 	.init_device = blackhole_init,
+	.wait_fw_ready = blackhole_wait_fw_ready,
 	.init_hardware = blackhole_init_hardware,
 	.init_telemetry = blackhole_init_telemetry,
 	.cleanup_telemetry = blackhole_cleanup_telemetry,

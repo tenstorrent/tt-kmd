@@ -18,8 +18,6 @@ struct blackhole_device {
 
 	u8 saved_mps;
 	bool mps_saved;
-
-	bool telemetry_group_registered;
 };
 
 #define tt_dev_to_bh_dev(ttdev) \

@@ -59,6 +59,7 @@ struct tenstorrent_device {
 	wait_queue_head_t resource_lock_waitqueue;
 
 	struct device *hwmon_dev;
+	bool telemetry_group_registered;
 	const struct tenstorrent_sysfs_attr *telemetry_sysfs;
 	u16 telemetry_sysfs_count;
 	const struct tt_hwmon_attr *hwmon_attributes;
@@ -124,8 +125,6 @@ struct tenstorrent_device_class {
 	// is assumed ready.
 	int (*wait_fw_ready)(struct tenstorrent_device *ttdev);
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);
-	bool (*init_telemetry)(struct tenstorrent_device *ttdev);
-	void (*cleanup_telemetry)(struct tenstorrent_device *ttdev);
 	void (*cleanup_hardware)(struct tenstorrent_device *ttdev);
 	void (*cleanup_device)(struct tenstorrent_device *ttdev);
 	void (*reboot)(struct tenstorrent_device *ttdev);
@@ -151,7 +150,8 @@ struct tenstorrent_device_class {
 	int (*read_telemetry_tag)(struct tenstorrent_device *ttdev, u64 address, u32 *value);
 	int (*populate_telemetry_cache)(struct tenstorrent_device *ttdev,
 				       struct telem_cache_entry *cache, u16 count);
-	int (*probe_telemetry)(struct tenstorrent_device *ttdev);
+	const char *hwmon_name;
+	const struct hwmon_chip_info *hwmon_chip_info;
 
 	// If true, the idle power-down message is sent from a delayed work
 	// item armed when the last fd closes, rather than synchronously from

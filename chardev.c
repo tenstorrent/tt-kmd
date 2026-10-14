@@ -713,6 +713,9 @@ static int tenstorrent_set_aggregated_power_state_locked(struct tenstorrent_devi
 
 	lockdep_assert_held(&tt_dev->chardev_mutex);
 
+	if (!tt_dev->fw_ready)
+		return -EIO;
+
 	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
 		u8 flags_count;
 		u8 settings_count;
@@ -1193,7 +1196,9 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	    && cancel_delayed_work_sync(&tt_dev->power_down_work))
 		dev_dbg(&tt_dev->pdev->dev, "cancelled pending idle powerdown\n");
 
-	if (!power_aware && !tt_dev->detached && !tt_dev->needs_hw_init) {
+	// TODO: Replace the ad-hoc device validity checks with a single predicate
+	// (https://github.com/tenstorrent/tt-kmd/issues/280).
+	if (!power_aware && !tt_dev->detached && !tt_dev->needs_hw_init && tt_dev->fw_ready) {
 		ret = tenstorrent_set_aggregated_power_state(tt_dev);
 		if (ret < 0)
 			dev_warn(&tt_dev->pdev->dev, "Failed to set initial power state: %d\n", ret);

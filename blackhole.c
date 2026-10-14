@@ -375,6 +375,7 @@ static void blackhole_save_reset_state(struct tenstorrent_device *tt_dev) {
 
 	device_control = noc_read32(bh, x, y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, 0);
 	bh->saved_mps = FIELD_GET(PCI_EXP_DEVCTL_PAYLOAD, device_control);
+	bh->mps_saved = true;
 }
 
 static void blackhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
@@ -382,6 +383,9 @@ static void blackhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
 	u32 x;
 	u32 y = 0;
 	u32 device_control;
+
+	if (!bh->mps_saved)
+		return;
 
 	if (!blackhole_detect_pcie_noc_x(bh, &x))
 		return;

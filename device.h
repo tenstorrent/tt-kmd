@@ -164,11 +164,13 @@ struct tenstorrent_device_class {
 
 void tt_dev_release(struct device *dev);
 
-static inline void tt_dev_wait_fw_ready(struct tenstorrent_device *tt_dev)
+static inline int tt_dev_wait_fw_ready(struct tenstorrent_device *tt_dev)
 {
 	const struct tenstorrent_device_class *cls = tt_dev->dev_class;
+	int r = cls->wait_fw_ready ? cls->wait_fw_ready(tt_dev) : 0;
 
-	tt_dev->fw_ready = !cls->wait_fw_ready || cls->wait_fw_ready(tt_dev) == 0;
+	tt_dev->fw_ready = (r == 0);
+	return r;
 }
 
 #endif

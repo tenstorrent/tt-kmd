@@ -344,8 +344,17 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		// and clear the flag only if that succeeds so a premature POST_RESET
 		// can be retried.
 		if (priv->device->needs_hw_init) {
-			if (ok && safe_pci_restore_state(pdev)) {
-				tt_dev_wait_fw_ready(priv->device);
+			ok = ok && safe_pci_restore_state(pdev);
+
+			// A hung or removed chip cannot be initialized. Slow firmware
+			// is not fatal: init_hardware skips firmware messages.
+			if (ok) {
+				int r = tt_dev_wait_fw_ready(priv->device);
+
+				ok = (r != -EIO && r != -ENODEV);
+			}
+
+			if (ok) {
 				priv->device->dev_class->restore_reset_state(priv->device);
 				ok = priv->device->dev_class->init_hardware(priv->device);
 
@@ -353,8 +362,6 @@ static long ioctl_reset_device(struct chardev_private *priv,
 				// firmware was updated before this reset.
 				if (ok && priv->device->dev_class->probe_telemetry)
 					priv->device->dev_class->probe_telemetry(priv->device);
-			} else {
-				ok = false;
 			}
 
 			if (ok)

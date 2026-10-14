@@ -371,11 +371,18 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 		goto fail_init_device;
 	}
 
-	tt_dev_wait_fw_ready(tt_dev);
-	tt_dev->needs_hw_init = !device_class->init_hardware(tt_dev);
+	// A hung chip stays registered, with needs_hw_init still set, so it can
+	// be identified and reset.
+	if (tt_dev_wait_fw_ready(tt_dev) == -EIO)
+		dev_err(&dev->dev, "Device is unresponsive; only identification and reset are available\n");
+	else
+		tt_dev->needs_hw_init = !device_class->init_hardware(tt_dev);
 
 	pci_save_state(dev);
-	device_class->save_reset_state(tt_dev);
+
+	// The saved MPS is read from the chip's PCIe controller over the NOC.
+	if (!tt_dev->needs_hw_init)
+		device_class->save_reset_state(tt_dev);
 
 	tenstorrent_register_device(tt_dev);
 

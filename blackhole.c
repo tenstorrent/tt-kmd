@@ -53,9 +53,6 @@
 // this points to outbound NOC_TLB_62 configured by CMFW
 #define PCIE_DBI_ADDR 0xF800000000000000ULL
 
-// PCI subsystem device IDs for Blackhole cards
-#define PCI_SUBSYSTEM_DEVICE_GALAXY	0x0047
-
 // ARC owns telemetry
 #define ARC_X 8
 #define ARC_Y 0

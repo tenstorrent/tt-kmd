@@ -41,6 +41,7 @@ static DEFINE_XARRAY_ALLOC(tenstorrent_dev_xa);
 
 #define PCI_SUBSYSTEM_ID_GALAXY_WH 0x0035
 #define PCI_SUBSYSTEM_ID_GALAXY_BH 0x0047
+#define PCI_SUBSYSTEM_ID_GALAXY_BH_CF 0x0202
 
 static const u8 wh_galaxy_ubb_bus_prefix[GALAXY_NUM_UBBS] = { 0xC, 0x8, 0x0, 0x4 };
 static const u8 bh_galaxy_ubb_bus_prefix[GALAXY_NUM_UBBS] = { 0x0, 0x4, 0xC, 0x8 };
@@ -58,6 +59,7 @@ static int galaxy_bdf_to_ordinal(struct pci_dev *pdev)
 		ubb_table = wh_galaxy_ubb_bus_prefix;
 		break;
 	case PCI_SUBSYSTEM_ID_GALAXY_BH:
+	case PCI_SUBSYSTEM_ID_GALAXY_BH_CF:
 		ubb_table = bh_galaxy_ubb_bus_prefix;
 		break;
 	default:
@@ -357,7 +359,9 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	pci_enable_pcie_error_reporting(dev);
 
 	// HACK: Suppress hotplug for Galaxy systems.
-	if (dev->subsystem_device == PCI_SUBSYSTEM_ID_GALAXY_WH || dev->subsystem_device == PCI_SUBSYSTEM_ID_GALAXY_BH)
+	if (dev->subsystem_device == PCI_SUBSYSTEM_ID_GALAXY_WH ||
+	    dev->subsystem_device == PCI_SUBSYSTEM_ID_GALAXY_BH ||
+	    dev->subsystem_device == PCI_SUBSYSTEM_ID_GALAXY_BH_CF)
 		pci_ignore_hotplug(dev);
 
 	pci_set_drvdata(dev, tt_dev);

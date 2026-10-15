@@ -104,7 +104,7 @@ int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 	tt_dev->dev.devt = devt;
 	tt_dev->dev.class = tt_dev_class;
 	tt_dev->dev.parent = &tt_dev->pdev->dev;
-	tt_dev->dev.groups = NULL;
+	tt_dev->dev.groups = tt_dev->dev_class->dev_groups;
 	tt_dev->dev.release = tt_dev_release;
 
 	tt_dev->dev.id = tt_dev->ordinal;
@@ -319,6 +319,7 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		tenstorrent_reset_reclaim_iatus(tt_dev);
 		ok = set_reset_marker(pdev);
 		priv->device->needs_hw_init = true;
+		priv->device->fw_ready = false;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
@@ -326,6 +327,7 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		tenstorrent_reset_reclaim_iatus(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
+		priv->device->fw_ready = false;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
@@ -333,25 +335,52 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		tenstorrent_reset_reclaim_iatus(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
+		priv->device->fw_ready = false;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {
-		ok = is_reset_marker_zero(pdev);
-
 		// In the hotplug case, needs_hw_init is false and there is nothing to
-		// do here. Otherwise this was an in-place reset, so re-initialize now.
+		// do here. Otherwise this was an in-place reset, so re-initialize now,
+		// and clear the flag only if that succeeds so a failed POST_RESET can
+		// be retried.
 		if (priv->device->needs_hw_init) {
-			priv->device->needs_hw_init = false;
-			if (ok && safe_pci_restore_state(pdev)) {
+			int r = wait_reset_marker_zero(priv->device);
+
+			// needs_hw_init is still set, so a restart redoes the waits
+			// and the restore.
+			if (r == -EINTR)
+				return -ERESTARTSYS;
+
+			ok = (r == 0) && safe_pci_restore_state(pdev);
+
+			// A hung or removed chip cannot be initialized. Firmware that
+			// does not come up is handled below.
+			if (ok) {
+				r = tt_dev_wait_fw_ready(priv->device);
+
+				if (r == -EINTR)
+					return -ERESTARTSYS;
+
+				ok = (r != -EIO && r != -ENODEV);
+			}
+
+			if (ok) {
 				priv->device->dev_class->restore_reset_state(priv->device);
 				ok = priv->device->dev_class->init_hardware(priv->device);
 
-				// Re-probe telemetry tag addresses in case
-				// firmware was updated before this reset.
-				if (ok && priv->device->dev_class->probe_telemetry)
-					priv->device->dev_class->probe_telemetry(priv->device);
-			} else {
-				ok = false;
+				// Rescan in case firmware was updated before this
+				// reset, and register telemetry if probe could not.
+				if (ok)
+					tt_telemetry_init(priv->device);
 			}
+
+			if (ok)
+				priv->device->needs_hw_init = false;
+		} else {
+			ok = is_reset_marker_zero(pdev);
 		}
+
+		// A chip whose firmware did not come up is left accessible to
+		// low-level tools, but the reset did not produce a working device.
+		ok = ok && priv->device->fw_ready;
 	} else {
 		return -EINVAL;
 	}
@@ -630,6 +659,9 @@ static int tenstorrent_set_aggregated_power_state_locked(struct tenstorrent_devi
 	u8 max_settings_count = 0;
 
 	lockdep_assert_held(&tt_dev->chardev_mutex);
+
+	if (!tt_dev->fw_ready)
+		return -EIO;
 
 	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
 		u8 flags_count;
@@ -1111,7 +1143,9 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	    && cancel_delayed_work_sync(&tt_dev->power_down_work))
 		dev_dbg(&tt_dev->pdev->dev, "cancelled pending idle powerdown\n");
 
-	if (!power_aware && !tt_dev->detached && !tt_dev->needs_hw_init) {
+	// TODO: Replace the ad-hoc device validity checks with a single predicate
+	// (https://github.com/tenstorrent/tt-kmd/issues/280).
+	if (!power_aware && !tt_dev->detached && !tt_dev->needs_hw_init && tt_dev->fw_ready) {
 		ret = tenstorrent_set_aggregated_power_state(tt_dev);
 		if (ret < 0)
 			dev_warn(&tt_dev->pdev->dev, "Failed to set initial power state: %d\n", ret);

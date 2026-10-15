@@ -39,6 +39,7 @@ struct tenstorrent_device {
 	const struct tenstorrent_device_class *dev_class;
 	bool detached; // No longer valid for hardware access
 	bool needs_hw_init;
+	bool fw_ready; // Firmware answered the last wait_fw_ready; cleared by reset
 	atomic_long_t reset_gen; // Generation counter, incremented on reset
 	struct rw_semaphore reset_rwsem;
 	struct dentry *debugfs_root;
@@ -58,6 +59,7 @@ struct tenstorrent_device {
 	wait_queue_head_t resource_lock_waitqueue;
 
 	struct device *hwmon_dev;
+	bool telemetry_group_registered;
 	const struct tenstorrent_sysfs_attr *telemetry_sysfs;
 	u16 telemetry_sysfs_count;
 	const struct tt_hwmon_attr *hwmon_attributes;
@@ -110,11 +112,19 @@ struct tenstorrent_device_class {
 	u32 tlb_kinds;
 	u32 tlb_counts[MAX_TLB_KINDS];
 	u64 tlb_sizes[MAX_TLB_KINDS];
+	// Attribute groups created with the device and removed with it.  The group
+	// exists from device_add until device_del, which is after cleanup_device
+	// has unmapped the BARs, so show functions must take reset_rwsem shared and
+	// check the detached and needs_hw_init flags before touching hardware.
+	const struct attribute_group **dev_groups;
 	bool (*reset)(struct tenstorrent_device *ttdev, u32 reset_flag);
 	bool (*init_device)(struct tenstorrent_device *ttdev);
+	// Optional. Wait for firmware to finish booting and accept messages.
+	// Returns 0 when ready, -ETIMEDOUT, -EIO if the chip is hung, -EINTR on a
+	// signal, or -ENODEV if the device is detached. A class without this hook
+	// is assumed ready.
+	int (*wait_fw_ready)(struct tenstorrent_device *ttdev);
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);
-	bool (*init_telemetry)(struct tenstorrent_device *ttdev);
-	void (*cleanup_telemetry)(struct tenstorrent_device *ttdev);
 	void (*cleanup_hardware)(struct tenstorrent_device *ttdev);
 	void (*cleanup_device)(struct tenstorrent_device *ttdev);
 	void (*reboot)(struct tenstorrent_device *ttdev);
@@ -140,7 +150,8 @@ struct tenstorrent_device_class {
 	int (*read_telemetry_tag)(struct tenstorrent_device *ttdev, u64 address, u32 *value);
 	int (*populate_telemetry_cache)(struct tenstorrent_device *ttdev,
 				       struct telem_cache_entry *cache, u16 count);
-	int (*probe_telemetry)(struct tenstorrent_device *ttdev);
+	const char *hwmon_name;
+	const struct hwmon_chip_info *hwmon_chip_info;
 
 	// If true, the idle power-down message is sent from a delayed work
 	// item armed when the last fd closes, rather than synchronously from
@@ -152,5 +163,14 @@ struct tenstorrent_device_class {
 };
 
 void tt_dev_release(struct device *dev);
+
+static inline int tt_dev_wait_fw_ready(struct tenstorrent_device *tt_dev)
+{
+	const struct tenstorrent_device_class *cls = tt_dev->dev_class;
+	int r = cls->wait_fw_ready ? cls->wait_fw_ready(tt_dev) : 0;
+
+	tt_dev->fw_ready = (r == 0);
+	return r;
+}
 
 #endif

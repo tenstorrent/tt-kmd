@@ -21,6 +21,8 @@
 #define INTERFACE_TIMER_EN 0x1
 #define INTERFACE_FORCE_PENDING 0x10
 
+#define RESET_MARKER_TIMEOUT_MS 10000
+
 static bool poll_pcie_link_up(struct pci_dev *pdev, u32 timeout_ms) {
 	u16 tt_vendor_id;
 	ktime_t end_time = ktime_add_ms(ktime_get(), timeout_ms);
@@ -155,4 +157,30 @@ bool is_reset_marker_zero(struct pci_dev *pdev)
 	// Read the reset marker
 	pci_read_config_word(pdev, PCI_COMMAND, &pci_command);
 	return (pci_command & PCI_COMMAND_PARITY) == 0;
+}
+
+// Wait for the reset marker to clear, which happens when the reset reaches
+// the chip's PCIe controller. While the link is down config reads return
+// all-ones, which reads as the marker still being set.
+//
+// Returns 0, -ETIMEDOUT, -EINTR on a signal, or -ENODEV if the device is
+// detached. Hotplug removal sets detached and then waits for reset_rwsem,
+// which the caller holds, so this must give up promptly when it does.
+int wait_reset_marker_zero(struct tenstorrent_device *tt_dev)
+{
+	ktime_t end = ktime_add_ms(ktime_get(), RESET_MARKER_TIMEOUT_MS);
+
+	for (;;) {
+		if (tt_dev->detached)
+			return -ENODEV;
+
+		if (is_reset_marker_zero(tt_dev->pdev))
+			return 0;
+
+		if (ktime_after(ktime_get(), end))
+			return -ETIMEDOUT;
+
+		if (msleep_interruptible(100))
+			return -EINTR;
+	}
 }

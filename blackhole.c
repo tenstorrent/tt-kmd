@@ -20,6 +20,9 @@
 
 #define MAX_MRRS 4096
 
+// Covers the GDDR training fallback, which can take up to 40 seconds.
+#define BH_FW_READY_TIMEOUT_MS 60000
+
 #define TLB_2M_WINDOW_COUNT 202
 #define TLB_2M_SHIFT 21
 #define TLB_2M_WINDOW_SIZE (1 << TLB_2M_SHIFT)
@@ -76,6 +79,8 @@
 #define ARC_MSG_TYPE_FW_LOG 0xC7          // TT_SMC_MSG_TT_PCIE_LOG
 #define ARC_BOOT_STATUS RESET_SCRATCH(2)
 #define ARC_BOOT_STATUS_READY_FOR_MSG 0x1
+#define ARC_BOOT_STATUS_HW_INIT GENMASK(2, 1)
+#define ARC_BOOT_STATUS_HW_INIT_STARTED 1
 #define ARC_ERROR_STATUS0 RESET_SCRATCH(4)
 #define ARC_ERROR_STATUS0_CABLE_FAULT BIT(1)
 
@@ -370,6 +375,7 @@ static void blackhole_save_reset_state(struct tenstorrent_device *tt_dev) {
 
 	device_control = noc_read32(bh, x, y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, 0);
 	bh->saved_mps = FIELD_GET(PCI_EXP_DEVCTL_PAYLOAD, device_control);
+	bh->mps_saved = true;
 }
 
 static void blackhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
@@ -377,6 +383,9 @@ static void blackhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
 	u32 x;
 	u32 y = 0;
 	u32 device_control;
+
+	if (!bh->mps_saved)
+		return;
 
 	if (!blackhole_detect_pcie_noc_x(bh, &x))
 		return;
@@ -392,8 +401,29 @@ static ssize_t bh_show_pcie_single_counter(struct device *dev, char *buf, u32 co
 	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	u64 offset = NOC_STATUS_OFFSET + (4 * counter_offset) + (noc * NOC1_NOC2AXI_OFFSET);
-	u32 value = ioread32(bh->noc2axi_cfg + offset);
-	return scnprintf(buf, PAGE_SIZE, "%u\n", value);
+	u32 value;
+	ssize_t r;
+
+	// The group outlives cleanup_device and spans resets; serialize against
+	// both the BAR unmap and the reset window.
+	down_read(&tt_dev->reset_rwsem);
+
+	if (tt_dev->detached) {
+		r = -ENODEV;
+		goto out;
+	}
+
+	if (tt_dev->needs_hw_init) {
+		r = -ENODATA;
+		goto out;
+	}
+
+	value = ioread32(bh->noc2axi_cfg + offset);
+	r = scnprintf(buf, PAGE_SIZE, "%u\n", value);
+
+out:
+	up_read(&tt_dev->reset_rwsem);
+	return r;
 }
 
 // The pair are for NOC0 and NOC1; counters for each NOC exposed separately.
@@ -444,6 +474,11 @@ static struct attribute *bh_pcie_perf_counters_attrs[] = {
 static const struct attribute_group bh_pcie_perf_counters_group = {
 	.name = "pcie_perf_counters",
 	.attrs = bh_pcie_perf_counters_attrs,
+};
+
+static const struct attribute_group *bh_dev_groups[] = {
+	&bh_pcie_perf_counters_group,
+	NULL,
 };
 
 static const struct tt_hwmon_label bh_hwmon_labels[] = {
@@ -721,6 +756,58 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	return true;
 }
 
+// Firmware sets msg_queue_ready before it publishes telemetry and the error
+// status, and hw_init_status only at the very end of init. msg_queue_ready
+// can be left over from before a reset, but hw_init_status is set to started
+// before the PCIe link comes up, so waiting for it to move on is reliable.
+// Firmware too old to report hw_init_status leaves it zero, which reduces
+// this to the msg_queue_ready check alone.
+static int blackhole_wait_fw_ready(struct tenstorrent_device *tt_dev)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	struct pci_dev *pdev = tt_dev->pdev;
+	ktime_t start = ktime_get();
+	ktime_t end = ktime_add_ms(start, BH_FW_READY_TIMEOUT_MS);
+	u32 boot_status;
+	int r;
+
+	for (;;) {
+		if (tt_dev->detached) {
+			r = -ENODEV;
+			break;
+		}
+
+		boot_status = noc_read32(bh, ARC_X, ARC_Y, ARC_BOOT_STATUS, 0);
+
+		if (boot_status == 0xFFFFFFFF) {
+			r = -EIO;
+			break;
+		}
+
+		if ((boot_status & ARC_BOOT_STATUS_READY_FOR_MSG) &&
+		    FIELD_GET(ARC_BOOT_STATUS_HW_INIT, boot_status) != ARC_BOOT_STATUS_HW_INIT_STARTED) {
+			r = 0;
+			break;
+		}
+
+		if (ktime_after(ktime_get(), end)) {
+			r = -ETIMEDOUT;
+			break;
+		}
+
+		if (msleep_interruptible(100)) {
+			r = -EINTR;
+			break;
+		}
+	}
+
+	if (r)
+		dev_warn(&pdev->dev, "Firmware not ready after %lld ms (boot status %08X): %d\n",
+			 ktime_ms_delta(ktime_get(), start), boot_status, r);
+
+	return r;
+}
+
 static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
@@ -728,6 +815,9 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 	struct arc_msg msg = { 0 };
 
 	pcie_set_readrq(pdev, MAX_MRRS);
+
+	if (!tt_dev->fw_ready)
+		return true;
 
 	msg.header = ARC_MSG_TYPE_ASIC_STATE0;
 	if (arc_msg_send_sync(&bh->tt, &msg) != 0)
@@ -745,59 +835,6 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 	fw_log_setup(&tt_dev->fw_log);
 
 	return true;
-}
-
-static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
-{
-	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-	int r;
-
-	r = device_add_group(&tt_dev->dev, &bh_pcie_perf_counters_group);
-	if (r)
-		dev_err(&tt_dev->pdev->dev, "PCIe perf counters unavailable: %d\n", r);
-	else
-		bh->pcie_perf_group_registered = true;
-
-	r = tt_telemetry_probe(tt_dev);
-	if (!r) {
-		struct device *dev = &tt_dev->pdev->dev;
-		struct device *hwmon_device;
-
-		r = device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
-		if (!r)
-			bh->telemetry_group_registered = true;
-
-		hwmon_device = hwmon_device_register_with_info(dev, "blackhole", tt_dev, &bh_hwmon_chip_info, NULL);
-		if (IS_ERR(hwmon_device))
-			return false;
-
-		tt_dev->hwmon_dev = hwmon_device;
-
-		// Notify udev that telemetry attributes are now available.
-		kobject_uevent(&tt_dev->dev.kobj, KOBJ_CHANGE);
-	}
-
-	return true;
-}
-
-static void blackhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
-{
-	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
-
-	if (tt_dev->hwmon_dev) {
-		hwmon_device_unregister(tt_dev->hwmon_dev);
-		tt_dev->hwmon_dev = NULL;
-	}
-
-	if (bh->telemetry_group_registered) {
-		device_remove_group(&tt_dev->dev, &tt_dev->telemetry_group);
-		bh->telemetry_group_registered = false;
-	}
-
-	if (bh->pcie_perf_group_registered) {
-		device_remove_group(&tt_dev->dev, &bh_pcie_perf_counters_group);
-		bh->pcie_perf_group_registered = false;
-	}
 }
 
 static void blackhole_cleanup_hardware(struct tenstorrent_device *tt_dev)
@@ -942,14 +979,15 @@ struct tenstorrent_device_class blackhole_class = {
 	.tlb_kinds = 2,
 	.tlb_counts = { TLB_2M_WINDOW_COUNT, TLB_4G_WINDOW_COUNT },
 	.tlb_sizes = { TLB_2M_WINDOW_SIZE, TLB_4G_WINDOW_SIZE },
+	.dev_groups = bh_dev_groups,
 	.reset = blackhole_reset,
 	.init_device = blackhole_init,
+	.wait_fw_ready = blackhole_wait_fw_ready,
 	.init_hardware = blackhole_init_hardware,
-	.init_telemetry = blackhole_init_telemetry,
-	.cleanup_telemetry = blackhole_cleanup_telemetry,
 	.read_telemetry_tag = blackhole_read_telemetry_tag,
 	.populate_telemetry_cache = blackhole_populate_telemetry_cache,
-	.probe_telemetry = tt_telemetry_probe,
+	.hwmon_name = "blackhole",
+	.hwmon_chip_info = &bh_hwmon_chip_info,
 	.cleanup_hardware = blackhole_cleanup_hardware,
 	.cleanup_device = blackhole_cleanup,
 	.configure_tlb = blackhole_configure_tlb,

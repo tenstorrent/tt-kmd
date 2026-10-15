@@ -57,12 +57,12 @@ bool alloc_chained_sgt_for_pages(struct sg_table *table, struct page **pages, un
 		}
 
 		table->nents += current_scl - page_first_scl;
+		table->orig_nents = table->nents;
 
 		// Note that current_scl points to the extra entry reserved for chaining.
 		// Chaining entries are not included in table->nents. sg_next() just skips over them.
 	}
 
-	table->orig_nents = table->nents;
 	sg_mark_end(current_scl);
 	return true;
 
@@ -75,10 +75,14 @@ out_free:
 // Doesn't check each scatterlist entry if it's chain/end, rather asssumes that there are always
 // SCL_PER_PAGE except for the last page.
 // Also, alloc_chained_sgt_for_pages calls this on failure, in which case there's no SG_END marker.
+//
+// orig_nents is the entry count, which is what the chain length follows from. nents holds the
+// DMA segment count once the table has been mapped, and an IOMMU merges a whole pinning into a
+// single segment.
 void free_chained_sgt(struct sg_table *table)
 {
 	struct scatterlist *next_page = table->sgl;
-	unsigned int num_entries = table->nents;
+	unsigned int num_entries = table->orig_nents;
 
 	while (next_page) {
 		struct scatterlist *current_page = next_page;

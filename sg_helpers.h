@@ -14,19 +14,19 @@
 
 #ifdef NEED_SGTABLE
 
+// orig_nents is the entry count and nents the DMA segment count, matching the upstream
+// dma_map_sgtable/dma_unmap_sgtable these stand in for.
 static inline int dma_map_sgtable(struct device *dev, struct sg_table *dma_mapping, enum dma_data_direction dir, unsigned long attrs)
 {
-	int mapped_nents = dma_map_sg_attrs(dev, dma_mapping->sgl, dma_mapping->nents, dir, attrs);
-	if (mapped_nents) {
-		dma_mapping->orig_nents = dma_mapping->nents;
+	int mapped_nents = dma_map_sg_attrs(dev, dma_mapping->sgl, dma_mapping->orig_nents, dir, attrs);
+	if (mapped_nents)
 		dma_mapping->nents = mapped_nents;
-	}
 	return mapped_nents ? 0 : -ENOMEM;
 }
 
 static inline void dma_unmap_sgtable(struct device *dev, struct sg_table *dma_mapping, enum dma_data_direction dir, unsigned long attrs)
 {
-	dma_unmap_sg_attrs(dev, dma_mapping->sgl, dma_mapping->nents, dir, attrs);
+	dma_unmap_sg_attrs(dev, dma_mapping->sgl, dma_mapping->orig_nents, dir, attrs);
 }
 
 #define for_each_sgtable_dma_sg(sgt, tmp_scl, tmp_idx) for_each_sg((sgt)->sgl, tmp_scl, (sgt)->nents, tmp_idx)

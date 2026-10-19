@@ -766,6 +766,9 @@ static int wormhole_check_fw_ready(struct tenstorrent_device *tt_dev)
 
 	map_bar4_to_system_registers(wh_dev);
 
+	if (is_hardware_hung(tt_dev->pdev, regs))
+		return -EIO;
+
 	if (arc_l2_is_running(regs) &&
 	    wormhole_send_arc_fw_message(tt_dev->pdev, regs, WH_FW_MSG_NOP, 50000, NULL))
 		return 0;
@@ -1066,12 +1069,16 @@ static void wormhole_save_reset_state(struct tenstorrent_device *tt_dev) {
 	open_dbi(wh);
 	device_control = noc_read32(wh, PCIE_NOC_X, PCIE_NOC_Y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, 0);
 	wh->saved_mps = FIELD_GET(PCI_EXP_DEVCTL_PAYLOAD, device_control);
+	wh->mps_saved = true;
 	close_dbi(wh);
 }
 
 static void wormhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
 	u32 device_control;
+
+	if (!wh->mps_saved)
+		return;
 
 	open_dbi(wh);
 	device_control = noc_read32(wh, PCIE_NOC_X, PCIE_NOC_Y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, 0);

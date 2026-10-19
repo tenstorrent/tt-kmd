@@ -375,6 +375,7 @@ static void blackhole_save_reset_state(struct tenstorrent_device *tt_dev) {
 
 	device_control = noc_read32(bh, x, y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, 0);
 	bh->saved_mps = FIELD_GET(PCI_EXP_DEVCTL_PAYLOAD, device_control);
+	bh->mps_saved = true;
 }
 
 static void blackhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
@@ -382,6 +383,9 @@ static void blackhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
 	u32 x;
 	u32 y = 0;
 	u32 device_control;
+
+	if (!bh->mps_saved)
+		return;
 
 	if (!blackhole_detect_pcie_noc_x(bh, &x))
 		return;
@@ -763,9 +767,8 @@ static int blackhole_check_fw_ready(struct tenstorrent_device *tt_dev)
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	u32 boot_status = noc_read32(bh, ARC_X, ARC_Y, ARC_BOOT_STATUS, 0);
 
-	// All-ones would otherwise pass both checks.
 	if (boot_status == 0xFFFFFFFF)
-		return -EAGAIN;
+		return -EIO;
 
 	if ((boot_status & ARC_BOOT_STATUS_READY_FOR_MSG) &&
 	    FIELD_GET(ARC_BOOT_STATUS_HW_INIT, boot_status) != ARC_BOOT_STATUS_HW_INIT_STARTED)

@@ -300,10 +300,9 @@ static int tenstorrent_post_reset(struct tenstorrent_device *tt_dev, bool poll)
 	if (!tt_dev->dev_class->init_hardware(tt_dev))
 		return -EIO;
 
-	// Re-probe telemetry tag addresses in case firmware was updated before
-	// this reset.
-	if (tt_dev->dev_class->probe_telemetry)
-		tt_dev->dev_class->probe_telemetry(tt_dev);
+	// Rescan in case firmware was updated before this reset, and register
+	// telemetry if probe could not.
+	tt_telemetry_init(tt_dev);
 
 	tt_dev->needs_hw_init = false;
 	return 0;

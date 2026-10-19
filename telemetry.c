@@ -120,16 +120,79 @@ replace:
 	return r;
 }
 
-// Reverse the work of tt_telemetry_probe: tear down arch-specific telemetry
-// state, then free the HW-independent telemetry cache.
-void tt_telemetry_cleanup(struct tenstorrent_device *tt_dev)
+static void tt_telemetry_clear_cache(struct tenstorrent_device *tt_dev)
 {
-	if (tt_dev->dev_class->cleanup_telemetry)
-		tt_dev->dev_class->cleanup_telemetry(tt_dev);
-
 	kfree(tt_dev->telemetry_cache);
 	tt_dev->telemetry_cache = NULL;
 	tt_dev->telemetry_cache_count = 0;
+}
+
+// Scan the tag table, then register the sysfs group and hwmon device if they
+// are not registered yet. Called from probe and POST_RESET; the caller must
+// keep telemetry readers out (probe has not registered them, and POST_RESET
+// holds reset_rwsem for writing).
+//
+// Without firmware the table cannot be trusted, so the cache is emptied and
+// any existing attributes read as -ENODATA. The is_visible callbacks consult
+// the cache when the attributes are created, so nothing is registered until a
+// scan has filled it.
+int tt_telemetry_init(struct tenstorrent_device *tt_dev)
+{
+	struct device *dev = &tt_dev->pdev->dev;
+	bool added = false;
+	int r;
+
+	if (!tt_dev->fw_ready) {
+		tt_telemetry_clear_cache(tt_dev);
+		return -ENODATA;
+	}
+
+	r = tt_telemetry_probe(tt_dev);
+	if (r)
+		return r;
+
+	if (!tt_dev->telemetry_group_registered) {
+		r = device_add_group(&tt_dev->dev, &tt_dev->telemetry_group);
+		if (r)
+			dev_warn(dev, "Failed to register telemetry attributes: %d\n", r);
+		else
+			tt_dev->telemetry_group_registered = added = true;
+	}
+
+	if (!tt_dev->hwmon_dev) {
+		struct device *hwmon_dev;
+
+		hwmon_dev = hwmon_device_register_with_info(dev, tt_dev->dev_class->hwmon_name, tt_dev,
+							    tt_dev->dev_class->hwmon_chip_info, NULL);
+		if (IS_ERR(hwmon_dev)) {
+			dev_warn(dev, "Failed to initialize hwmon: %ld\n", PTR_ERR(hwmon_dev));
+		} else {
+			tt_dev->hwmon_dev = hwmon_dev;
+			added = true;
+		}
+	}
+
+	// Notify udev that telemetry attributes are now available.
+	if (added)
+		kobject_uevent(&tt_dev->dev.kobj, KOBJ_CHANGE);
+
+	return 0;
+}
+
+// Reverse the work of tt_telemetry_init.
+void tt_telemetry_cleanup(struct tenstorrent_device *tt_dev)
+{
+	if (tt_dev->hwmon_dev) {
+		hwmon_device_unregister(tt_dev->hwmon_dev);
+		tt_dev->hwmon_dev = NULL;
+	}
+
+	if (tt_dev->telemetry_group_registered) {
+		device_remove_group(&tt_dev->dev, &tt_dev->telemetry_group);
+		tt_dev->telemetry_group_registered = false;
+	}
+
+	tt_telemetry_clear_cache(tt_dev);
 }
 
 int tt_telemetry_read32(struct tenstorrent_device *tt_dev, u16 tag_id, u32 *value)

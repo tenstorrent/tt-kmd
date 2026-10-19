@@ -275,9 +275,9 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	// Refuse a destructive in-place reset while any TLB window is exported as
 	// a dma-buf: an importer may be doing peer-to-peer DMA into it, and a
 	// pin-only importer cannot be revoked to make the reset safe. See the
-	// EXPORT_TLB_DMABUF rationale in ioctl.h. RESTORE_STATE/POST_RESET are the
-	// re-init halves of a reset sequence, not destructive, so they are left
-	// alone.
+	// EXPORT_TLB_DMABUF rationale in ioctl.h. RESTORE_STATE and the POST_RESET
+	// flags are the re-init halves of a reset sequence, not destructive, so
+	// they are left alone.
 	switch (in.flags) {
 	case TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK:
 	case TENSTORRENT_RESET_DEVICE_CONFIG_WRITE:
@@ -333,8 +333,14 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		tenstorrent_reset_reclaim_iatus(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
-	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {
+	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET ||
+		   in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET_POLL) {
 		ok = is_reset_marker_zero(pdev);
+
+		// While the link is down config reads return all-ones, which reads
+		// as the marker still being set.
+		if (!ok && in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET_POLL)
+			return -EAGAIN;
 
 		// In the hotplug case, needs_hw_init is false and there is nothing to
 		// do here. Otherwise this was an in-place reset, so re-initialize now,

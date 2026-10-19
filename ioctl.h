@@ -152,6 +152,16 @@ struct tenstorrent_get_driver_info {
 #define TENSTORRENT_RESET_DEVICE_ASIC_RESET 4
 #define TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET 5
 #define TENSTORRENT_RESET_DEVICE_POST_RESET 6
+#define TENSTORRENT_RESET_DEVICE_POST_RESET_POLL 7
+
+// POST_RESET re-initializes the device after a reset and reports the outcome
+// in out.result. If the reset has not reached the chip yet, that is reported
+// as a failure, so the caller must first wait for the reset marker to clear.
+//
+// POST_RESET_POLL does the same, but fails with EAGAIN, leaving out untouched,
+// while the reset has not reached the chip; call it again until it returns
+// anything else. The driver neither waits nor times out: the caller decides
+// how long to keep trying.
 
 struct tenstorrent_reset_device_in {
 	__u32 output_size_bytes;

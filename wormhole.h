@@ -15,6 +15,7 @@ struct wormhole_device {
 	u8 __iomem *bar4_mapping;
 
 	u8 saved_mps;
+	bool mps_saved;
 
 	struct delayed_work fw_ready_work;
 	int telemetry_retries;

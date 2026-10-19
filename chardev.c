@@ -262,6 +262,7 @@ static void tenstorrent_reset_reclaim_tlbs(struct tenstorrent_device *tt_dev)
 static int tenstorrent_post_reset(struct tenstorrent_device *tt_dev, bool poll)
 {
 	struct pci_dev *pdev = tt_dev->pdev;
+	int r;
 
 	// While the link is down config reads return all-ones, which reads as
 	// the marker still being set.
@@ -279,9 +280,15 @@ static int tenstorrent_post_reset(struct tenstorrent_device *tt_dev, bool poll)
 	if (!safe_pci_restore_state(pdev))
 		return -EIO;
 
+	r = tt_dev_check_fw_ready(tt_dev);
+
+	// A hung chip cannot be initialized.
+	if (r == -EIO)
+		return -EIO;
+
 	// POST_RESET carries on without firmware and re-initializes as far as it
 	// can, so that low-level tools can get at the chip.
-	if (tt_dev_check_fw_ready(tt_dev) == -EAGAIN) {
+	if (r == -EAGAIN) {
 		if (poll)
 			return -EAGAIN;
 

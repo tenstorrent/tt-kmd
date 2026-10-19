@@ -269,10 +269,11 @@ static int tenstorrent_post_reset(struct tenstorrent_device *tt_dev, bool poll)
 	if (!is_reset_marker_zero(pdev))
 		return poll ? -EAGAIN : -EIO;
 
-	// In the hotplug case, needs_hw_init is false and there is nothing to do
-	// here.
+	// In the hotplug case, needs_hw_init is false and probe has already
+	// re-initialized the device. It waited for firmware itself, so if
+	// firmware is not ready now, POST_RESET_POLL reports that probe gave up.
 	if (!tt_dev->needs_hw_init)
-		return 0;
+		return (poll && !tt_dev->fw_ready) ? -EIO : 0;
 
 	// This was an in-place reset, so re-initialize now, and clear
 	// needs_hw_init only if that succeeds so a failed POST_RESET can be

@@ -256,6 +256,41 @@ static void tenstorrent_reset_reclaim_tlbs(struct tenstorrent_device *tt_dev)
 	mutex_unlock(&tt_dev->chardev_mutex);
 }
 
+// Finish a reset once it has reached the chip. Returns 0 on success, -EAGAIN
+// if POST_RESET_POLL should be retried, or -EIO on failure.
+static int tenstorrent_post_reset(struct tenstorrent_device *tt_dev, bool poll)
+{
+	struct pci_dev *pdev = tt_dev->pdev;
+
+	// While the link is down config reads return all-ones, which reads as
+	// the marker still being set.
+	if (!is_reset_marker_zero(pdev))
+		return poll ? -EAGAIN : -EIO;
+
+	// In the hotplug case, needs_hw_init is false and there is nothing to do
+	// here.
+	if (!tt_dev->needs_hw_init)
+		return 0;
+
+	// This was an in-place reset, so re-initialize now, and clear
+	// needs_hw_init only if that succeeds so a failed POST_RESET can be
+	// retried.
+	if (!safe_pci_restore_state(pdev))
+		return -EIO;
+
+	tt_dev->dev_class->restore_reset_state(tt_dev);
+	if (!tt_dev->dev_class->init_hardware(tt_dev))
+		return -EIO;
+
+	// Re-probe telemetry tag addresses in case firmware was updated before
+	// this reset.
+	if (tt_dev->dev_class->probe_telemetry)
+		tt_dev->dev_class->probe_telemetry(tt_dev);
+
+	tt_dev->needs_hw_init = false;
+	return 0;
+}
+
 static long ioctl_reset_device(struct chardev_private *priv,
 			       struct tenstorrent_reset_device __user *arg)
 {
@@ -335,33 +370,12 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET ||
 		   in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET_POLL) {
-		ok = is_reset_marker_zero(pdev);
+		int r = tenstorrent_post_reset(tt_dev, in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET_POLL);
 
-		// While the link is down config reads return all-ones, which reads
-		// as the marker still being set.
-		if (!ok && in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET_POLL)
-			return -EAGAIN;
+		if (r == -EAGAIN)
+			return r;
 
-		// In the hotplug case, needs_hw_init is false and there is nothing to
-		// do here. Otherwise this was an in-place reset, so re-initialize now,
-		// and clear the flag only if that succeeds so a premature POST_RESET
-		// can be retried.
-		if (priv->device->needs_hw_init) {
-			if (ok && safe_pci_restore_state(pdev)) {
-				priv->device->dev_class->restore_reset_state(priv->device);
-				ok = priv->device->dev_class->init_hardware(priv->device);
-
-				// Re-probe telemetry tag addresses in case
-				// firmware was updated before this reset.
-				if (ok && priv->device->dev_class->probe_telemetry)
-					priv->device->dev_class->probe_telemetry(priv->device);
-			} else {
-				ok = false;
-			}
-
-			if (ok)
-				priv->device->needs_hw_init = false;
-		}
+		ok = (r == 0);
 	} else {
 		return -EINVAL;
 	}

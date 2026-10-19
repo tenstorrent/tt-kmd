@@ -164,7 +164,9 @@ struct tenstorrent_get_driver_info {
 // POST_RESET_POLL never waits. While the reset has not reached the chip or
 // firmware has not come up, it fails with EAGAIN, leaving out untouched; call
 // it again until it returns anything else. The caller decides how long to
-// keep trying. Otherwise it behaves as POST_RESET does.
+// keep trying. Otherwise it behaves as POST_RESET does, except after a reset
+// that removes and re-adds the device: probe waits for firmware itself, and
+// POST_RESET_POLL reports failure if firmware did not come up in time.
 
 struct tenstorrent_reset_device_in {
 	__u32 output_size_bytes;

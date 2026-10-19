@@ -479,6 +479,11 @@ static struct tenstorrent_sysfs_attr bh_sysfs_attributes[] = {
 	{ TELEMETRY_ASIC_ID, __ATTR(tt_asic_id, S_IRUGO, tt_sysfs_show_u64_hex, NULL) },
 	{ TELEMETRY_TIMER_HEARTBEAT, __ATTR(tt_heartbeat, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
 	{ TELEMETRY_THERM_TRIP_COUNT, __ATTR(tt_therm_trip_count, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_NOC_ECC_MEM_PARITY, __ATTR(tt_noc_parity_err_count, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_NOC_ECC_HDR_SBE, __ATTR(tt_noc_hdr_sbe_count, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_NOC_ECC_HDR_DBE, __ATTR(tt_noc_hdr_dbe_count, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_TENSIX_L1_SBE, __ATTR(tt_l1_sbe_count, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
+	{ TELEMETRY_TENSIX_L1_DBE, __ATTR(tt_l1_dbe_count, S_IRUGO, tt_sysfs_show_u32_dec, NULL) },
 };
 
 static const struct hwmon_channel_info *bh_hwmon_channel_info[] = {

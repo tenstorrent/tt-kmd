@@ -67,6 +67,11 @@ it.
 | `tt_ttflash_ver`     | tt-flash version                                      | WH             |
 | `tt_heartbeat`       | Firmware heartbeat counter (changing = alive)         | BH, WH         |
 | `tt_therm_trip_count`| ASIC shutdowns due to critical temperature (since power cycle) | BH             |
+| `tt_l1_sbe_count`    | Tensix L1 single-bit (corrected) ECC errors (since boot) | BH             |
+| `tt_l1_dbe_count`    | Tensix L1 double-bit (uncorrectable) ECC errors (since boot) | BH             |
+| `tt_noc_hdr_sbe_count` | Tensix NOC 0 header single-bit ECC errors (since boot) | BH             |
+| `tt_noc_hdr_dbe_count` | Tensix NOC 0 header double-bit ECC errors (since boot) | BH             |
+| `tt_noc_parity_err_count` | Tensix NOC 0 memory parity errors (since boot) | BH             |
 
 ### Example Usage
 
@@ -80,6 +85,14 @@ To check for thermal events:
 
 ```bash
 cat '/sys/class/tenstorrent/tenstorrent!0/tt_therm_trip_count'
+```
+
+The ECC counters are lifetime totals kept by firmware: they only increase, and
+saturate rather than wrap. They read 0 if firmware has ECC reporting disabled.
+To check for uncorrectable L1 errors:
+
+```bash
+cat '/sys/class/tenstorrent/tenstorrent!0/tt_l1_dbe_count'
 ```
 
 ---

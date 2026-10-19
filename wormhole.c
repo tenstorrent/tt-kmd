@@ -45,6 +45,18 @@
 #define WH_FW_MSG_TRIGGER_RESET 0x56
 #define WH_FW_MSG_NOP 0x11
 
+// Covers GDDR training on Galaxy with CMFW 19.6.0 and older, which takes
+// 60-90 seconds.
+#define WH_FW_READY_TIMEOUT_MS 120000
+
+// How long one readiness check waits for firmware to answer a NOP. Ready
+// firmware answers well within the 1 ms the reset path allows; the extra
+// margin covers firmware that is up but briefly busy before servicing the
+// message. A miss only costs a retry, since the overall wait is bounded by
+// WH_FW_READY_TIMEOUT_MS. POST_RESET_POLL runs one check per call, so this
+// also bounds how long that ioctl can block.
+#define WH_FW_READY_NOP_TIMEOUT_US 50000
+
 // The iATU can be used to match & remap PCIE transactions.
 #define IATU_BASE 0x1200	// Relative to the start of BAR2
 #define IATU_OUTBOUND 0
@@ -752,12 +764,29 @@ fail_bar2:
 	return false;
 }
 
+// The post code reads as L2 firmware running from the start of L2 init, long
+// before firmware services messages, and anything sent in that window is
+// discarded. A NOP being answered is the only reliable sign of readiness.
+static int wormhole_check_fw_ready(struct tenstorrent_device *tt_dev)
+{
+	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
+	u8 __iomem *regs = reset_unit_regs(wh_dev);
+
+	map_bar4_to_system_registers(wh_dev);
+
+	if (arc_l2_is_running(regs) &&
+	    wormhole_send_arc_fw_message(tt_dev->pdev, regs, WH_FW_MSG_NOP, WH_FW_READY_NOP_TIMEOUT_US, NULL))
+		return 0;
+
+	return -EAGAIN;
+}
+
 static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
 	map_bar4_to_system_registers(wh_dev);
 
-	if (arc_l2_is_running(reset_unit_regs(wh_dev))) {
+	if (tt_dev->fw_ready) {
 		wormhole_send_curr_date(tt_dev->pdev, reset_unit_regs(wh_dev));
 		wormhole_send_arc_fw_message(tt_dev->pdev, reset_unit_regs(wh_dev), WH_FW_MSG_ASTATE0, 10000,
 					     NULL);
@@ -1137,6 +1166,8 @@ struct tenstorrent_device_class wormhole_class = {
 	.dev_groups = wh_dev_groups,
 	.reset = wormhole_reset,
 	.init_device = wormhole_init,
+	.check_fw_ready = wormhole_check_fw_ready,
+	.fw_ready_timeout_ms = WH_FW_READY_TIMEOUT_MS,
 	.init_hardware = wormhole_init_hardware,
 	.init_telemetry = wormhole_init_telemetry,
 	.cleanup_telemetry = wormhole_cleanup_telemetry,

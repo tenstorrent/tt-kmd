@@ -31,6 +31,7 @@
 #define TENSTORRENT_IOCTL_SMC_MSG		_IO(TENSTORRENT_IOCTL_MAGIC, 17)
 #define TENSTORRENT_IOCTL_NOC_READ		_IO(TENSTORRENT_IOCTL_MAGIC, 18)
 #define TENSTORRENT_IOCTL_NOC_WRITE		_IO(TENSTORRENT_IOCTL_MAGIC, 19)
+#define TENSTORRENT_IOCTL_GET_EVENTS		_IO(TENSTORRENT_IOCTL_MAGIC, 20)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -544,6 +545,37 @@ struct tenstorrent_noc_io {
 	__u8 reserved0[2];
 	__u64 addr;
 	__u64 value;
+};
+
+// Indices into tenstorrent_get_events.counts.
+#define TENSTORRENT_EVENT_DEVICE_ERROR	0	// Device reported an error, e.g. an uncorrectable ECC error
+
+#define TENSTORRENT_MAX_EVENTS		8
+
+/**
+ * TENSTORRENT_IOCTL_GET_EVENTS - Read the device's event counters
+ *
+ * The driver keeps one counter per event type for each device.  A counter
+ * increments every time the driver observes an event of that type, starts at
+ * 0 when the device is probed, survives device reset, and wraps at 2^32.
+ * Counters say only that events happened, not what happened; poll() wakeups
+ * coalesce, so one wakeup may cover several events.
+ *
+ * Each fd remembers the counter values it last returned from GET_EVENTS, or
+ * the values at open() if it has not called GET_EVENTS yet.  poll() on the fd
+ * reports EPOLLIN | EPOLLPRI while any device counter differs from those
+ * values, and EPOLLERR | EPOLLHUP once the fd is no longer usable (device
+ * removed, or reset after the fd was opened).
+ *
+ * @argsz: Must be sizeof(struct tenstorrent_get_events).
+ * @flags: Reserved for future use, must be 0.
+ * @counts: OUT: current counter values, indexed by TENSTORRENT_EVENT_*.
+ *          Unused indices read as 0.
+ */
+struct tenstorrent_get_events {
+	__u32 argsz;
+	__u32 flags;
+	__u32 counts[TENSTORRENT_MAX_EVENTS];
 };
 
 #endif

@@ -101,6 +101,8 @@ struct chardev_private {
 
 	struct chardev_msg arc_msg; // Per-fd ARC message; guarded by device arc_msg_mutex
 
+	u32 events_seen[TENSTORRENT_MAX_EVENTS]; // Device event_counts as last returned by GET_EVENTS
+
 	long open_reset_gen; // Reset generation at open time
 };
 

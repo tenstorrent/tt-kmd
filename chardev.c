@@ -12,6 +12,7 @@
 #include <linux/cdev.h>
 #include <linux/slab.h>
 #include <linux/pci.h>
+#include <linux/poll.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
 #include <linux/debugfs.h>
@@ -36,11 +37,13 @@ static long tt_cdev_ioctl(struct file *, unsigned int, unsigned long);
 static int tt_cdev_mmap(struct file *, struct vm_area_struct *);
 static int tt_cdev_open(struct inode *, struct file *);
 static int tt_cdev_release(struct inode *, struct file *);
+static __poll_t tt_cdev_poll(struct file *, poll_table *);
 
 static struct file_operations chardev_fops = {
 	.owner = THIS_MODULE,
 	.unlocked_ioctl = tt_cdev_ioctl,
 	.mmap = tt_cdev_mmap,
+	.poll = tt_cdev_poll,
 	.open = tt_cdev_open,
 	.release = tt_cdev_release,
 };
@@ -94,6 +97,7 @@ int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 
 	init_waitqueue_head(&tt_dev->resource_lock_waitqueue);
 	init_waitqueue_head(&tt_dev->chardev_excl_waitqueue);
+	init_waitqueue_head(&tt_dev->event_waitqueue);
 
 	// device_initialize creates the reference that tenstorrent_pci_remove
 	// drops.  dev.release makes the device kobject the owner of tt_dev's
@@ -364,6 +368,9 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	// and return -ENODEV instead of waiting forever for a lock that no
 	// pre-reset fd can ever release via ioctl.
 	wake_up_interruptible(&tt_dev->resource_lock_waitqueue);
+
+	// Likewise, poll() on a pre-reset fd must report EPOLLHUP.
+	wake_up_interruptible(&tt_dev->event_waitqueue);
 
 	if (clear_user(&arg->out, in.output_size_bytes) != 0)
 		return -EFAULT;
@@ -822,6 +829,46 @@ static long ioctl_arc_msg(struct chardev_private *priv, struct tenstorrent_smc_m
 	return ret;
 }
 
+// Count an occurrence of a TENSTORRENT_EVENT_* and wake poll() waiters.
+// Safe to call from any context, including hard IRQ.
+void tenstorrent_signal_event(struct tenstorrent_device *tt_dev, unsigned int event)
+{
+	if (WARN_ON_ONCE(event >= TENSTORRENT_MAX_EVENTS))
+		return;
+
+	atomic_inc(&tt_dev->event_counts[event]);
+	wake_up_interruptible(&tt_dev->event_waitqueue);
+}
+
+static long ioctl_get_events(struct chardev_private *priv, struct tenstorrent_get_events __user *arg)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_get_events data;
+	unsigned int i;
+
+	if (copy_from_user(&data, arg, sizeof(data)) != 0)
+		return -EFAULT;
+
+	if (data.argsz != sizeof(data))
+		return -EINVAL;
+
+	if (data.flags != 0)
+		return -EINVAL;
+
+	for (i = 0; i < TENSTORRENT_MAX_EVENTS; i++)
+		data.counts[i] = atomic_read(&tt_dev->event_counts[i]);
+
+	if (copy_to_user(arg, &data, sizeof(data)) != 0)
+		return -EFAULT;
+
+	// Only counts that reached userspace are seen; a failed copy leaves poll()
+	// reporting them.
+	for (i = 0; i < TENSTORRENT_MAX_EVENTS; i++)
+		WRITE_ONCE(priv->events_seen[i], data.counts[i]);
+
+	return 0;
+}
+
 // Decide whether ioctl cmd may proceed on this fd.  Caller holds reset_rwsem
 // (either mode).
 long tt_cdev_ioctl_check(struct chardev_private *priv, unsigned int cmd)
@@ -947,6 +994,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			ret = ioctl_noc_write(priv, (struct tenstorrent_noc_io __user *)arg);
 			break;
 
+		case TENSTORRENT_IOCTL_GET_EVENTS:
+			ret = ioctl_get_events(priv, (struct tenstorrent_get_events __user *)arg);
+			break;
+
 		default:
 			ret = -EINVAL;
 			break;
@@ -989,6 +1040,28 @@ static int tt_cdev_mmap(struct file *file, struct vm_area_struct *vma)
 out:
 	up_read(&tt_dev->reset_rwsem);
 	return ret;
+}
+
+// Lockless: reset and remove wake event_waitqueue after making the fd
+// unusable, so a waiter re-evaluates and sees EPOLLHUP.
+static __poll_t tt_cdev_poll(struct file *file, poll_table *wait)
+{
+	struct chardev_private *priv = file->private_data;
+	struct tenstorrent_device *tt_dev = priv->device;
+	unsigned int i;
+
+	poll_wait(file, &tt_dev->event_waitqueue, wait);
+
+	if (READ_ONCE(tt_dev->detached) ||
+	    atomic_long_read(&tt_dev->reset_gen) != priv->open_reset_gen)
+		return EPOLLERR | EPOLLHUP;
+
+	for (i = 0; i < TENSTORRENT_MAX_EVENTS; i++) {
+		if ((u32)atomic_read(&tt_dev->event_counts[i]) != READ_ONCE(priv->events_seen[i]))
+			return EPOLLIN | EPOLLPRI;
+	}
+
+	return 0;
 }
 
 static struct tenstorrent_device *inode_to_tt_dev(struct inode *inode)
@@ -1049,6 +1122,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	struct tenstorrent_device *tt_dev = inode_to_tt_dev(inode);
 	struct chardev_private *private_data;
 	bool power_aware = file->f_flags & O_APPEND;
+	unsigned int i;
 	int ret;
 
 	private_data = kzalloc(sizeof(*private_data), GFP_KERNEL);
@@ -1072,6 +1146,10 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	get_device(&tt_dev->dev);
 	private_data->device = tt_dev;
 	private_data->open_reset_gen = atomic_long_read(&tt_dev->reset_gen);
+
+	// poll() reports only events that occur after open.
+	for (i = 0; i < TENSTORRENT_MAX_EVENTS; i++)
+		private_data->events_seen[i] = atomic_read(&tt_dev->event_counts[i]);
 
 	private_data->pid = get_pid(task_pid(current->group_leader));
 	get_task_comm(private_data->comm, current);

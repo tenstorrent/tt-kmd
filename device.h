@@ -57,6 +57,9 @@ struct tenstorrent_device {
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
 	wait_queue_head_t resource_lock_waitqueue;
 
+	atomic_t event_counts[TENSTORRENT_MAX_EVENTS];	// Indexed by TENSTORRENT_EVENT_*
+	wait_queue_head_t event_waitqueue;		// poll() waiters for event_counts
+
 	struct device *hwmon_dev;
 	const struct tenstorrent_sysfs_attr *telemetry_sysfs;
 	u16 telemetry_sysfs_count;

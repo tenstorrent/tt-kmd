@@ -468,6 +468,9 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	// they observe detached and return -ENODEV instead of waiting forever.
 	wake_up_interruptible(&tt_dev->resource_lock_waitqueue);
 
+	// Likewise, poll() waiters must observe detached and report EPOLLHUP.
+	wake_up_interruptible(&tt_dev->event_waitqueue);
+
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
 		tenstorrent_memory_cleanup(priv);

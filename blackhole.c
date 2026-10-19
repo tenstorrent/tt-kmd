@@ -9,6 +9,7 @@
 #include <linux/slab.h>
 #include <linux/jiffies.h>
 #include <linux/delay.h>
+#include <linux/spinlock.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
 
 #include "blackhole.h"
@@ -256,7 +257,7 @@ static int blackhole_noc_read(struct tenstorrent_device *tt_dev, u32 x, u32 y, u
 	u8 __iomem *tlb_window;
 	int ret = 0;
 
-	mutex_lock(&bh->kernel_tlb_mutex);
+	spin_lock(&bh->kernel_tlb_lock);
 
 	tlb_window = bh_configure_kernel_tlb(bh, x, y, addr, noc);
 
@@ -268,7 +269,7 @@ static int blackhole_noc_read(struct tenstorrent_device *tt_dev, u32 x, u32 y, u
 	default: ret = -EINVAL; break;
 	}
 
-	mutex_unlock(&bh->kernel_tlb_mutex);
+	spin_unlock(&bh->kernel_tlb_lock);
 
 	return ret;
 }
@@ -280,7 +281,7 @@ static int blackhole_noc_write(struct tenstorrent_device *tt_dev, u32 x, u32 y, 
 	u8 __iomem *tlb_window;
 	int ret = 0;
 
-	mutex_lock(&bh->kernel_tlb_mutex);
+	spin_lock(&bh->kernel_tlb_lock);
 
 	tlb_window = bh_configure_kernel_tlb(bh, x, y, addr, noc);
 
@@ -292,7 +293,7 @@ static int blackhole_noc_write(struct tenstorrent_device *tt_dev, u32 x, u32 y, 
 	default: ret = -EINVAL; break;
 	}
 
-	mutex_unlock(&bh->kernel_tlb_mutex);
+	spin_unlock(&bh->kernel_tlb_lock);
 
 	return ret;
 }
@@ -701,7 +702,7 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 
 	// Claim the topmost 2M window for kernel use.
 	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
-	mutex_init(&bh->kernel_tlb_mutex);
+	spin_lock_init(&bh->kernel_tlb_lock);
 
 	// Initialize once and reserve the device-lifetime DMA buffer. The MSI
 	// handler may schedule work after the firmware handshake, which happens

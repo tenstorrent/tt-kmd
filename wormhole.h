@@ -5,11 +5,14 @@
 #define TTDRIVER_WORMHOLE_H_INCLUDED
 
 #include <linux/types.h>
+#include <linux/spinlock.h>
 #include "device.h"
 
 struct wormhole_device {
 	struct tenstorrent_device tt;
-	struct mutex kernel_tlb_mutex;	// Guards access to kernel_tlb
+	// Guards access to kernel_tlb and serializes aperture MMIO across CPUs
+	// (spin_unlock issues mmiowb so posted writes drain before the TLB is reprogrammed).
+	spinlock_t kernel_tlb_lock;
 
 	u8 __iomem *bar2_mapping;
 	u8 __iomem *bar4_mapping;

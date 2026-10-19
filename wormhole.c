@@ -10,6 +10,7 @@
 #include <linux/sysfs.h>
 #include <linux/delay.h>
 #include <linux/pci.h>
+#include <linux/spinlock.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
 
 #include "wormhole.h"
@@ -706,7 +707,7 @@ static bool wormhole_init(struct tenstorrent_device *tt_dev)
 	if (wh_dev->bar4_mapping == NULL) goto fail_bar4;
 
 	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
-	mutex_init(&wh_dev->kernel_tlb_mutex);
+	spin_lock_init(&wh_dev->kernel_tlb_lock);
 
 	tt_dev->hwmon_attributes = wh_hwmon_attrs;
 	tt_dev->hwmon_labels = wh_hwmon_labels;
@@ -953,7 +954,7 @@ static int wormhole_noc_read(struct tenstorrent_device *tt_dev, u32 x, u32 y, u6
 	u8 __iomem *tlb_window;
 	int ret = 0;
 
-	mutex_lock(&wh->kernel_tlb_mutex);
+	spin_lock(&wh->kernel_tlb_lock);
 
 	ret = wh_configure_kernel_tlb(wh, x, y, addr, noc, &tlb_window);
 	if (ret)
@@ -968,7 +969,7 @@ static int wormhole_noc_read(struct tenstorrent_device *tt_dev, u32 x, u32 y, u6
 	}
 
 out:
-	mutex_unlock(&wh->kernel_tlb_mutex);
+	spin_unlock(&wh->kernel_tlb_lock);
 
 	return ret;
 }
@@ -980,7 +981,7 @@ static int wormhole_noc_write(struct tenstorrent_device *tt_dev, u32 x, u32 y, u
 	u8 __iomem *tlb_window;
 	int ret = 0;
 
-	mutex_lock(&wh->kernel_tlb_mutex);
+	spin_lock(&wh->kernel_tlb_lock);
 
 	ret = wh_configure_kernel_tlb(wh, x, y, addr, noc, &tlb_window);
 	if (ret)
@@ -995,7 +996,7 @@ static int wormhole_noc_write(struct tenstorrent_device *tt_dev, u32 x, u32 y, u
 	}
 
 out:
-	mutex_unlock(&wh->kernel_tlb_mutex);
+	spin_unlock(&wh->kernel_tlb_lock);
 
 	return ret;
 }

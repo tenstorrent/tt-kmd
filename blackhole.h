@@ -5,12 +5,15 @@
 #define TTDRIVER_BLACKHOLE_H_INCLUDED
 
 #include <linux/types.h>
+#include <linux/spinlock.h>
 #include "device.h"
 
 struct blackhole_device {
 	struct tenstorrent_device tt;
 
-	struct mutex kernel_tlb_mutex;	// Guards access to kernel_tlb
+	// Guards access to kernel_tlb and serializes aperture MMIO across CPUs
+	// (spin_unlock issues mmiowb so posted writes drain before the TLB is reprogrammed).
+	spinlock_t kernel_tlb_lock;
 	u8 __iomem *tlb_regs;   // All TLB registers
 	u8 __iomem *kernel_tlb; // Topmost 2M window, reserved for kernel
 	u8 __iomem *noc2axi_cfg;

@@ -119,8 +119,8 @@ struct tenstorrent_device_class {
 	bool (*reset)(struct tenstorrent_device *ttdev, u32 reset_flag);
 	bool (*init_device)(struct tenstorrent_device *ttdev);
 	// Optional. Check, without waiting, whether firmware has finished booting
-	// and accepts messages. Returns 0 when ready or -EAGAIN if not yet. A
-	// class without this hook is assumed ready.
+	// and accepts messages. Returns 0 when ready, -EAGAIN if not yet, or -EIO
+	// if the chip is hung. A class without this hook is assumed ready.
 	int (*check_fw_ready)(struct tenstorrent_device *ttdev);
 	u32 fw_ready_timeout_ms; // How long probe waits for check_fw_ready
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);

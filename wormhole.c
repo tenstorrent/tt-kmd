@@ -651,78 +651,11 @@ static const struct hwmon_chip_info wh_hwmon_chip_info = {
 	.info = wh_hwmon_info,
 };
 
-static void wormhole_hwmon_init(struct wormhole_device *wh_dev)
-{
-	struct tenstorrent_device *tt_dev = &wh_dev->tt;
-	struct device *dev = &tt_dev->pdev->dev;
-	struct device *hwmon_device;
-
-	hwmon_device = hwmon_device_register_with_info(dev, "wormhole", tt_dev, &wh_hwmon_chip_info, NULL);
-	if (IS_ERR(hwmon_device)) {
-		dev_warn(dev, "Failed to initialize hwmon.\n");
-		return;
-	}
-
-	tt_dev->hwmon_dev = hwmon_device;
-
-	// Notify udev that telemetry attributes are now available.
-	kobject_uevent(&tt_dev->dev.kobj, KOBJ_CHANGE);
-}
-
-static bool is_fw_ready_for_telemetry(struct wormhole_device *wh)
-{
-	u32 base_addr = ioread32(wh->bar4_mapping + ARC_TELEMETRY_PTR);
-	u32 data_addr = ioread32(wh->bar4_mapping + ARC_TELEMETRY_DATA);
-	// Ready means the header is readable: a version u32 at base_addr and the
-	// entry count in the u32 after it, hence 8 bytes.
-	bool ready = is_range_within_csm(base_addr, 2 * sizeof(u32)) && is_range_within_csm(data_addr, sizeof(u32));
-
-	return ready;
-}
-
-// On some WH systems, ARC firmware may not have finished initializing by the
-// time the PCI driver probes or a reset completes. This work function polls for
-// firmware readiness, then scans the telemetry tag table. On first init it also
-// registers the sysfs group and hwmon device; on re-probe after reset it just
-// refreshes the tag cache (sysfs/hwmon are already registered).
-static void fw_ready_work_func(struct work_struct *work)
-{
-	struct delayed_work *dwork = to_delayed_work(work);
-	struct wormhole_device *wh = container_of(dwork, struct wormhole_device, fw_ready_work);
-	struct tenstorrent_device *tt_dev = &wh->tt;
-
-	if (tt_dev->detached)
-		return;
-
-	if (!is_fw_ready_for_telemetry(wh)) {
-		if (wh->telemetry_retries-- > 0)
-			schedule_delayed_work(&wh->fw_ready_work, msecs_to_jiffies(1000));
-		else
-			dev_err(&tt_dev->pdev->dev, "Timed out waiting for FW telemetry\n");
-		return;
-	}
-
-	down_write(&tt_dev->reset_rwsem);
-	tt_telemetry_probe(tt_dev);
-	up_write(&tt_dev->reset_rwsem);
-
-	// First-time init: register sysfs and hwmon if not already done.
-	if (!wh->telemetry_group_registered) {
-		if (!device_add_group(&tt_dev->dev, &tt_dev->telemetry_group))
-			wh->telemetry_group_registered = true;
-	}
-
-	if (!tt_dev->hwmon_dev)
-		wormhole_hwmon_init(wh);
-}
-
 static bool wormhole_init(struct tenstorrent_device *tt_dev)
 {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 	struct device *dev = &tt_dev->pdev->dev;
 	int i;
-
-	INIT_DELAYED_WORK(&wh_dev->fw_ready_work, fw_ready_work_func);
 
 	tt_dev->telemetry_attrs = devm_kcalloc(dev, ARRAY_SIZE(wh_sysfs_attributes) + 1, sizeof(struct attribute *), GFP_KERNEL);
 
@@ -793,43 +726,6 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 	}
 
 	return true;
-}
-
-// Re-probe telemetry after reset. If FW is ready, scan immediately.
-// If not (slow ARC init on some WH boards), defer and poll via fw_ready_work.
-static int wormhole_probe_telemetry(struct tenstorrent_device *tt_dev)
-{
-	struct wormhole_device *wh = tt_dev_to_wh_dev(tt_dev);
-
-	wh->telemetry_retries = 120;
-	schedule_delayed_work(&wh->fw_ready_work, 0);
-	return 0;
-}
-
-static bool wormhole_init_telemetry(struct tenstorrent_device *tt_dev)
-{
-	// Probe telemetry and register sysfs/hwmon. On some WH systems the ARC
-	// firmware may still be initializing, so fw_ready_work polls until ready.
-	wormhole_probe_telemetry(tt_dev);
-
-	return true;
-}
-
-static void wormhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
-{
-	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
-
-	cancel_delayed_work_sync(&wh_dev->fw_ready_work);
-
-	if (tt_dev->hwmon_dev) {
-		hwmon_device_unregister(tt_dev->hwmon_dev);
-		tt_dev->hwmon_dev = NULL;
-	}
-
-	if (wh_dev->telemetry_group_registered) {
-		device_remove_group(&tt_dev->dev, &tt_dev->telemetry_group);
-		wh_dev->telemetry_group_registered = false;
-	}
 }
 
 static void wormhole_cleanup_hardware(struct tenstorrent_device *tt_dev) {
@@ -1168,11 +1064,10 @@ struct tenstorrent_device_class wormhole_class = {
 	.check_fw_ready = wormhole_check_fw_ready,
 	.fw_ready_timeout_ms = WH_FW_READY_TIMEOUT_MS,
 	.init_hardware = wormhole_init_hardware,
-	.init_telemetry = wormhole_init_telemetry,
-	.cleanup_telemetry = wormhole_cleanup_telemetry,
 	.read_telemetry_tag = wormhole_read_telemetry_tag,
 	.populate_telemetry_cache = wormhole_populate_telemetry_cache,
-	.probe_telemetry = wormhole_probe_telemetry,
+	.hwmon_name = "wormhole",
+	.hwmon_chip_info = &wh_hwmon_chip_info,
 	.cleanup_hardware = wormhole_cleanup_hardware,
 	.cleanup_device = wormhole_cleanup,
 	.reboot = wormhole_cleanup_hardware,

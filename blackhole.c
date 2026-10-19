@@ -12,6 +12,7 @@
 #include <linux/io-64-nonatomic-lo-hi.h>
 
 #include "blackhole.h"
+#include "chardev.h"
 #include "pcie.h"
 #include "module.h"
 #include "msgqueue.h"
@@ -633,9 +634,69 @@ bool fw_log_hw_release(void *hw_ctx)
 	return arc_msg_send_sync(&bh->tt, &msg) == 0;
 }
 
+// Runs on every MSI, whatever its source, so it must tolerate finding nothing
+// new.  NOC access sleeps, which is why this is deferred from the IRQ handler.
+static void blackhole_l1_dbe_work(struct work_struct *work)
+{
+	struct blackhole_device *bh = container_of(work, struct blackhole_device, l1_dbe_work);
+	struct tenstorrent_device *tt_dev = &bh->tt;
+	u32 count;
+
+	if (!READ_ONCE(bh->l1_dbe_enabled))
+		return;
+
+	if (tt_telemetry_read32(tt_dev, TELEMETRY_TENSIX_L1_DBE, &count))
+		return;
+
+	// All-ones is what a read from an unreachable device returns.  Firmware
+	// also saturates there, after which there is nothing left to detect.
+	if (count == U32_MAX)
+		return;
+
+	// The total only grows until a chip reset restarts it, so a decrease just
+	// moves the baseline.  The first read only sets it.
+	if (bh->l1_dbe_baselined && count > bh->l1_dbe_count)
+		tenstorrent_signal_event(tt_dev, TENSTORRENT_EVENT_DEVICE_ERROR);
+
+	bh->l1_dbe_count = count;
+	bh->l1_dbe_baselined = true;
+}
+
+// Enable detection and take a baseline now, rather than at the first MSI,
+// which may itself be reporting an error.
+static void blackhole_l1_dbe_start(struct blackhole_device *bh)
+{
+	WRITE_ONCE(bh->l1_dbe_enabled, true);
+	queue_work(system_unbound_wq, &bh->l1_dbe_work);
+}
+
+static void blackhole_l1_dbe_stop(struct blackhole_device *bh)
+{
+	WRITE_ONCE(bh->l1_dbe_enabled, false);
+	cancel_work_sync(&bh->l1_dbe_work);
+}
+
+// tt_telemetry_probe() replaces the cache without locking, so detection, which
+// reads it, must not start before the first probe.  Re-probing after reset runs
+// under reset_rwsem, which the read also takes.
+static int blackhole_probe_telemetry(struct tenstorrent_device *tt_dev)
+{
+	int r = tt_telemetry_probe(tt_dev);
+
+	if (!r)
+		blackhole_l1_dbe_start(tt_dev_to_bh_dev(tt_dev));
+
+	return r;
+}
+
 static void blackhole_interrupt(struct tenstorrent_device *tt_dev)
 {
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+
 	fw_log_interrupt(&tt_dev->fw_log);
+
+	if (READ_ONCE(bh->l1_dbe_enabled))
+		queue_work(system_unbound_wq, &bh->l1_dbe_work);
 }
 
 static bool blackhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
@@ -713,6 +774,8 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	// later in blackhole_init_hardware().
 	fw_log_init(&tt_dev->fw_log, &tt_dev->pdev->dev, bh);
 
+	INIT_WORK(&bh->l1_dbe_work, blackhole_l1_dbe_work);
+
 	tt_dev->hwmon_attributes = bh_hwmon_attrs;
 	tt_dev->hwmon_labels = bh_hwmon_labels;
 	tt_dev->telemetry_sysfs = bh_sysfs_attributes;
@@ -749,6 +812,11 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 	// Best-effort: start firmware log forwarding. Also re-runs on resume.
 	fw_log_setup(&tt_dev->fw_log);
 
+	// No cache yet means device probe, where blackhole_probe_telemetry()
+	// starts detection once the tag can be read.
+	if (tt_dev->telemetry_cache)
+		blackhole_l1_dbe_start(bh);
+
 	return true;
 }
 
@@ -763,7 +831,7 @@ static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
 	else
 		bh->pcie_perf_group_registered = true;
 
-	r = tt_telemetry_probe(tt_dev);
+	r = blackhole_probe_telemetry(tt_dev);
 	if (!r) {
 		struct device *dev = &tt_dev->pdev->dev;
 		struct device *hwmon_device;
@@ -789,6 +857,9 @@ static void blackhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 
+	// The telemetry cache this reads is freed after we return.
+	blackhole_l1_dbe_stop(bh);
+
 	if (tt_dev->hwmon_dev) {
 		hwmon_device_unregister(tt_dev->hwmon_dev);
 		tt_dev->hwmon_dev = NULL;
@@ -809,6 +880,10 @@ static void blackhole_cleanup_hardware(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	struct arc_msg msg = { 0 };
+
+	// Suspend: IRQs are already disabled, so nothing re-queues the work
+	// until init_hardware restarts it at resume.
+	blackhole_l1_dbe_stop(bh);
 
 	if (tt_dev->detached)
 		return;
@@ -838,6 +913,10 @@ static void blackhole_cleanup(struct tenstorrent_device *tt_dev)
 	// access) so the buffer is always released even on an unreachable
 	// device. Firmware was asked to stop in blackhole_cleanup_hardware.
 	fw_log_free(&tt_dev->fw_log);
+
+	// IRQs are disabled by now; drain work an MSI queued after the stop in
+	// blackhole_cleanup_telemetry.
+	blackhole_l1_dbe_stop(bh);
 
 	if (bh->tlb_regs)
 		pci_iounmap(tt_dev->pdev, bh->tlb_regs);
@@ -954,7 +1033,7 @@ struct tenstorrent_device_class blackhole_class = {
 	.cleanup_telemetry = blackhole_cleanup_telemetry,
 	.read_telemetry_tag = blackhole_read_telemetry_tag,
 	.populate_telemetry_cache = blackhole_populate_telemetry_cache,
-	.probe_telemetry = tt_telemetry_probe,
+	.probe_telemetry = blackhole_probe_telemetry,
 	.cleanup_hardware = blackhole_cleanup_hardware,
 	.cleanup_device = blackhole_cleanup,
 	.configure_tlb = blackhole_configure_tlb,

@@ -5,6 +5,7 @@
 #define TTDRIVER_BLACKHOLE_H_INCLUDED
 
 #include <linux/types.h>
+#include <linux/workqueue.h>
 #include "device.h"
 
 struct blackhole_device {
@@ -20,6 +21,13 @@ struct blackhole_device {
 
 	bool pcie_perf_group_registered;
 	bool telemetry_group_registered;
+
+	// Uncorrectable L1 ECC error detection: on each MSI, compare firmware's
+	// L1 DBE total against the last value read.
+	struct work_struct l1_dbe_work;
+	bool l1_dbe_enabled;
+	bool l1_dbe_baselined;	// l1_dbe_count holds a value read from firmware
+	u32 l1_dbe_count;
 };
 
 #define tt_dev_to_bh_dev(ttdev) \

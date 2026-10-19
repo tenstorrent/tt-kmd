@@ -16,11 +16,6 @@ struct wormhole_device {
 
 	u8 saved_mps;
 	bool mps_saved;
-
-	struct delayed_work fw_ready_work;
-	int telemetry_retries;
-
-	bool telemetry_group_registered;
 };
 
 #define tt_dev_to_wh_dev(ttdev) \

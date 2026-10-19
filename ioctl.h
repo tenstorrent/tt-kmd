@@ -157,11 +157,13 @@ struct tenstorrent_get_driver_info {
 // POST_RESET re-initializes the device after a reset and reports the outcome
 // in out.result. If the reset has not reached the chip yet, that is reported
 // as a failure, so the caller must first wait for the reset marker to clear.
+// If firmware has not come up, the device is re-initialized as far as is
+// possible without it, and that is reported as success.
 //
 // POST_RESET_POLL does the same, but fails with EAGAIN, leaving out untouched,
-// while the reset has not reached the chip; call it again until it returns
-// anything else. The driver neither waits nor times out: the caller decides
-// how long to keep trying.
+// while the reset has not reached the chip or firmware has not come up; call
+// it again until it returns anything else. The driver neither waits nor times
+// out: the caller decides how long to keep trying.
 
 struct tenstorrent_reset_device_in {
 	__u32 output_size_bytes;

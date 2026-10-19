@@ -278,6 +278,15 @@ static int tenstorrent_post_reset(struct tenstorrent_device *tt_dev, bool poll)
 	if (!safe_pci_restore_state(pdev))
 		return -EIO;
 
+	// POST_RESET carries on without firmware and re-initializes as far as it
+	// can, so that low-level tools can get at the chip.
+	if (tt_dev_check_fw_ready(tt_dev) == -EAGAIN) {
+		if (poll)
+			return -EAGAIN;
+
+		dev_warn(&pdev->dev, "Firmware not ready; re-initializing without it\n");
+	}
+
 	tt_dev->dev_class->restore_reset_state(tt_dev);
 	if (!tt_dev->dev_class->init_hardware(tt_dev))
 		return -EIO;
@@ -354,6 +363,7 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		tenstorrent_reset_reclaim_iatus(tt_dev);
 		ok = set_reset_marker(pdev);
 		priv->device->needs_hw_init = true;
+		priv->device->fw_ready = false;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
@@ -361,6 +371,7 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		tenstorrent_reset_reclaim_iatus(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
+		priv->device->fw_ready = false;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
@@ -368,6 +379,7 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		tenstorrent_reset_reclaim_iatus(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
+		priv->device->fw_ready = false;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET ||
 		   in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET_POLL) {
 		int r = tenstorrent_post_reset(tt_dev, in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET_POLL);

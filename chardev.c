@@ -16,6 +16,7 @@
 #include <linux/version.h>
 #include <linux/debugfs.h>
 #include <linux/proc_fs.h>
+#include <linux/sched/signal.h>
 
 #include "chardev_private.h"
 #include "device.h"
@@ -300,6 +301,45 @@ static int tenstorrent_post_reset(struct tenstorrent_device *tt_dev, bool poll)
 	return 0;
 }
 
+// Callers of POST_RESET issue it once and cannot retry, so wait for firmware
+// on their behalf, checking as POST_RESET_POLL would, and carry on without it
+// if it does not come up in time. Only a fatal signal cuts the wait short.
+static int tenstorrent_post_reset_wait(struct chardev_private *priv)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	ktime_t end;
+	int r;
+
+	// A reset that has not reached the chip fails right away, as it always
+	// has, and after a hotplug reset probe has already done the waiting.
+	if (!tt_dev->needs_hw_init || !is_reset_marker_zero(tt_dev->pdev))
+		return tenstorrent_post_reset(tt_dev, false);
+
+	end = ktime_add_ms(ktime_get(), tt_dev->dev_class->fw_ready_timeout_ms);
+
+	while ((r = tenstorrent_post_reset(tt_dev, true)) == -EAGAIN) {
+		if (ktime_after(ktime_get(), end))
+			return tenstorrent_post_reset(tt_dev, false);
+
+		// Don't hold up other users of the device, or its removal, between
+		// checks; needs_hw_init keeps it restricted meanwhile. Reacquire so
+		// the caller's matching up_write in tt_cdev_ioctl stays balanced.
+		up_write(&tt_dev->reset_rwsem);
+		schedule_timeout_killable(msecs_to_jiffies(100));
+		down_write(&tt_dev->reset_rwsem);
+
+		if (fatal_signal_pending(current))
+			return -EINTR;
+
+		// A reset or remove may have happened while reset_rwsem was dropped.
+		r = tt_cdev_ioctl_check(priv, TENSTORRENT_IOCTL_RESET_DEVICE);
+		if (r)
+			return r;
+	}
+
+	return r;
+}
+
 static long ioctl_reset_device(struct chardev_private *priv,
 			       struct tenstorrent_reset_device __user *arg)
 {
@@ -382,9 +422,15 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		priv->device->fw_ready = false;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET ||
 		   in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET_POLL) {
-		int r = tenstorrent_post_reset(tt_dev, in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET_POLL);
+		int r;
 
-		if (r == -EAGAIN)
+		if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET_POLL)
+			r = tenstorrent_post_reset(tt_dev, true);
+		else
+			r = tenstorrent_post_reset_wait(priv);
+
+		// Anything but a failed reset is the ioctl's own error.
+		if (r && r != -EIO)
 			return r;
 
 		ok = (r == 0);

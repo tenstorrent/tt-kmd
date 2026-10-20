@@ -12,6 +12,7 @@
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
 #include <linux/proc_fs.h>
+#include <linux/sched/signal.h>
 
 #include "enumerate.h"
 #include "interrupt.h"
@@ -255,6 +256,29 @@ static int tenstorrent_reboot_notifier(struct notifier_block *nb,
 	return NOTIFY_DONE;
 }
 
+// Unlike POST_RESET, probe has the device to itself, so it waits. Only a fatal
+// signal cuts the wait short: an ordinary signal to whatever triggered the
+// probe must not leave a booting chip without its firmware-dependent init.
+static int tt_dev_wait_fw_ready(struct tenstorrent_device *tt_dev)
+{
+	ktime_t start = ktime_get();
+	ktime_t end = ktime_add_ms(start, tt_dev->dev_class->fw_ready_timeout_ms);
+	int r;
+
+	while ((r = tt_dev_check_fw_ready(tt_dev)) == -EAGAIN) {
+		if (ktime_after(ktime_get(), end) || fatal_signal_pending(current))
+			break;
+
+		schedule_timeout_killable(msecs_to_jiffies(100));
+	}
+
+	if (r == -EAGAIN)
+		dev_warn(&tt_dev->pdev->dev, "Firmware not ready after %lld ms\n",
+			 ktime_ms_delta(ktime_get(), start));
+
+	return r;
+}
+
 static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	struct tenstorrent_device *tt_dev = NULL;
@@ -371,10 +395,18 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 		goto fail_init_device;
 	}
 
-	tt_dev->needs_hw_init = !device_class->init_hardware(tt_dev);
+	// A hung chip stays registered, with needs_hw_init still set, so it can
+	// be identified and reset.
+	if (tt_dev_wait_fw_ready(tt_dev) == -EIO)
+		dev_err(&dev->dev, "Device is unresponsive; only identification and reset are available\n");
+	else
+		tt_dev->needs_hw_init = !device_class->init_hardware(tt_dev);
 
 	pci_save_state(dev);
-	device_class->save_reset_state(tt_dev);
+
+	// The saved MPS is read from the chip's PCIe controller over the NOC.
+	if (!tt_dev->needs_hw_init)
+		device_class->save_reset_state(tt_dev);
 
 	tenstorrent_register_device(tt_dev);
 
@@ -384,7 +416,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	}
 
 	if (!tt_dev->needs_hw_init)
-		device_class->init_telemetry(tt_dev);
+		tt_telemetry_init(tt_dev);
 
 	debugfs_create_file("mappings", 0444, tt_dev->debugfs_root, tt_dev, &mappings_fops);
 

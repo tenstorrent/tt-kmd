@@ -27,8 +27,6 @@
 #include "sg_helpers.h"
 #include "tlb.h"
 
-#define BAR0_SIZE (1UL << 29)
-
 // In 7.1:
 // 52a9e9cd181f renamed zap_vma_ptes() to zap_special_vma_range()
 // 95308225e5ba renamed dma_buf_move_notify() to dma_buf_invalidate_mappings()
@@ -1001,10 +999,14 @@ long ioctl_allocate_tlb(struct chardev_private *priv,
 
 	// mmap offsets match the offsets of the TLB windows in BAR0, with one
 	// exception: the mmap offsets for the 4G windows in Blackhole BAR4 begin
-	// at 512M, i.e. the size of BAR0.
+	// just past BAR0, so that the two BARs share one flat offset space.
+	//
+	// This is the device's own BAR0 length rather than a constant, so that an
+	// architecture whose BAR0 windows reach past 512M does not have most of
+	// them land in what the decode reads as BAR4 territory.
 	encoded_id = tlb_desc.bar_offset;
 	if (tlb_desc.bar == 4)
-		encoded_id += BAR0_SIZE;
+		encoded_id += pci_resource_len(tt_dev->pdev, 0);
 
 	out.mmap_offset_uc = MMAP_OFFSET_TLB_UC + encoded_id;
 	out.mmap_offset_wc = MMAP_OFFSET_TLB_WC + encoded_id;
@@ -1592,7 +1594,8 @@ static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *v
 	unsigned long size = vma->vm_end - vma->vm_start;
 	unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
 	unsigned long pfn;
-	bool bar4 = offset >= BAR0_SIZE;
+	resource_size_t bar0_len = pci_resource_len(tt_dev->pdev, 0);
+	bool bar4 = offset >= bar0_len;
 	phys_addr_t bar_start;
 	int i;
 	int id = -1;
@@ -1609,7 +1612,7 @@ static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *v
 		total_tlbs += tt_dev->tlb_counts[i];
 
 	if (bar4)
-		offset -= BAR0_SIZE;
+		offset -= bar0_len;
 
 	// Find the window matching the requested offset.
 	for (i = 0; i < total_tlbs; ++i) {

@@ -46,14 +46,20 @@
 #define APPIN0_BANK_STRIDE	0x1000	// distance between APPIN00..APPIN03 banks
 #define TLB_CFG_ENTRY_SIZE	0x40	// 64 bytes per TLB config entry
 #define TLB_CFG_ADDR_OFFSET	0x00	// qword: target_addr | valid
-// attr_p0..p7: a 256-bit user-bit field, eight 32-bit words. Only the low five
-// bits reach the inbound APP path: bit 4 selects non-cacheable (the window's
-// accesses go out with AxCACHE 0x0 rather than 0xF) and bits 3:0 carry the QoS
-// id. The rest are carried by the entry and ignored by this block.
+// attr_p0..p7: a 256-bit user-bit field, eight 32-bit words. The inbound APP
+// path emits attr[4:0] as {3'b0, attr[4:0], 4'b0}, which lands on the NOC's
+// 9-bit security header: bit 8 is cce_cmd_snoop, bits 7:4 are sec_group_id and
+// bits 3:0 are sec_source_id, which a PCIe window cannot set. So attr[4] is the
+// snoop bit and attr[3:0] the security group; the rest of the field is carried
+// by the entry and ignored here.
+//
+// The same bit also forces AxCACHE to 0x0 rather than 0xF on the PCIe leg,
+// which reads backwards for a bit that means "snoop" -- see the open question
+// in tt_pcie's tt_pcie_inbound_tlbapp.sv.
 #define TLB_CFG_ATTR_OFFSET	0x20
 #define TLB_CFG_ATTR_WORDS	8
-#define TLB_ATTR_NO_CACHEABLE	BIT(4)
-#define TLB_ATTR_QOSID_MASK	GENMASK(3, 0)
+#define TLB_ATTR_SNOOP		BIT(4)
+#define TLB_ATTR_SEC_GROUP_ID	GENMASK(3, 0)
 #define TLB_CFG_VALID		0x1
 
 // BAR2 offset of the config qword for AppIn0 entry, reached via SysIn0[2].
@@ -337,7 +343,7 @@ static int keraunos_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
 	if (config->ordering || config->linked || config->static_vc)
 		return -EINVAL;
 
-	if (config->no_cacheable > 1 || config->qosid > TLB_ATTR_QOSID_MASK ||
+	if (config->snoop > 1 || config->sec_group_id > TLB_ATTR_SEC_GROUP_ID ||
 	    config->reserved0)
 		return -EINVAL;
 
@@ -355,8 +361,8 @@ static int keraunos_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
 	if (!kd->bar2)
 		return -ENODEV;
 
-	attr = (config->no_cacheable ? TLB_ATTR_NO_CACHEABLE : 0) |
-	       FIELD_PREP(TLB_ATTR_QOSID_MASK, config->qosid);
+	attr = (config->snoop ? TLB_ATTR_SNOOP : 0) |
+	       FIELD_PREP(TLB_ATTR_SEC_GROUP_ID, config->sec_group_id);
 
 	// The owning fd holds this entry exclusively (tt_dev->tlbs) and is the
 	// only thing accessing its BAR0 window, so unlike the kernel's shared

@@ -315,11 +315,15 @@ struct tenstorrent_noc_tlb_config {
 	// an architecture whose windows have nowhere to put them, a nonzero value
 	// is refused rather than ignored.
 	//
-	// @no_cacheable: 1 marks accesses through the window non-cacheable. 0, the
-	//                default, leaves them cacheable.
-	// @qosid:        QoS class for accesses through the window, 0-15.
-	__u8 no_cacheable;
-	__u8 qosid;
+	// These are the NOC's security header, which is the one part of the AXI
+	// user bits the NOC takes from the requester rather than from its own
+	// configuration.
+	//
+	// @snoop:        1 marks accesses through the window snoopable for cache
+	//                coherency (the NOC's cce_cmd_snoop).
+	// @sec_group_id: security group the accesses are attributed to, 0-15.
+	__u8 snoop;
+	__u8 sec_group_id;
 	__u8 reserved0;
 	__u32 reserved1[2];
 };

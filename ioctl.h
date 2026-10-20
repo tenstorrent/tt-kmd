@@ -311,7 +311,16 @@ struct tenstorrent_noc_tlb_config {
 	__u8 ordering;
 	__u8 linked;
 	__u8 static_vc;
-	__u8 reserved0[3];
+	// Per-window transaction attributes. Only Keraunos carries these today; on
+	// an architecture whose windows have nowhere to put them, a nonzero value
+	// is refused rather than ignored.
+	//
+	// @no_cacheable: 1 marks accesses through the window non-cacheable. 0, the
+	//                default, leaves them cacheable.
+	// @qosid:        QoS class for accesses through the window, 0-15.
+	__u8 no_cacheable;
+	__u8 qosid;
+	__u8 reserved0;
 	__u32 reserved1[2];
 };
 

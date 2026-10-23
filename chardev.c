@@ -623,7 +623,15 @@ static long ioctl_noc_write(struct chardev_private *priv, struct tenstorrent_noc
 	return tt_dev->dev_class->noc_write(tt_dev, data.x, data.y, data.addr, &data.value, data.width, data.noc);
 }
 
-static int tenstorrent_set_aggregated_power_state_locked(struct tenstorrent_device *tt_dev)
+// An fd votes for power unless it is power-aware and has requested nothing.
+static bool fd_has_power_contribution(const struct chardev_private *priv)
+{
+	return !(priv->power_state.validity == TT_POWER_VALIDITY(15, 0) && priv->power_state.power_flags == 0);
+}
+
+// Combine the votes of every current-generation fd into the state to send.
+static void aggregate_power_state_locked(struct tenstorrent_device *tt_dev,
+					 struct tenstorrent_power_state *out)
 {
 	struct tenstorrent_power_state power_state = { 0 };
 	struct chardev_private *priv;
@@ -674,33 +682,86 @@ static int tenstorrent_set_aggregated_power_state_locked(struct tenstorrent_devi
 	// regardless of what validity individual FDs specified.
 	power_state.validity = TT_POWER_VALIDITY(15, max_settings_count);
 
+	*out = power_state;
+}
+
+static bool power_state_is_idle(const struct tenstorrent_power_state *power_state)
+{
+	int i;
+
+	if (power_state->power_flags != 0)
+		return false;
+
+	for (i = 0; i < ARRAY_SIZE(power_state->power_settings); i++)
+		if (power_state->power_settings[i] != 0)
+			return false;
+
+	return true;
+}
+
+// Make the device's power state follow the fds' votes.  Call after any vote
+// changes.  A vote for power is sent now and cancels any pending powerdown.
+// An idle vote is not sent; it arms power_down_work, so a close followed by
+// an open within the grace period never reaches firmware.
+//
+// This is the only place power_down_work is armed.  Arming happens under
+// chardev_mutex and only while !detached, which lets tenstorrent_pci_remove
+// fence it, and every caller holds reset_rwsem shared, which lets the reset
+// ioctl fence it.
+static int tenstorrent_update_power_state_locked(struct tenstorrent_device *tt_dev)
+{
+	struct tenstorrent_power_state power_state;
+
+	lockdep_assert_held(&tt_dev->chardev_mutex);
+
+	if (tt_dev->detached || tt_dev->needs_hw_init)
+		return 0;
+
+	aggregate_power_state_locked(tt_dev, &power_state);
+
+	if (power_state_is_idle(&power_state) && tt_dev->dev_class->defer_idle_powerdown
+	    && idle_power_down_grace_ms > 0) {
+		mod_delayed_work(system_wq, &tt_dev->power_down_work, msecs_to_jiffies(idle_power_down_grace_ms));
+		return 0;
+	}
+
+	// Not _sync: the handler takes chardev_mutex.  If it is already running
+	// it will see this vote once we drop the mutex and do nothing.
+	cancel_delayed_work(&tt_dev->power_down_work);
+
 	return tt_dev->dev_class->set_power_state(tt_dev, &power_state);
 }
 
-int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_dev)
+int tenstorrent_update_power_state(struct tenstorrent_device *tt_dev)
 {
 	int ret;
 
 	mutex_lock(&tt_dev->chardev_mutex);
-	ret = tenstorrent_set_aggregated_power_state_locked(tt_dev);
+	ret = tenstorrent_update_power_state_locked(tt_dev);
 	mutex_unlock(&tt_dev->chardev_mutex);
 
 	return ret;
 }
 
-// Delayed work: send the aggregated idle power-down message after the
-// grace period elapses with no open fds.  Safe to run unguarded:
-// tt_cdev_release only arms this under chardev_mutex when !detached,
-// and tenstorrent_pci_remove writes detached=true under the same mutex
-// before cancel_delayed_work_sync, so the handler cannot fire after
-// teardown begins.
+// Delayed work: power down once the vote has stayed idle for the grace
+// period.  A vote for power cancels this, or, if it raced the cancel, has
+// already been sent, so only send if the vote is still idle.
 void tenstorrent_power_down_work_func(struct work_struct *work)
 {
 	struct tenstorrent_device *tt_dev = container_of(to_delayed_work(work),
 							 struct tenstorrent_device,
 							 power_down_work);
+	struct tenstorrent_power_state power_state;
 
-	tenstorrent_set_aggregated_power_state(tt_dev);
+	mutex_lock(&tt_dev->chardev_mutex);
+
+	if (!tt_dev->detached && !tt_dev->needs_hw_init) {
+		aggregate_power_state_locked(tt_dev, &power_state);
+		if (power_state_is_idle(&power_state))
+			tt_dev->dev_class->set_power_state(tt_dev, &power_state);
+	}
+
+	mutex_unlock(&tt_dev->chardev_mutex);
 }
 
 static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorrent_power_state __user *arg)
@@ -728,7 +789,7 @@ static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorre
 
 	mutex_lock(&tt_dev->chardev_mutex);
 	priv->power_state = data;
-	ret = tenstorrent_set_aggregated_power_state_locked(tt_dev);
+	ret = tenstorrent_update_power_state_locked(tt_dev);
 	mutex_unlock(&tt_dev->chardev_mutex);
 
 	return ret;
@@ -1092,27 +1153,15 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 		return ret;
 	}
 
-	// Hold reset_rwsem (shared) across the body so the reset ioctl (which holds
-	// it exclusive) cannot interleave with the deferred powerdown cancel or the
-	// initial aggregation.  Without this, a reset that drained the work could
-	// find a fresh arm landed by this open after its cancel on the
-	// power_down_work.
+	// Hold reset_rwsem (shared) so the reset ioctl (which holds it exclusive)
+	// cannot interleave with the power update; see
+	// tenstorrent_update_power_state_locked.
 	down_read(&tt_dev->reset_rwsem);
 
-	// Eagerly drain any deferred powerdown armed by a previous last-close so an
-	// open() arriving during the grace window doesn't ship a spurious
-	// powerdown->powerup pair.  Correctness doesn't depend on this: the handler
-	// re-aggregates current state and would ship the up-state since this fd is
-	// already on the list.  If the work is merely pending, the cancel is silent
-	// (no FW traffic, chip is still up); if mid-fire, we wait for the powerdown
-	// to complete and the aggregation below issues the balancing powerup.  Safe
-	// no-op when nothing is armed.
-	if (tt_dev->dev_class->defer_idle_powerdown
-	    && cancel_delayed_work_sync(&tt_dev->power_down_work))
-		dev_dbg(&tt_dev->pdev->dev, "cancelled pending idle powerdown\n");
-
-	if (!power_aware && !tt_dev->detached && !tt_dev->needs_hw_init) {
-		ret = tenstorrent_set_aggregated_power_state(tt_dev);
+	// A power-aware fd votes nothing until it asks, so only a legacy open
+	// changes the vote.
+	if (!power_aware) {
+		ret = tenstorrent_update_power_state(tt_dev);
 		if (ret < 0)
 			dev_warn(&tt_dev->pdev->dev, "Failed to set initial power state: %d\n", ret);
 	}
@@ -1161,29 +1210,17 @@ static void tt_cdev_release_tlbs(struct chardev_private *priv)
 static void tt_cdev_release_power(struct chardev_private *priv)
 {
 	struct tenstorrent_device *tt_dev = priv->device;
-	bool can_defer;
-	bool no_power_contrib;
-	bool last_close;
 
 	lockdep_assert_held(&tt_dev->chardev_mutex);
-
-	can_defer = tt_dev->dev_class->defer_idle_powerdown && (idle_power_down_grace_ms > 0);
-	no_power_contrib = (priv->power_state.validity == TT_POWER_VALIDITY(15, 0) && priv->power_state.power_flags == 0);
-	last_close = list_empty(&tt_dev->open_fds_list);
-
-	if (tt_dev->detached || tt_dev->needs_hw_init)
-		return;
 
 	if (!power_policy)
 		return;
 
-	if (no_power_contrib)
+	// An fd that voted nothing leaves the vote as it was.
+	if (!fd_has_power_contribution(priv))
 		return;
 
-	if (can_defer && last_close)
-		mod_delayed_work(system_wq, &tt_dev->power_down_work, msecs_to_jiffies(idle_power_down_grace_ms));
-	else
-		tenstorrent_set_aggregated_power_state_locked(tt_dev);
+	tenstorrent_update_power_state_locked(tt_dev);
 }
 
 static int tt_cdev_release(struct inode *inode, struct file *file)

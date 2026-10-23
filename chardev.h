@@ -12,7 +12,7 @@ extern void cleanup_char_driver(void);
 
 int tenstorrent_register_device(struct tenstorrent_device *gs_dev);
 void tenstorrent_unregister_device(struct tenstorrent_device *gs_dev);
-int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_dev);
+int tenstorrent_update_power_state(struct tenstorrent_device *tt_dev);
 void tenstorrent_power_down_work_func(struct work_struct *work);
 
 #endif

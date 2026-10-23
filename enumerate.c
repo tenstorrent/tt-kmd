@@ -390,7 +390,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	// Set initial low-power state via aggregation logic.
 	if (power_policy)
-		tenstorrent_set_aggregated_power_state(tt_dev);
+		tenstorrent_update_power_state(tt_dev);
 
 	return 0;
 
@@ -416,14 +416,15 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	// Tear down telemetry first.
 	tt_telemetry_cleanup(tt_dev);
 
-	// Fence deferred-powerdown arming before draining.  tt_cdev_release
-	// arms power_down_work under chardev_mutex only when it observes
-	// !detached, so writing detached=true here under the same mutex
-	// partitions concurrent releases cleanly: any that armed did so
-	// strictly before this write and are drained by the cancel below;
-	// any that run after observe detached and skip the arm.  Without
-	// this ordering a release could slip an arm past the cancel and
-	// fire its FW message into a torn-down device.
+	// Fence deferred-powerdown arming before draining.
+	// tenstorrent_update_power_state_locked arms power_down_work under
+	// chardev_mutex only when it observes !detached, so writing
+	// detached=true here under the same mutex partitions concurrent
+	// updates cleanly: any that armed did so strictly before this write
+	// and are drained by the cancel below; any that run after observe
+	// detached and skip the arm.  Without this ordering an update could
+	// slip an arm past the cancel and fire its FW message into a
+	// torn-down device.
 	mutex_lock(&tt_dev->chardev_mutex);
 	tt_dev->detached = true;
 	mutex_unlock(&tt_dev->chardev_mutex);

@@ -12,6 +12,7 @@
 #include <linux/cdev.h>
 #include <linux/slab.h>
 #include <linux/pci.h>
+#include <linux/poll.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
 #include <linux/debugfs.h>
@@ -36,11 +37,13 @@ static long tt_cdev_ioctl(struct file *, unsigned int, unsigned long);
 static int tt_cdev_mmap(struct file *, struct vm_area_struct *);
 static int tt_cdev_open(struct inode *, struct file *);
 static int tt_cdev_release(struct inode *, struct file *);
+static __poll_t tt_cdev_poll(struct file *, poll_table *);
 
 static struct file_operations chardev_fops = {
 	.owner = THIS_MODULE,
 	.unlocked_ioctl = tt_cdev_ioctl,
 	.mmap = tt_cdev_mmap,
+	.poll = tt_cdev_poll,
 	.open = tt_cdev_open,
 	.release = tt_cdev_release,
 };
@@ -94,6 +97,8 @@ int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 
 	init_waitqueue_head(&tt_dev->resource_lock_waitqueue);
 	init_waitqueue_head(&tt_dev->chardev_excl_waitqueue);
+	init_waitqueue_head(&tt_dev->event_waitqueue);
+	spin_lock_init(&tt_dev->event_lock);
 
 	// device_initialize creates the reference that tenstorrent_pci_remove
 	// drops.  dev.release makes the device kobject the owner of tt_dev's
@@ -220,6 +225,19 @@ static void arc_msg_reset_scrub(struct tenstorrent_device *tt_dev)
 	mutex_unlock(&tt_dev->arc_msg_mutex);
 }
 
+// Event records belong to the device's lifetime, which a reset ends: discard
+// them all, and leave the resetter's fd with nothing to read.  Every other fd
+// is now invalid.
+static void reset_events(struct chardev_private *priv)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+
+	spin_lock_irq(&tt_dev->event_lock);
+	tt_dev->event_tail = tt_dev->event_head;
+	priv->event_cursor = tt_dev->event_head;
+	spin_unlock_irq(&tt_dev->event_lock);
+}
+
 // Bump the device's reset generation and bring this fd's open_reset_gen along
 // with it. Other fds become permanently invalid, but the resetter keeps a live
 // fd so it can complete the reset sequence without a close/reopen window.
@@ -227,6 +245,7 @@ static void bump_reset_gen(struct chardev_private *priv)
 {
 	priv->open_reset_gen = atomic_long_inc_return(&priv->device->reset_gen);
 	arc_msg_reset_scrub(priv->device);
+	reset_events(priv);
 }
 
 // Reclaim TLB windows from fds this reset invalidated.
@@ -364,6 +383,9 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	// and return -ENODEV instead of waiting forever for a lock that no
 	// pre-reset fd can ever release via ioctl.
 	wake_up_interruptible(&tt_dev->resource_lock_waitqueue);
+
+	// Likewise, poll() on a pre-reset fd must report EPOLLHUP.
+	wake_up_interruptible(&tt_dev->event_waitqueue);
 
 	if (clear_user(&arg->out, in.output_size_bytes) != 0)
 		return -EFAULT;
@@ -822,6 +844,130 @@ static long ioctl_arc_msg(struct chardev_private *priv, struct tenstorrent_smc_m
 	return ret;
 }
 
+// Append an event record, assigning its seq and host time, and wake poll()
+// waiters.  Safe to call from any context, including hard IRQ.
+void tenstorrent_push_event(struct tenstorrent_device *tt_dev, const struct tenstorrent_event *event)
+{
+	struct tenstorrent_event *slot;
+	unsigned long flags;
+
+	spin_lock_irqsave(&tt_dev->event_lock, flags);
+
+	slot = &tt_dev->events[tt_dev->event_head % TT_EVENT_RING_SIZE];
+	*slot = *event;
+	slot->seq = tt_dev->event_head;
+	slot->host_time_ns = ktime_get_ns();
+	tt_dev->event_head++;
+
+	spin_unlock_irqrestore(&tt_dev->event_lock, flags);
+
+	wake_up_interruptible(&tt_dev->event_waitqueue);
+}
+
+// Append a record of one of the driver's own TENSTORRENT_EVENT_TYPE_*.
+void tenstorrent_push_driver_event(struct tenstorrent_device *tt_dev, u16 type, u32 data0)
+{
+	struct tenstorrent_event event = { .type = type, .data = { data0 } };
+
+	tenstorrent_push_event(tt_dev, &event);
+}
+
+static u64 oldest_event(const struct tenstorrent_device *tt_dev)
+{
+	if (tt_dev->event_head - tt_dev->event_tail > TT_EVENT_RING_SIZE)
+		return tt_dev->event_head - TT_EVENT_RING_SIZE;
+	return tt_dev->event_tail;
+}
+
+// Records are copied out in batches through this buffer, so that the
+// spinlock is never held across copy_to_user.
+#define READ_EVENTS_BATCH 8
+
+static long ioctl_read_events(struct chardev_private *priv, struct tenstorrent_read_events __user *arg)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_event batch[READ_EVENTS_BATCH];
+	struct tenstorrent_event __user *out;
+	struct tenstorrent_read_events data;
+	bool from_oldest;
+	u64 lost = 0;
+	u32 count = 0;
+
+	if (copy_from_user(&data, arg, sizeof(data)) != 0)
+		return -EFAULT;
+
+	if (data.argsz != sizeof(data))
+		return -EINVAL;
+
+	if (data.flags & ~TENSTORRENT_READ_EVENTS_FROM_OLDEST)
+		return -EINVAL;
+
+	if (data.reserved != 0)
+		return -EINVAL;
+
+	out = u64_to_user_ptr(data.events_ptr);
+	from_oldest = data.flags & TENSTORRENT_READ_EVENTS_FROM_OLDEST;
+
+	mutex_lock(&priv->event_mutex);
+
+	// capacity 0 only reports status, so even FROM_OLDEST changes nothing.
+	while (count < data.capacity) {
+		unsigned long irqflags;
+		u64 oldest;
+		u32 n = 0;
+
+		spin_lock_irqsave(&tt_dev->event_lock, irqflags);
+
+		oldest = oldest_event(tt_dev);
+		if (from_oldest) {
+			priv->event_cursor = oldest;
+			from_oldest = false;
+		} else if (priv->event_cursor < oldest) {
+			lost += oldest - priv->event_cursor;
+			priv->event_cursor = oldest;
+		}
+
+		while (n < READ_EVENTS_BATCH && count + n < data.capacity &&
+		       priv->event_cursor + n < tt_dev->event_head) {
+			batch[n] = tt_dev->events[(priv->event_cursor + n) % TT_EVENT_RING_SIZE];
+			n++;
+		}
+
+		spin_unlock_irqrestore(&tt_dev->event_lock, irqflags);
+
+		if (n == 0)
+			break;
+
+		// Records that didn't reach userspace stay unread.  Report the
+		// ones that did, if any.
+		if (copy_to_user(out + count, batch, n * sizeof(batch[0])) != 0) {
+			if (count == 0) {
+				mutex_unlock(&priv->event_mutex);
+				return -EFAULT;
+			}
+			break;
+		}
+
+		spin_lock_irqsave(&tt_dev->event_lock, irqflags);
+		priv->event_cursor += n;
+		spin_unlock_irqrestore(&tt_dev->event_lock, irqflags);
+
+		count += n;
+	}
+
+	mutex_unlock(&priv->event_mutex);
+
+	data.entry_size = sizeof(struct tenstorrent_event);
+	data.count = count;
+	data.lost = min_t(u64, lost, U32_MAX);
+	data.status = tt_dev->events_fw_attached ? TENSTORRENT_READ_EVENTS_STATUS_FW_ATTACHED : 0;
+
+	if (copy_to_user(arg, &data, sizeof(data)) != 0)
+		return -EFAULT;
+
+	return 0;
+}
+
 // Decide whether ioctl cmd may proceed on this fd.  Caller holds reset_rwsem
 // (either mode).
 long tt_cdev_ioctl_check(struct chardev_private *priv, unsigned int cmd)
@@ -947,6 +1093,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			ret = ioctl_noc_write(priv, (struct tenstorrent_noc_io __user *)arg);
 			break;
 
+		case TENSTORRENT_IOCTL_READ_EVENTS:
+			ret = ioctl_read_events(priv, (struct tenstorrent_read_events __user *)arg);
+			break;
+
 		default:
 			ret = -EINVAL;
 			break;
@@ -989,6 +1139,28 @@ static int tt_cdev_mmap(struct file *file, struct vm_area_struct *vma)
 out:
 	up_read(&tt_dev->reset_rwsem);
 	return ret;
+}
+
+// Reset and remove wake event_waitqueue after making the fd unusable, so a
+// waiter re-evaluates and sees EPOLLHUP.
+static __poll_t tt_cdev_poll(struct file *file, poll_table *wait)
+{
+	struct chardev_private *priv = file->private_data;
+	struct tenstorrent_device *tt_dev = priv->device;
+	unsigned long flags;
+	bool unread;
+
+	poll_wait(file, &tt_dev->event_waitqueue, wait);
+
+	if (READ_ONCE(tt_dev->detached) ||
+	    atomic_long_read(&tt_dev->reset_gen) != priv->open_reset_gen)
+		return EPOLLERR | EPOLLHUP;
+
+	spin_lock_irqsave(&tt_dev->event_lock, flags);
+	unread = priv->event_cursor != tt_dev->event_head;
+	spin_unlock_irqrestore(&tt_dev->event_lock, flags);
+
+	return unread ? EPOLLIN | EPOLLPRI : 0;
 }
 
 static struct tenstorrent_device *inode_to_tt_dev(struct inode *inode)
@@ -1072,6 +1244,12 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	get_device(&tt_dev->dev);
 	private_data->device = tt_dev;
 	private_data->open_reset_gen = atomic_long_read(&tt_dev->reset_gen);
+
+	// poll() and READ_EVENTS report only records that arrive after open.
+	mutex_init(&private_data->event_mutex);
+	spin_lock_irq(&tt_dev->event_lock);
+	private_data->event_cursor = tt_dev->event_head;
+	spin_unlock_irq(&tt_dev->event_lock);
 
 	private_data->pid = get_pid(task_pid(current->group_leader));
 	get_task_comm(private_data->comm, current);

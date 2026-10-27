@@ -31,6 +31,7 @@
 #define TENSTORRENT_IOCTL_SMC_MSG		_IO(TENSTORRENT_IOCTL_MAGIC, 17)
 #define TENSTORRENT_IOCTL_NOC_READ		_IO(TENSTORRENT_IOCTL_MAGIC, 18)
 #define TENSTORRENT_IOCTL_NOC_WRITE		_IO(TENSTORRENT_IOCTL_MAGIC, 19)
+#define TENSTORRENT_IOCTL_READ_EVENTS		_IO(TENSTORRENT_IOCTL_MAGIC, 20)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -544,6 +545,90 @@ struct tenstorrent_noc_io {
 	__u8 reserved0[2];
 	__u64 addr;
 	__u64 value;
+};
+
+// tenstorrent_event.type.  Types 0x0000-0x7FFF are defined by firmware (in
+// tt-system-firmware's device_events.h) and passed through without
+// interpretation.  The driver's own types are 0x8000 and up.
+#define TENSTORRENT_EVENT_TYPE_FW_EVENTS_LOST		0x8000	// data[0]: firmware records lost
+
+/**
+ * struct tenstorrent_event - One device event record
+ *
+ * @seq: Driver sequence number.  Consecutive per device, starting at 0 when
+ *       the device is probed.
+ * @host_time_ns: CLOCK_MONOTONIC when the driver received the record.
+ * @device_time: Firmware timestamp: the ARC reference clock since firmware
+ *               boot, in 20 ns ticks.  0 for driver types.
+ * @type: A firmware type, or TENSTORRENT_EVENT_TYPE_*.
+ * @source: For an event raised by a tile, its translated NOC coordinates,
+ *          x | y << 6.  Otherwise type-specific.
+ * @cause: Type-specific subcode.
+ * @data: Type-specific data.  Firmware records use data[0..2]; data[3] is 0.
+ */
+struct tenstorrent_event {
+	__u64 seq;
+	__u64 host_time_ns;
+	__u64 device_time;
+	__u16 type;
+	__u16 source;
+	__u32 cause;
+	__u32 data[4];
+};
+
+// tenstorrent_read_events.flags
+#define TENSTORRENT_READ_EVENTS_FROM_OLDEST	(1 << 0)
+
+// tenstorrent_read_events.status
+#define TENSTORRENT_READ_EVENTS_STATUS_FW_ATTACHED	(1 << 0)	// Firmware publishes events
+
+/**
+ * TENSTORRENT_IOCTL_READ_EVENTS - Read device event records
+ *
+ * The driver keeps the last 256 event records for each device, numbered by
+ * tenstorrent_event.seq.  Records come from firmware and from the driver
+ * itself, including firmware records published before the driver found the
+ * device, such as errors at boot.  A device reset discards them all.
+ *
+ * Each fd has a cursor: the seq of the next record it will read.  It starts
+ * at open() just past the newest record, so an fd sees only records that
+ * arrive after it was opened.  READ_EVENTS copies records from the cursor
+ * onwards, up to @capacity of them, and advances the cursor past them.  If
+ * records the fd had not read were discarded to make room, the cursor first
+ * moves to the oldest record kept, and @lost says how many were skipped.
+ * Reading does not consume records: every fd has its own cursor.
+ *
+ * poll() on the fd reports EPOLLIN | EPOLLPRI while the fd has unread
+ * records, and EPOLLERR | EPOLLHUP once the fd is no longer usable (device
+ * removed, or reset after the fd was opened).
+ *
+ * If TENSTORRENT_READ_EVENTS_STATUS_FW_ATTACHED is clear in @status, firmware
+ * does not publish events (it is too old, or the device is not ready), and no
+ * records will appear.  A call with @capacity 0 reads nothing and
+ * changes nothing, so it can be used to check this.
+ *
+ * @argsz: Must be sizeof(struct tenstorrent_read_events).
+ * @flags: TENSTORRENT_READ_EVENTS_FROM_OLDEST moves the cursor to the oldest
+ *         record kept before reading.
+ * @entry_size: OUT: sizeof(struct tenstorrent_event).
+ * @capacity: Number of records that fit at @events_ptr.
+ * @count: OUT: number of records written to @events_ptr.
+ * @lost: OUT: records this fd skipped since its previous read, saturating
+ *        at 2^32 - 1.
+ * @status: OUT: TENSTORRENT_READ_EVENTS_STATUS_* bits.
+ * @reserved: Must be 0.
+ * @events_ptr: User address of an array of @capacity struct tenstorrent_event.
+ */
+struct tenstorrent_read_events {
+	__u32 argsz;
+	__u32 flags;
+	__u32 entry_size;
+	__u32 capacity;
+	__u32 count;
+	__u32 lost;
+	__u32 status;
+	__u32 reserved;
+	__u64 events_ptr;
 };
 
 #endif

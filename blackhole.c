@@ -12,6 +12,7 @@
 #include <linux/io-64-nonatomic-lo-hi.h>
 
 #include "blackhole.h"
+#include "chardev.h"
 #include "pcie.h"
 #include "module.h"
 #include "msgqueue.h"
@@ -78,6 +79,21 @@
 #define ARC_BOOT_STATUS_READY_FOR_MSG 0x1
 #define ARC_ERROR_STATUS0 RESET_SCRATCH(4)
 #define ARC_ERROR_STATUS0_CABLE_FAULT BIT(1)
+
+// Firmware event ring, found through TELEMETRY_EVENT_RING_ADDR: a 32-byte
+// header, then num_entries records of entry_size bytes.  Firmware appends at
+// wptr and we read from rptr, both free-running; record s is in entry
+// s % num_entries.  overflow counts records firmware dropped when full.
+#define EVENT_RING_MAGIC 0x54455652	// "TEVR"
+#define EVENT_RING_VERSION 1
+#define EVENT_RING_VERSION_OFFSET 4
+#define EVENT_RING_ENTRY_SIZE_OFFSET 8
+#define EVENT_RING_NUM_ENTRIES_OFFSET 12
+#define EVENT_RING_WPTR_OFFSET 16
+#define EVENT_RING_RPTR_OFFSET 20	// The one field we write
+#define EVENT_RING_OVERFLOW_OFFSET 24
+#define EVENT_RING_HEADER_SIZE 32
+#define EVENT_RING_RECORD_WORDS 8	// seq, type | source << 16, cause, data[3], timestamp lo, hi
 
 // Sub-commands carried in byte 1 of the ARC_MSG_TYPE_FW_LOG header.
 #define FW_LOG_SUBCMD_SETUP   0x1
@@ -628,9 +644,219 @@ bool fw_log_hw_release(void *hw_ctx)
 	return arc_msg_send_sync(&bh->tt, &msg) == 0;
 }
 
+// Read a telemetry tag that isn't in the cache.  This walks the whole tag
+// table, so it is only for rare lookups such as discovery.
+static int blackhole_read_uncached_telemetry_tag(struct blackhole_device *bh, u16 tag_id, u32 *value)
+{
+	struct telem_cache_entry entry = { .tag_id = tag_id, .address = TELEM_ADDR_INVALID };
+	int r;
+
+	r = blackhole_populate_telemetry_cache(&bh->tt, &entry, 1);
+	if (r)
+		return r;
+
+	if (entry.address == TELEM_ADDR_INVALID)
+		return -ENODATA;
+
+	return csm_read32(bh, entry.address, value);
+}
+
+static u32 event_ring_read32(struct blackhole_device *bh, u32 offset)
+{
+	return noc_read32(bh, ARC_X, ARC_Y, bh->event_ring_addr + offset, 0);
+}
+
+// A device that no longer responds reads all-ones, which is not the magic.
+static bool event_ring_present(struct blackhole_device *bh)
+{
+	return event_ring_read32(bh, 0) == EVENT_RING_MAGIC;
+}
+
+// Release entries up to rptr to firmware.
+static void event_ring_set_rptr(struct blackhole_device *bh, u32 rptr)
+{
+	bh->event_ring_rptr = rptr;
+	noc_write32(bh, ARC_X, ARC_Y, bh->event_ring_addr + EVENT_RING_RPTR_OFFSET, rptr, 0);
+}
+
+// Find the firmware's event ring.  Records firmware published before we found
+// it, such as errors at boot, are read on the first drain.  The caller excludes blackhole_events_work, either
+// by holding reset_rwsem for write or because the work is not enabled yet.
+static void blackhole_events_discover(struct blackhole_device *bh)
+{
+	struct tenstorrent_device *tt_dev = &bh->tt;
+	u32 addr, version, entry_size, num_entries, rptr, wptr, overflow;
+
+	bh->event_ring_addr = 0;
+	tt_dev->events_fw_attached = false;
+
+	// Older firmware has no tag.
+	if (blackhole_read_uncached_telemetry_tag(bh, TELEMETRY_EVENT_RING_ADDR, &addr))
+		return;
+
+	if (!is_range_within_csm(addr, EVENT_RING_HEADER_SIZE))
+		return;
+
+	version = noc_read32(bh, ARC_X, ARC_Y, addr + EVENT_RING_VERSION_OFFSET, 0);
+	entry_size = noc_read32(bh, ARC_X, ARC_Y, addr + EVENT_RING_ENTRY_SIZE_OFFSET, 0);
+	num_entries = noc_read32(bh, ARC_X, ARC_Y, addr + EVENT_RING_NUM_ENTRIES_OFFSET, 0);
+
+	// A drain may read the whole ring, and its records are batched in
+	// event_batch, so the ring can't be bigger than that.
+	if (version != EVENT_RING_VERSION || entry_size < EVENT_RING_RECORD_WORDS * sizeof(u32) ||
+	    !is_power_of_2(num_entries) || num_entries > ARRAY_SIZE(bh->event_batch) ||
+	    !is_range_within_csm(addr, EVENT_RING_HEADER_SIZE + (u64)entry_size * num_entries)) {
+		dev_warn(&tt_dev->pdev->dev, "Unsupported event ring: version %u, %u entries of %u bytes\n",
+			 version, num_entries, entry_size);
+		return;
+	}
+
+	bh->event_ring_addr = addr;
+	bh->event_ring_entries = num_entries;
+	bh->event_ring_entry_size = entry_size;
+	rptr = event_ring_read32(bh, EVENT_RING_RPTR_OFFSET);
+	wptr = event_ring_read32(bh, EVENT_RING_WPTR_OFFSET);
+	overflow = event_ring_read32(bh, EVENT_RING_OVERFLOW_OFFSET);
+
+	if (!event_ring_present(bh)) {
+		bh->event_ring_addr = 0;
+		return;
+	}
+
+	// Resume from the last rptr released to this firmware, by us before a
+	// reload or by nobody (0) since it booted.  Records dropped while no
+	// driver had released any are reported as lost; those dropped while a
+	// previous driver instance was away are not, since we can't tell them
+	// from ones it already reported.
+	if (wptr - rptr > num_entries)
+		rptr = wptr;
+	bh->event_ring_overflow = rptr == 0 ? 0 : overflow;
+	event_ring_set_rptr(bh, rptr);
+	tt_dev->events_fw_attached = true;
+}
+
+// Read firmware record seq into *event.  Firmware doesn't touch an entry
+// until we release it, so the read can't race firmware.  Returns false if the
+// entry doesn't hold seq, which firmware never allows.
+static bool event_ring_read_record(struct blackhole_device *bh, u32 seq, struct tenstorrent_event *event)
+{
+	u32 offset = EVENT_RING_HEADER_SIZE + (seq % bh->event_ring_entries) * bh->event_ring_entry_size;
+	u32 w[EVENT_RING_RECORD_WORDS];
+	unsigned int i;
+
+	for (i = 0; i < EVENT_RING_RECORD_WORDS; i++)
+		w[i] = event_ring_read32(bh, offset + i * sizeof(u32));
+
+	if (w[0] != seq)
+		return false;
+
+	memset(event, 0, sizeof(*event));
+	event->type = w[1] & 0xFFFF;
+	event->source = w[1] >> 16;
+	event->cause = w[2];
+	event->data[0] = w[3];
+	event->data[1] = w[4];
+	event->data[2] = w[5];
+	event->device_time = w[6] | ((u64)w[7] << 32);
+	return true;
+}
+
+// Runs on every MSI, whatever its source, so it must tolerate finding nothing
+// new.  NOC access sleeps, which is why this is deferred from the IRQ handler.
+static void blackhole_events_work(struct work_struct *work)
+{
+	struct blackhole_device *bh = container_of(work, struct blackhole_device, events_work);
+	struct tenstorrent_device *tt_dev = &bh->tt;
+	u32 rptr, wptr, overflow, seq, lost = 0;
+	unsigned int count = 0, i;
+
+	if (!READ_ONCE(bh->events_enabled))
+		return;
+
+	// Excludes reset and rediscovery.
+	down_read(&tt_dev->reset_rwsem);
+
+	if (tt_dev->detached || tt_dev->needs_hw_init || !bh->event_ring_addr)
+		goto out;
+
+	rptr = bh->event_ring_rptr;
+	wptr = event_ring_read32(bh, EVENT_RING_WPTR_OFFSET);
+	if (!event_ring_present(bh))
+		goto out;
+
+	// Firmware never gets more than a ring ahead of us, so it restarted
+	// without a reset we saw.  Start over from where it is now.
+	if (wptr - rptr > bh->event_ring_entries) {
+		bh->event_ring_overflow = event_ring_read32(bh, EVENT_RING_OVERFLOW_OFFSET);
+		event_ring_set_rptr(bh, wptr);
+		goto out;
+	}
+
+	for (seq = rptr; seq != wptr; seq++) {
+		if (event_ring_read_record(bh, seq, &bh->event_batch[count]))
+			count++;
+		else
+			lost++;
+	}
+
+	overflow = event_ring_read32(bh, EVENT_RING_OVERFLOW_OFFSET);
+
+	// If the device stopped responding partway, try again next time.
+	if (!event_ring_present(bh))
+		goto out;
+
+	event_ring_set_rptr(bh, wptr);
+
+	for (i = 0; i < count; i++)
+		tenstorrent_push_event(tt_dev, &bh->event_batch[i]);
+
+	// Firmware drops records only while the ring is full of ones we haven't
+	// released, so what it dropped came after what we just read.
+	lost += overflow - bh->event_ring_overflow;
+	bh->event_ring_overflow = overflow;
+	if (lost)
+		tenstorrent_push_driver_event(tt_dev, TENSTORRENT_EVENT_TYPE_FW_EVENTS_LOST, lost);
+
+out:
+	up_read(&tt_dev->reset_rwsem);
+}
+
+// Also drain once now, so that an MSI which arrived while the work was
+// disabled is not missed.
+static void blackhole_events_start(struct blackhole_device *bh)
+{
+	WRITE_ONCE(bh->events_enabled, true);
+	queue_work(system_unbound_wq, &bh->events_work);
+}
+
+static void blackhole_events_stop(struct blackhole_device *bh)
+{
+	WRITE_ONCE(bh->events_enabled, false);
+	cancel_work_sync(&bh->events_work);
+}
+
+// Discovery reads telemetry, so it is redone wherever telemetry is reprobed,
+// including after reset, when firmware may have changed.
+static int blackhole_probe_telemetry(struct tenstorrent_device *tt_dev)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	int r = tt_telemetry_probe(tt_dev);
+
+	blackhole_events_discover(bh);
+	if (bh->event_ring_addr)
+		blackhole_events_start(bh);
+
+	return r;
+}
+
 static void blackhole_interrupt(struct tenstorrent_device *tt_dev)
 {
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+
 	fw_log_interrupt(&tt_dev->fw_log);
+
+	if (READ_ONCE(bh->events_enabled))
+		queue_work(system_unbound_wq, &bh->events_work);
 }
 
 static bool blackhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
@@ -708,6 +934,8 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	// later in blackhole_init_hardware().
 	fw_log_init(&tt_dev->fw_log, &tt_dev->pdev->dev, bh);
 
+	INIT_WORK(&bh->events_work, blackhole_events_work);
+
 	tt_dev->hwmon_attributes = bh_hwmon_attrs;
 	tt_dev->hwmon_labels = bh_hwmon_labels;
 	tt_dev->telemetry_sysfs = bh_sysfs_attributes;
@@ -744,6 +972,11 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 	// Best-effort: start firmware log forwarding. Also re-runs on resume.
 	fw_log_setup(&tt_dev->fw_log);
 
+	// Resume.  At probe, blackhole_probe_telemetry() starts event
+	// detection once discovery has found the ring.
+	if (bh->event_ring_addr)
+		blackhole_events_start(bh);
+
 	return true;
 }
 
@@ -758,7 +991,7 @@ static bool blackhole_init_telemetry(struct tenstorrent_device *tt_dev)
 	else
 		bh->pcie_perf_group_registered = true;
 
-	r = tt_telemetry_probe(tt_dev);
+	r = blackhole_probe_telemetry(tt_dev);
 	if (!r) {
 		struct device *dev = &tt_dev->pdev->dev;
 		struct device *hwmon_device;
@@ -784,6 +1017,10 @@ static void blackhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 
+	// Remove: stop before reset_rwsem is taken for write, which the work
+	// also takes.
+	blackhole_events_stop(bh);
+
 	if (tt_dev->hwmon_dev) {
 		hwmon_device_unregister(tt_dev->hwmon_dev);
 		tt_dev->hwmon_dev = NULL;
@@ -804,6 +1041,10 @@ static void blackhole_cleanup_hardware(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	struct arc_msg msg = { 0 };
+
+	// Suspend: IRQs are already disabled, so nothing re-queues the work
+	// until init_hardware restarts it at resume.
+	blackhole_events_stop(bh);
 
 	if (tt_dev->detached)
 		return;
@@ -833,6 +1074,11 @@ static void blackhole_cleanup(struct tenstorrent_device *tt_dev)
 	// access) so the buffer is always released even on an unreachable
 	// device. Firmware was asked to stop in blackhole_cleanup_hardware.
 	fw_log_free(&tt_dev->fw_log);
+
+	// IRQs are disabled by now; drain work an MSI queued after the stop in
+	// blackhole_cleanup_telemetry.  It sees events_enabled clear and returns
+	// without taking reset_rwsem, which our caller holds.
+	blackhole_events_stop(bh);
 
 	if (bh->tlb_regs)
 		pci_iounmap(tt_dev->pdev, bh->tlb_regs);
@@ -949,7 +1195,7 @@ struct tenstorrent_device_class blackhole_class = {
 	.cleanup_telemetry = blackhole_cleanup_telemetry,
 	.read_telemetry_tag = blackhole_read_telemetry_tag,
 	.populate_telemetry_cache = blackhole_populate_telemetry_cache,
-	.probe_telemetry = tt_telemetry_probe,
+	.probe_telemetry = blackhole_probe_telemetry,
 	.cleanup_hardware = blackhole_cleanup_hardware,
 	.cleanup_device = blackhole_cleanup,
 	.configure_tlb = blackhole_configure_tlb,

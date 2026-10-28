@@ -3,10 +3,14 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/delay.h>
+#include <linux/jiffies.h>
+#include <linux/mm.h>
 #include <linux/pci.h>
 #include <linux/io.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
 #include <linux/spinlock.h>
+#include <linux/uaccess.h>
 
 #include "keraunos.h"
 #include "module.h"
@@ -294,6 +298,7 @@ static bool keraunos_init(struct tenstorrent_device *tt_dev)
 	dev_info(&pdev->dev, "Keraunos init_device\n");
 
 	spin_lock_init(&kd->kernel_tlb_lock);
+	mutex_init(&kd->staging_mutex);
 
 	// Map BAR2 (control plane) in two pieces: the uncached low part, through
 	// which we reprogram TLB config via SysIn0, and the write-combining top
@@ -370,6 +375,207 @@ static struct attribute *keraunos_boot_attrs[] = {
 static const struct attribute_group keraunos_boot_group = {
 	.attrs = keraunos_boot_attrs,
 };
+
+// --- Host bundle staging (Grendel Boot Specification §6.6) ------------------
+//
+// TODO: this is the development ioctl's engine. Long term the same sequence
+// runs from an async worker at probe, fed by request_firmware_nowait()
+// (boot spec §8.4), walking HOST_BUNDLE_SEQ 0, 1, ... until SIP_READY.
+
+#define STAGING_POLL_MS			10
+#define STAGING_DEFAULT_TIMEOUT_MS	60000
+
+static u32 boot_state_of(u32 word)
+{
+	return word & KERAUNOS_BOOT_STATE_MASK;
+}
+
+static u32 boot_seq_of(u32 word)
+{
+	return (word & KERAUNOS_BOOT_BUNDLE_SEQ_MASK) >> KERAUNOS_BOOT_BUNDLE_SEQ_SHIFT;
+}
+
+// Poll the KLA word at addr until (word & mask) == want, or with !equal until
+// it differs. *word receives the last value read. Fails early if scratch[12]
+// reports BOOT_ERROR.
+static int keraunos_poll_kla(struct keraunos_device *kd, u64 addr, u32 mask, u32 want,
+			     bool equal, unsigned long deadline, u32 *word)
+{
+	for (;;) {
+		int ret = keraunos_kla_read(&kd->tt, addr, word, sizeof(*word));
+
+		if (ret)
+			return ret;
+		if (addr == KERAUNOS_SMC_BOOT_STATE_KLA &&
+		    boot_state_of(*word) == KERAUNOS_BOOT_ERROR)
+			return -EIO;
+		if (((*word & mask) == want) == equal)
+			return 0;
+		if (time_after(jiffies, deadline))
+			return -ETIMEDOUT;
+		if (msleep_interruptible(STAGING_POLL_MS))
+			return -EINTR;
+	}
+}
+
+// Wait for posted writes through the WC aperture to reach the device: wmb()
+// drains the CPU's combining buffers, and a config read, which is
+// non-posted, cannot complete ahead of the writes before it. Config space
+// rather than a BAR read because it is safe if the device is going away.
+static int keraunos_flush_wc(struct keraunos_device *kd)
+{
+	u16 vendor_id;
+
+	wmb();
+	if (pci_read_config_word(kd->tt.pdev, PCI_VENDOR_ID, &vendor_id) || vendor_id == U16_MAX)
+		return -ENODEV;
+
+	return 0;
+}
+
+// Copy len bytes from userspace to KLA addr through the WC SysIn0 entries,
+// one KERAUNOS_BAR2_WC_SIZE span at a time. Caller holds staging_mutex.
+//
+// TODO: DMA. CPU copies through a 64KB aperture are the simple first cut;
+// this is the only function that needs to change for another transport.
+static int keraunos_copy_to_kla(struct keraunos_device *kd, u64 addr,
+				const u8 __user *src, size_t len, void *bounce)
+{
+	while (len) {
+		u64 base = addr & ~(u64)SYSIN0_WINDOW_MASK;
+		u32 off = addr - base;
+		size_t chunk = min_t(size_t, len, KERAUNOS_BAR2_WC_SIZE - off);
+		u32 i;
+		int ret;
+
+		if (copy_from_user(bounce, src, chunk))
+			return -EFAULT;
+
+		// The WC entries are adjacent in BAR2, so pointing them at
+		// adjacent 16KB targets gives one contiguous 64KB aperture. Each
+		// config write ends in a read-back, so the new targets are in
+		// place before any data goes through them.
+		for (i = 0; i < KERAUNOS_BAR2_WC_ENTRIES; i++)
+			keraunos_program_sysin0(kd, KERAUNOS_BAR2_WC_FIRST_ENTRY + i,
+						base + (u64)i * SYSIN0_WINDOW_SIZE);
+
+		// 64-bit stores: SMC SRAM takes them, and fixed-width writes
+		// avoid the byte/halfword tails memcpy_toio() may emit.
+		__iowrite64_copy(kd->bar2_wc + off, bounce, chunk / 8);
+
+		// Drain before the entries are retargeted or released.
+		ret = keraunos_flush_wc(kd);
+		if (ret)
+			return ret;
+
+		addr += chunk;
+		src += chunk;
+		len -= chunk;
+	}
+
+	return 0;
+}
+
+static int keraunos_stage_bundle_locked(struct keraunos_device *kd,
+					struct tenstorrent_stage_bundle *args, void *bounce)
+{
+	struct device *dev = &kd->tt.pdev->dev;
+	u32 timeout_ms = args->timeout_ms ?: STAGING_DEFAULT_TIMEOUT_MS;
+	unsigned long deadline = jiffies + msecs_to_jiffies(timeout_ms);
+	u32 word;
+	u32 val;
+	int ret;
+
+	// 1. Firmware opens the window.
+	ret = keraunos_poll_kla(kd, KERAUNOS_SMC_BOOT_STATE_KLA, KERAUNOS_BOOT_STATE_MASK,
+				KERAUNOS_BOOT_WAIT_FOR_BUNDLE, true, deadline, &word);
+	args->boot_state = word;
+	if (ret)
+		return ret;
+
+	// TODO: enforce once firmware sets HOST_BUNDLE_SEQ; today every bundle
+	// arrives with seq 0.
+	if (boot_seq_of(word) != args->seq)
+		dev_info(dev, "Keraunos: staging bundle seq %u but firmware shows seq %u\n",
+			 args->seq, boot_seq_of(word));
+
+	// 2. Copy, flushed by keraunos_copy_to_kla() before it returns.
+	ret = keraunos_copy_to_kla(kd, KERAUNOS_SMC_STAGING_KLA,
+				   u64_to_user_ptr(args->data), args->size, bounce);
+	if (ret)
+		return ret;
+
+	// 3. The one value the producer writes. HOST_BUNDLE_SEQ stays as
+	// firmware set it; BOOT_ERROR_CODE is meaningless outside BOOT_ERROR.
+	word &= ~(KERAUNOS_BOOT_STATE_MASK | KERAUNOS_BOOT_ERROR_CODE_MASK);
+	word |= KERAUNOS_BOOT_BUNDLE_STAGED;
+	ret = keraunos_kla_write(&kd->tt, KERAUNOS_SMC_BOOT_STATE_KLA, &word, sizeof(word));
+	if (ret)
+		return ret;
+	args->boot_state = word;
+
+	dev_info(dev, "Keraunos: staged %llu byte bundle (seq %u)\n", args->size, boot_seq_of(word));
+
+	// 4. Development: no K-SEP to validate the bundle, so stand in for it.
+	if (args->flags & TENSTORRENT_STAGE_BUNDLE_FAKE_SEP_VALIDATION) {
+		ret = keraunos_poll_kla(kd, KERAUNOS_SMC_BUNDLE_VALIDATION_KLA,
+					KERAUNOS_BUNDLE_READY_FOR_VALIDATION,
+					KERAUNOS_BUNDLE_READY_FOR_VALIDATION, true, deadline, &val);
+		if (ret)
+			goto out;
+
+		val |= KERAUNOS_BUNDLE_VALIDATED;
+		ret = keraunos_kla_write(&kd->tt, KERAUNOS_SMC_BUNDLE_VALIDATION_KLA, &val, sizeof(val));
+		if (ret)
+			goto out;
+	}
+
+	// 5. Consumer takes the bundle. Wait for any move off BUNDLE_STAGED:
+	// CONSUMED can be brief, and the next WAIT_FOR_BUNDLE or SIP_READY
+	// also means the bundle was taken.
+	// TODO: drop NO_WAIT once firmware writes BUNDLE_CONSUMED for every
+	// bundle; K-BL1 currently jumps to MIS without doing so for BUN3.
+	if (!(args->flags & TENSTORRENT_STAGE_BUNDLE_NO_WAIT)) {
+		ret = keraunos_poll_kla(kd, KERAUNOS_SMC_BOOT_STATE_KLA, KERAUNOS_BOOT_STATE_MASK,
+					KERAUNOS_BOOT_BUNDLE_STAGED, false, deadline, &word);
+		args->boot_state = word;
+		return ret;
+	}
+
+out:
+	if (keraunos_kla_read(&kd->tt, KERAUNOS_SMC_BOOT_STATE_KLA, &word, sizeof(word)) == 0)
+		args->boot_state = word;
+
+	return ret;
+}
+
+static int keraunos_stage_bundle(struct tenstorrent_device *tt_dev, struct tenstorrent_stage_bundle *args)
+{
+	struct keraunos_device *kd = tt_dev_to_keraunos_dev(tt_dev);
+	void *bounce;
+	int ret;
+
+	if (!kd->bar2 || !kd->bar2_wc)
+		return -ENODEV;
+
+	if (args->size == 0 || args->size % 8 || args->size > KERAUNOS_SMC_STAGING_SIZE)
+		return -EINVAL;
+
+	bounce = kvmalloc(KERAUNOS_BAR2_WC_SIZE, GFP_KERNEL);
+	if (!bounce)
+		return -ENOMEM;
+
+	// TODO: this holds reset_rwsem (shared) across firmware waits of up to
+	// timeout_ms, so a device reset waits for staging to finish.
+	ret = mutex_lock_interruptible(&kd->staging_mutex);
+	if (!ret) {
+		ret = keraunos_stage_bundle_locked(kd, args, bounce);
+		mutex_unlock(&kd->staging_mutex);
+	}
+
+	kvfree(bounce);
+	return ret;
+}
 
 static bool keraunos_init_telemetry(struct tenstorrent_device *tt_dev)
 {
@@ -458,4 +664,5 @@ struct tenstorrent_device_class keraunos_class = {
 	.noc_write = keraunos_noc_write,
 	.kla_read = keraunos_kla_read,
 	.kla_write = keraunos_kla_write,
+	.stage_bundle = keraunos_stage_bundle,
 };

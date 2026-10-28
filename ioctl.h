@@ -32,6 +32,10 @@
 #define TENSTORRENT_IOCTL_NOC_READ		_IO(TENSTORRENT_IOCTL_MAGIC, 18)
 #define TENSTORRENT_IOCTL_NOC_WRITE		_IO(TENSTORRENT_IOCTL_MAGIC, 19)
 
+// Development-only ioctls are numbered from 0x80. Their ABI is unstable: they
+// may change or disappear in any release.
+#define TENSTORRENT_IOCTL_DEV_STAGE_BUNDLE	_IO(TENSTORRENT_IOCTL_MAGIC, 0x80)
+
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
 #define TENSTORRENT_MAPPING_RESOURCE0_UC	1
@@ -550,6 +554,57 @@ struct tenstorrent_noc_io {
 	__u8 reserved0[2];
 	__u64 addr;
 	__u64 value;
+};
+
+/**
+ * TENSTORRENT_IOCTL_DEV_STAGE_BUNDLE - Stage a firmware bundle (development)
+ *
+ * Development-only, unstable ABI; requires CAP_SYS_ADMIN. Keraunos only.
+ *
+ * Runs the host side of the Grendel Boot Specification §6.6 bundle-staging
+ * handshake once, synchronously, with a caller-supplied bundle:
+ *
+ *   1. Wait for K-SMC scratch[12] to show WAIT_FOR_BUNDLE.
+ *   2. Copy @size bytes from @data into the fixed K-SMC SRAM staging window.
+ *   3. Flush the copy, then write BUNDLE_STAGED, keeping HOST_BUNDLE_SEQ.
+ *   4. With TENSTORRENT_STAGE_BUNDLE_FAKE_SEP_VALIDATION: wait for
+ *      BUNDLE_READY_FOR_VALIDATION in scratch[10] and set BUNDLE_VALIDATED
+ *      on K-SEP's behalf, for targets without a SEP (ttsim).
+ *   5. Unless TENSTORRENT_STAGE_BUNDLE_NO_WAIT is set: wait for scratch[12]
+ *      to leave BUNDLE_STAGED.
+ *
+ * The bundle is opaque to the driver: a complete Manifest + Payload image,
+ * laid out as it should appear at the start of the staging window.
+ *
+ * Long term the driver stages bundles itself with request_firmware(); this
+ * ioctl exists so arbitrary bundles can be loaded during bring-up.
+ *
+ * @argsz: Must be sizeof(struct tenstorrent_stage_bundle).
+ * @flags: Zero or more TENSTORRENT_STAGE_BUNDLE_* flags.
+ * @seq: Expected HOST_BUNDLE_SEQ (0 = BUN2, 1 = BUN3 on MK). A mismatch is
+ *       logged but not fatal, because current firmware never sets the field.
+ * @timeout_ms: Overall deadline for all waits; 0 selects the default (60s).
+ * @data: Userspace address of the bundle.
+ * @size: Bundle length in bytes; nonzero, a multiple of 8, and no larger than
+ *        the staging window.
+ * @boot_state: Out: the last scratch[12] value the driver read, also on error.
+ * @reserved0: Must be 0.
+ *
+ * Returns 0 on success, -ETIMEDOUT if the deadline passed, -EINTR if
+ * interrupted by a signal, -EIO if firmware reported BOOT_ERROR, or -ENODEV
+ * if the device went away.
+ */
+struct tenstorrent_stage_bundle {
+	__u32 argsz;
+	__u32 flags;
+#define TENSTORRENT_STAGE_BUNDLE_FAKE_SEP_VALIDATION	(1 << 0)
+#define TENSTORRENT_STAGE_BUNDLE_NO_WAIT		(1 << 1)
+	__u32 seq;
+	__u32 timeout_ms;
+	__u64 data;
+	__u64 size;
+	__u32 boot_state;
+	__u32 reserved0;
 };
 
 #endif

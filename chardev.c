@@ -642,6 +642,37 @@ static long ioctl_noc_write(struct chardev_private *priv, struct tenstorrent_noc
 					    &data.value, data.width, data.noc);
 }
 
+static long ioctl_dev_stage_bundle(struct chardev_private *priv,
+				   struct tenstorrent_stage_bundle __user *arg)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	struct tenstorrent_stage_bundle data = {0};
+	u32 known_flags = TENSTORRENT_STAGE_BUNDLE_FAKE_SEP_VALIDATION |
+			  TENSTORRENT_STAGE_BUNDLE_NO_WAIT;
+	long ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if (!tt_dev->dev_class->stage_bundle)
+		return -EOPNOTSUPP;
+
+	if (copy_from_user(&data, arg, sizeof(data)) != 0)
+		return -EFAULT;
+
+	if (data.argsz != sizeof(data) || (data.flags & ~known_flags) || data.reserved0)
+		return -EINVAL;
+
+	data.boot_state = 0;
+	ret = tt_dev->dev_class->stage_bundle(tt_dev, &data);
+
+	// Report the last state seen even on failure; it is the useful bit.
+	if (copy_to_user(&arg->boot_state, &data.boot_state, sizeof(data.boot_state)) != 0)
+		return -EFAULT;
+
+	return ret;
+}
+
 static int tenstorrent_set_aggregated_power_state_locked(struct tenstorrent_device *tt_dev)
 {
 	struct tenstorrent_power_state power_state = { 0 };
@@ -964,6 +995,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_NOC_WRITE:
 			ret = ioctl_noc_write(priv, (struct tenstorrent_noc_io __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_DEV_STAGE_BUNDLE:
+			ret = ioctl_dev_stage_bundle(priv, (struct tenstorrent_stage_bundle __user *)arg);
 			break;
 
 		default:

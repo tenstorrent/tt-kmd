@@ -647,8 +647,7 @@ static long ioctl_dev_stage_bundle(struct chardev_private *priv,
 {
 	struct tenstorrent_device *tt_dev = priv->device;
 	struct tenstorrent_stage_bundle data = {0};
-	u32 known_flags = TENSTORRENT_STAGE_BUNDLE_FAKE_SEP_VALIDATION |
-			  TENSTORRENT_STAGE_BUNDLE_NO_WAIT;
+	u32 known_flags = TENSTORRENT_STAGE_BUNDLE_NO_WAIT;
 	long ret;
 
 	if (!capable(CAP_SYS_ADMIN))

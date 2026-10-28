@@ -5,14 +5,17 @@
 //
 //   keraunos_boot pack <sysbuild_dir> <out_dir> [--d2d <d2d_fw.bin>]
 //       Build bun2.bin and bun3.bin from a tt-system-firmware sysbuild.
-//   keraunos_boot stage <bundle.bin> [--seq N] [--fake-sep] [--no-wait]
+//   keraunos_boot stage <bundle.bin> [--seq N] [--no-wait]
 //                 [--timeout-ms N] [device_id]
 //       Stage one bundle with TENSTORRENT_IOCTL_DEV_STAGE_BUNDLE.
 //   keraunos_boot bl0p5 <sysbuild_dir> [device_id]
 //       Reset m0, m1 and K into BL0, then launch K BL0.5. Stands in for
 //       K-SEP and SPI flash, which ttsim does not model.
 //   keraunos_boot boot <sysbuild_dir> [--d2d <d2d_fw.bin>] [device_id]
-//       bl0p5, then stage BUN2 and BUN3 (faking SEP validation).
+//       bl0p5, then stage BUN2 and BUN3.
+//
+// Bundles are validated by K-SEP, which ttsim does not model: run ttsim with
+// TTSIM_FAKE_SEP=1 so firmware's validation requests are approved.
 //
 // The bundle layouts and the bl0p5 sequence follow James Growden's
 // keraunos_reset (jgrowdenTT/tt-kmd, branch keraunos), which matches the
@@ -447,7 +450,7 @@ static void usage(const char *prog)
 	fprintf(stderr,
 		"Usage:\n"
 		"  %s pack <sysbuild_dir> <out_dir> [--d2d <d2d_fw.bin>]\n"
-		"  %s stage <bundle.bin> [--seq N] [--fake-sep] [--no-wait] [--timeout-ms N] [device_id]\n"
+		"  %s stage <bundle.bin> [--seq N] [--no-wait] [--timeout-ms N] [device_id]\n"
 		"  %s bl0p5 <sysbuild_dir> [device_id]\n"
 		"  %s boot <sysbuild_dir> [--d2d <d2d_fw.bin>] [device_id]\n",
 		prog, prog, prog, prog);
@@ -484,8 +487,6 @@ int main(int argc, char **argv)
 			seq = strtoul(argv[++i], NULL, 0);
 		else if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc)
 			timeout_ms = strtoul(argv[++i], NULL, 0);
-		else if (!strcmp(argv[i], "--fake-sep"))
-			flags |= TENSTORRENT_STAGE_BUNDLE_FAKE_SEP_VALIDATION;
 		else if (!strcmp(argv[i], "--no-wait"))
 			flags |= TENSTORRENT_STAGE_BUNDLE_NO_WAIT;
 		else if (argv[i][0] != '-')
@@ -532,12 +533,10 @@ int main(int argc, char **argv)
 		    (fd = open_device(dev_id)) < 0)
 			return 1;
 
-		flags = TENSTORRENT_STAGE_BUNDLE_FAKE_SEP_VALIDATION;
 		ret = launch_bl0p5(fd, path) ||
-		      stage(fd, bun2, bun2_size, 0, flags, timeout_ms) ||
+		      stage(fd, bun2, bun2_size, 0, 0, timeout_ms) ||
 		      // TODO: K-BL1 never writes BUNDLE_CONSUMED for BUN3.
-		      stage(fd, bun3, bun3_size, 1, flags | TENSTORRENT_STAGE_BUNDLE_NO_WAIT,
-			    timeout_ms);
+		      stage(fd, bun3, bun3_size, 1, TENSTORRENT_STAGE_BUNDLE_NO_WAIT, timeout_ms);
 		close(fd);
 		return ret ? 1 : 0;
 	}

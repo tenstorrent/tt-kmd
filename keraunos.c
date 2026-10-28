@@ -483,7 +483,6 @@ static int keraunos_stage_bundle_locked(struct keraunos_device *kd,
 	u32 timeout_ms = args->timeout_ms ?: STAGING_DEFAULT_TIMEOUT_MS;
 	unsigned long deadline = jiffies + msecs_to_jiffies(timeout_ms);
 	u32 word;
-	u32 val;
 	int ret;
 
 	// 1. Firmware opens the window.
@@ -516,36 +515,18 @@ static int keraunos_stage_bundle_locked(struct keraunos_device *kd,
 
 	dev_info(dev, "Keraunos: staged %llu byte bundle (seq %u)\n", args->size, boot_seq_of(word));
 
-	// 4. Development: no K-SEP to validate the bundle, so stand in for it.
-	if (args->flags & TENSTORRENT_STAGE_BUNDLE_FAKE_SEP_VALIDATION) {
-		ret = keraunos_poll_kla(kd, KERAUNOS_SMC_BUNDLE_VALIDATION_KLA,
-					KERAUNOS_BUNDLE_READY_FOR_VALIDATION,
-					KERAUNOS_BUNDLE_READY_FOR_VALIDATION, true, deadline, &val);
-		if (ret)
-			goto out;
-
-		val |= KERAUNOS_BUNDLE_VALIDATED;
-		ret = keraunos_kla_write(&kd->tt, KERAUNOS_SMC_BUNDLE_VALIDATION_KLA, &val, sizeof(val));
-		if (ret)
-			goto out;
-	}
-
-	// 5. Consumer takes the bundle. Wait for any move off BUNDLE_STAGED:
-	// CONSUMED can be brief, and the next WAIT_FOR_BUNDLE or SIP_READY
-	// also means the bundle was taken.
+	// 4. Consumer validates and takes the bundle; validation is between
+	// K-SMC and K-SEP. Wait for any move off BUNDLE_STAGED: CONSUMED can be
+	// brief, and the next WAIT_FOR_BUNDLE or SIP_READY also means the
+	// bundle was taken.
 	// TODO: drop NO_WAIT once firmware writes BUNDLE_CONSUMED for every
 	// bundle; K-BL1 currently jumps to MIS without doing so for BUN3.
-	if (!(args->flags & TENSTORRENT_STAGE_BUNDLE_NO_WAIT)) {
-		ret = keraunos_poll_kla(kd, KERAUNOS_SMC_BOOT_STATE_KLA, KERAUNOS_BOOT_STATE_MASK,
-					KERAUNOS_BOOT_BUNDLE_STAGED, false, deadline, &word);
-		args->boot_state = word;
-		return ret;
-	}
+	if (args->flags & TENSTORRENT_STAGE_BUNDLE_NO_WAIT)
+		return 0;
 
-out:
-	if (keraunos_kla_read(&kd->tt, KERAUNOS_SMC_BOOT_STATE_KLA, &word, sizeof(word)) == 0)
-		args->boot_state = word;
-
+	ret = keraunos_poll_kla(kd, KERAUNOS_SMC_BOOT_STATE_KLA, KERAUNOS_BOOT_STATE_MASK,
+				KERAUNOS_BOOT_BUNDLE_STAGED, false, deadline, &word);
+	args->boot_state = word;
 	return ret;
 }
 

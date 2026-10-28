@@ -46,12 +46,6 @@
 #define KERAUNOS_BOOT_ERROR_CODE_MASK	0x0000FF00u	// BOOT_ERROR_CODE, valid in BOOT_ERROR
 #define KERAUNOS_BOOT_ERROR_CODE_SHIFT	8
 
-// K-SMC scratch[10]: K-SMC/K-SEP validation bits (§6.6.3). Only K-SEP sets
-// BUNDLE_VALIDATED; the driver does it only when faking a SEP in development.
-#define KERAUNOS_SMC_BUNDLE_VALIDATION_KLA	KERAUNOS_SMC_SCRATCH_KLA(10)
-#define KERAUNOS_BUNDLE_READY_FOR_VALIDATION	0x1u
-#define KERAUNOS_BUNDLE_VALIDATED		0x2u
-
 // Fixed bundle staging window: the start of the SEP-safe SMC SRAM region,
 // SMC-local 0xC006_6400-0xC015_AFFF. Firmware narrows what it actually opens
 // to the host with its inbound filter.

@@ -567,11 +567,11 @@ struct tenstorrent_noc_io {
  *   1. Wait for K-SMC scratch[12] to show WAIT_FOR_BUNDLE.
  *   2. Copy @size bytes from @data into the fixed K-SMC SRAM staging window.
  *   3. Flush the copy, then write BUNDLE_STAGED, keeping HOST_BUNDLE_SEQ.
- *   4. With TENSTORRENT_STAGE_BUNDLE_FAKE_SEP_VALIDATION: wait for
- *      BUNDLE_READY_FOR_VALIDATION in scratch[10] and set BUNDLE_VALIDATED
- *      on K-SEP's behalf, for targets without a SEP (ttsim).
- *   5. Unless TENSTORRENT_STAGE_BUNDLE_NO_WAIT is set: wait for scratch[12]
+ *   4. Unless TENSTORRENT_STAGE_BUNDLE_NO_WAIT is set: wait for scratch[12]
  *      to leave BUNDLE_STAGED.
+ *
+ * The driver never touches K-SEP's validation bits. Targets without a SEP
+ * must approve bundles themselves (ttsim: TTSIM_FAKE_SEP=1).
  *
  * The bundle is opaque to the driver: a complete Manifest + Payload image,
  * laid out as it should appear at the start of the staging window.
@@ -597,8 +597,7 @@ struct tenstorrent_noc_io {
 struct tenstorrent_stage_bundle {
 	__u32 argsz;
 	__u32 flags;
-#define TENSTORRENT_STAGE_BUNDLE_FAKE_SEP_VALIDATION	(1 << 0)
-#define TENSTORRENT_STAGE_BUNDLE_NO_WAIT		(1 << 1)
+#define TENSTORRENT_STAGE_BUNDLE_NO_WAIT		(1 << 0)
 	__u32 seq;
 	__u32 timeout_ms;
 	__u64 data;

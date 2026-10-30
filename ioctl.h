@@ -311,7 +311,19 @@ struct tenstorrent_noc_tlb_config {
 	__u8 ordering;
 	__u8 linked;
 	__u8 static_vc;
-	__u8 reserved0[3];
+	// Per-window transaction attributes. Only Keraunos carries these today; an
+	// architecture whose windows have nowhere to put them ignores them, the
+	// same way Wormhole ignores static_vc.
+	//
+	// The inbound APP TLB passes these on as the AXI cache and user bits of
+	// every access made through the window.
+	//
+	// @noncacheable: 1 drives AxCACHE to 0 instead of 0xF, marking accesses
+	//                through the window non-cacheable.
+	// @qos_id:       AxQOS the accesses carry, 0-15.
+	__u8 noncacheable;
+	__u8 qos_id;
+	__u8 reserved0;
 	__u32 reserved1[2];
 };
 

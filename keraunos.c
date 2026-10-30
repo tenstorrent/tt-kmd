@@ -3,6 +3,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/bitfield.h>
 #include <linux/bitmap.h>
 #include <linux/pci.h>
 #include <linux/io.h>
@@ -45,7 +46,19 @@
 #define APPIN0_BANK_STRIDE	0x1000	// distance between APPIN00..APPIN03 banks
 #define TLB_CFG_ENTRY_SIZE	0x40	// 64 bytes per TLB config entry
 #define TLB_CFG_ADDR_OFFSET	0x00	// qword: target_addr | valid
-#define TLB_CFG_ATTR_OFFSET	0x20	// qword: attributes (0 = normal)
+// attr_p0..p7: a 256-bit user-bit field, eight 32-bit words. The inbound APP
+// path passes attr[4:0] on as the AXI cache and user bits of the access:
+// attr[4] drives AxCACHE to 0x0 rather than 0xF, and attr[3:0] is the AxQOS
+// id. The rest of the field is carried by the entry and ignored here.
+//
+// tt_pcie's inbound_tlbapp names these no_cacheable and qosid, and ttsim's
+// Keraunos model reads them the same way. An earlier reading of the field as
+// the NOC's 9-bit security header (cce_cmd_snoop plus sec_group_id) never
+// explained why the same bit forces AxCACHE to 0; this one does.
+#define TLB_CFG_ATTR_OFFSET	0x20
+#define TLB_CFG_ATTR_WORDS	8
+#define TLB_ATTR_NONCACHEABLE	BIT(4)
+#define TLB_ATTR_QOS_ID		GENMASK(3, 0)
 #define TLB_CFG_VALID		0x1
 
 // BAR2 offset of the config qword for AppIn0 entry, reached via SysIn0[2].
@@ -121,23 +134,29 @@ static int keraunos_check_kla_access(struct keraunos_device *kd, u64 addr, u32 w
 // Write one inbound TLB config entry in 32-bit pieces: libttsim's Keraunos
 // model rejects 64-bit accesses to TLB config. The high address word goes
 // first so the entry never turns valid with a stale upper address.
-static void keraunos_write_tlb_cfg(u8 __iomem *cfg, u64 aligned)
+static void keraunos_write_tlb_cfg(u8 __iomem *cfg, u64 aligned, u32 attr)
 {
+	unsigned int i;
+
 	writel(upper_32_bits(aligned), cfg + TLB_CFG_ADDR_OFFSET + 4);
 	writel(lower_32_bits(aligned) | TLB_CFG_VALID, cfg + TLB_CFG_ADDR_OFFSET);
-	writel(0, cfg + TLB_CFG_ATTR_OFFSET);
-	writel(0, cfg + TLB_CFG_ATTR_OFFSET + 4);
+
+	// All eight words, not just the one that carries anything: an entry handed
+	// back to the pool and reused must not inherit the last owner's attributes.
+	writel(attr, cfg + TLB_CFG_ATTR_OFFSET);
+	for (i = 1; i < TLB_CFG_ATTR_WORDS; i++)
+		writel(0, cfg + TLB_CFG_ATTR_OFFSET + i * sizeof(u32));
 
 	(void)readl(cfg + TLB_CFG_ADDR_OFFSET);
 }
 
 // Point an AppIn0 entry at addr's 16MB window. The caller owns the entry and
 // must serialize programming against data-side accesses through that aperture.
-static void keraunos_program_appin0(struct keraunos_device *kd, u32 entry, u64 addr)
+static void keraunos_program_appin0(struct keraunos_device *kd, u32 entry, u64 addr, u32 attr)
 {
 	u64 aligned = addr & ~(u64)APPIN0_WINDOW_MASK;
 
-	keraunos_write_tlb_cfg(kd->bar2 + keraunos_appin0_cfg_offset(entry), aligned);
+	keraunos_write_tlb_cfg(kd->bar2 + keraunos_appin0_cfg_offset(entry), aligned, attr);
 }
 
 // Point a SysIn0 entry at addr's 16KB KLA window. The caller owns the entry
@@ -146,14 +165,14 @@ static void keraunos_program_sysin0(struct keraunos_device *kd, u32 entry, u64 a
 {
 	u64 aligned = addr & ~(u64)SYSIN0_WINDOW_MASK;
 
-	keraunos_write_tlb_cfg(kd->bar2 + keraunos_sysin0_cfg_offset(entry), aligned);
+	keraunos_write_tlb_cfg(kd->bar2 + keraunos_sysin0_cfg_offset(entry), aligned, 0);
 }
 
 // Point the reserved kernel entry at addr and return its BAR0 iomem address.
 // Caller must hold kernel_tlb_lock.
 static u8 __iomem *keraunos_program_window(struct keraunos_device *kd, u64 addr)
 {
-	keraunos_program_appin0(kd, KERNEL_APPIN0_ENTRY, addr);
+	keraunos_program_appin0(kd, KERNEL_APPIN0_ENTRY, addr, 0);
 	return kd->bar0_kernel_tlb + (addr & APPIN0_WINDOW_MASK);
 }
 
@@ -309,17 +328,20 @@ static int keraunos_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
 				  struct tenstorrent_noc_tlb_config *config)
 {
 	struct keraunos_device *kd = tt_dev_to_keraunos_dev(tt_dev);
+	u32 attr;
 
 	if (tlb < 0 || (u32)tlb >= tt_dev->tlb_counts[0])
 		return -EINVAL;
 
-	if (config->x_end || config->y_end || config->x_start || config->y_start ||
-	    config->mcast || config->noc)
-		return -EINVAL;
+	// A Keraunos entry is a target address plus an attribute field that reaches
+	// only the AXI cache and user bits: it has no coordinate, no multicast group, no
+	// NOC selector, no ordering and no virtual channel. Those fields are ignored
+	// here, the same way Wormhole ignores static_vc and Blackhole ignores what its
+	// register has no room for -- userspace is what knows which of them a given
+	// architecture can honour.
 
-	// TLB_CFG_ATTR is written as zero, so honouring these would promise
-	// ordering and virtual-channel behaviour we do not actually program.
-	if (config->ordering || config->linked || config->static_vc)
+	if (config->noncacheable > 1 || config->qos_id > TLB_ATTR_QOS_ID ||
+	    config->reserved0)
 		return -EINVAL;
 
 	// Not possible to program a 16MB window that doesn't start on a 16MB
@@ -336,10 +358,13 @@ static int keraunos_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
 	if (!kd->bar2)
 		return -ENODEV;
 
+	attr = (config->noncacheable ? TLB_ATTR_NONCACHEABLE : 0) |
+	       FIELD_PREP(TLB_ATTR_QOS_ID, config->qos_id);
+
 	// The owning fd holds this entry exclusively (tt_dev->tlbs) and is the
 	// only thing accessing its BAR0 window, so unlike the kernel's shared
 	// entry there is nothing here to serialize against.
-	keraunos_program_appin0(kd, tlb, config->addr);
+	keraunos_program_appin0(kd, tlb, config->addr, attr);
 
 	return 0;
 }

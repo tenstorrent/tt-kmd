@@ -511,6 +511,43 @@ void VerifyBadConfiRejectedBlackhole(const EnumeratedDevice &dev)
             THROW_TEST_FAILURE("Configured TLB with misaligned address");
     }
 
+    // The static VC class has two bits.
+    for (uint32_t tlb_id : tlb_ids) {
+        tenstorrent_configure_tlb configure_tlb{};
+        tenstorrent_noc_tlb_config config{
+            .addr = 0,
+            .x_end = 0,
+            .y_end = 0,
+            .static_vc = 1,
+            .static_vc_class = 4,   // Too large.
+        };
+
+        configure_tlb.in.id = tlb_id;
+        configure_tlb.in.config = config;
+        if (ioctl(fd, TENSTORRENT_IOCTL_CONFIGURE_TLB, &configure_tlb) == 0)
+            THROW_TEST_FAILURE("Configured TLB with static VC class 4");
+    }
+
+    // A multicast on a static VC uses class 2.
+    for (uint32_t tlb_id : tlb_ids) {
+        tenstorrent_configure_tlb configure_tlb{};
+        tenstorrent_noc_tlb_config config{
+            .addr = 0,
+            .x_end = 2,
+            .y_end = 3,
+            .x_start = 1,
+            .y_start = 2,
+            .mcast = 1,
+            .static_vc = 1,
+            .static_vc_class = 2,
+        };
+
+        configure_tlb.in.id = tlb_id;
+        configure_tlb.in.config = config;
+        if (ioctl(fd, TENSTORRENT_IOCTL_CONFIGURE_TLB, &configure_tlb) != 0)
+            THROW_TEST_FAILURE("Failed to configure a multicast TLB with static VC class 2");
+    }
+
     for (uint32_t id : tlb_ids) {
         tenstorrent_free_tlb free_tlb{};
         free_tlb.in.id = id;

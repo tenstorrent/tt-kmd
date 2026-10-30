@@ -182,6 +182,10 @@ static int blackhole_configure_tlb_2M(struct blackhole_device *bh, int tlb,
 	if (config->addr & TLB_2M_WINDOW_MASK)
 		return -EINVAL;
 
+	// The class takes the top two of the register's three static VC bits.
+	if (config->static_vc_class > 3)
+		return -EINVAL;
+
 	reg.address = config->addr >> TLB_2M_SHIFT;
 	reg.x_end = config->x_end;
 	reg.y_end = config->y_end;
@@ -192,6 +196,7 @@ static int blackhole_configure_tlb_2M(struct blackhole_device *bh, int tlb,
 	reg.ordering = config->ordering;
 	reg.linked = config->linked;
 	reg.use_static_vc = config->static_vc;
+	reg.static_vc = config->static_vc_class << 1;	// bit 0 is the buddy bit
 
 	iowrite32(reg.low32, regs + 0);
 	iowrite32(reg.mid32, regs + 4);
@@ -217,6 +222,10 @@ static int blackhole_configure_tlb_4G(struct blackhole_device *bh, int tlb,
 	if (config->addr & TLB_4G_WINDOW_MASK)
 		return -EINVAL;
 
+	// The class takes the top two of the register's three static VC bits.
+	if (config->static_vc_class > 3)
+		return -EINVAL;
+
 	reg.address = config->addr >> TLB_4G_SHIFT;
 	reg.x_end = config->x_end;
 	reg.y_end = config->y_end;
@@ -227,6 +236,7 @@ static int blackhole_configure_tlb_4G(struct blackhole_device *bh, int tlb,
 	reg.ordering = config->ordering;
 	reg.linked = config->linked;
 	reg.use_static_vc = config->static_vc;
+	reg.static_vc = config->static_vc_class << 1;	// bit 0 is the buddy bit
 
 	iowrite32(reg.low32, regs + 0);
 	iowrite32(reg.mid32, regs + 4);

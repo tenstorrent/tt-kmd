@@ -47,19 +47,18 @@
 #define TLB_CFG_ENTRY_SIZE	0x40	// 64 bytes per TLB config entry
 #define TLB_CFG_ADDR_OFFSET	0x00	// qword: target_addr | valid
 // attr_p0..p7: a 256-bit user-bit field, eight 32-bit words. The inbound APP
-// path emits attr[4:0] as {3'b0, attr[4:0], 4'b0}, which lands on the NOC's
-// 9-bit security header: bit 8 is cce_cmd_snoop, bits 7:4 are sec_group_id and
-// bits 3:0 are sec_source_id, which a PCIe window cannot set. So attr[4] is the
-// snoop bit and attr[3:0] the security group; the rest of the field is carried
-// by the entry and ignored here.
+// path passes attr[4:0] on as the AXI cache and user bits of the access:
+// attr[4] drives AxCACHE to 0x0 rather than 0xF, and attr[3:0] is the AxQOS
+// id. The rest of the field is carried by the entry and ignored here.
 //
-// The same bit also forces AxCACHE to 0x0 rather than 0xF on the PCIe leg,
-// which reads backwards for a bit that means "snoop" -- see the open question
-// in tt_pcie's tt_pcie_inbound_tlbapp.sv.
+// tt_pcie's inbound_tlbapp names these no_cacheable and qosid, and ttsim's
+// Keraunos model reads them the same way. An earlier reading of the field as
+// the NOC's 9-bit security header (cce_cmd_snoop plus sec_group_id) never
+// explained why the same bit forces AxCACHE to 0; this one does.
 #define TLB_CFG_ATTR_OFFSET	0x20
 #define TLB_CFG_ATTR_WORDS	8
-#define TLB_ATTR_SNOOP		BIT(4)
-#define TLB_ATTR_SEC_GROUP_ID	GENMASK(3, 0)
+#define TLB_ATTR_NONCACHEABLE	BIT(4)
+#define TLB_ATTR_QOS_ID		GENMASK(3, 0)
 #define TLB_CFG_VALID		0x1
 
 // BAR2 offset of the config qword for AppIn0 entry, reached via SysIn0[2].
@@ -334,16 +333,14 @@ static int keraunos_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
 	if (tlb < 0 || (u32)tlb >= tt_dev->tlb_counts[0])
 		return -EINVAL;
 
-	if (config->x_end || config->y_end || config->x_start || config->y_start ||
-	    config->mcast || config->noc)
-		return -EINVAL;
+	// A Keraunos entry is a target address plus an attribute field that reaches
+	// only the AXI cache and user bits: it has no coordinate, no multicast group, no
+	// NOC selector, no ordering and no virtual channel. Those fields are ignored
+	// here, the same way Wormhole ignores static_vc and Blackhole ignores what its
+	// register has no room for -- userspace is what knows which of them a given
+	// architecture can honour.
 
-	// Nothing programs ordering or a virtual channel, so honouring these would
-	// promise behaviour that was never configured.
-	if (config->ordering || config->linked || config->static_vc)
-		return -EINVAL;
-
-	if (config->snoop > 1 || config->sec_group_id > TLB_ATTR_SEC_GROUP_ID ||
+	if (config->noncacheable > 1 || config->qos_id > TLB_ATTR_QOS_ID ||
 	    config->reserved0)
 		return -EINVAL;
 
@@ -361,8 +358,8 @@ static int keraunos_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
 	if (!kd->bar2)
 		return -ENODEV;
 
-	attr = (config->snoop ? TLB_ATTR_SNOOP : 0) |
-	       FIELD_PREP(TLB_ATTR_SEC_GROUP_ID, config->sec_group_id);
+	attr = (config->noncacheable ? TLB_ATTR_NONCACHEABLE : 0) |
+	       FIELD_PREP(TLB_ATTR_QOS_ID, config->qos_id);
 
 	// The owning fd holds this entry exclusively (tt_dev->tlbs) and is the
 	// only thing accessing its BAR0 window, so unlike the kernel's shared

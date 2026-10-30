@@ -311,19 +311,18 @@ struct tenstorrent_noc_tlb_config {
 	__u8 ordering;
 	__u8 linked;
 	__u8 static_vc;
-	// Per-window transaction attributes. Only Keraunos carries these today; on
-	// an architecture whose windows have nowhere to put them, a nonzero value
-	// is refused rather than ignored.
+	// Per-window transaction attributes. Only Keraunos carries these today; an
+	// architecture whose windows have nowhere to put them ignores them, the
+	// same way Wormhole ignores static_vc.
 	//
-	// These are the NOC's security header, which is the one part of the AXI
-	// user bits the NOC takes from the requester rather than from its own
-	// configuration.
+	// The inbound APP TLB passes these on as the AXI cache and user bits of
+	// every access made through the window.
 	//
-	// @snoop:        1 marks accesses through the window snoopable for cache
-	//                coherency (the NOC's cce_cmd_snoop).
-	// @sec_group_id: security group the accesses are attributed to, 0-15.
-	__u8 snoop;
-	__u8 sec_group_id;
+	// @noncacheable: 1 drives AxCACHE to 0 instead of 0xF, marking accesses
+	//                through the window non-cacheable.
+	// @qos_id:       AxQOS the accesses carry, 0-15.
+	__u8 noncacheable;
+	__u8 qos_id;
 	__u8 reserved0;
 	__u32 reserved1[2];
 };

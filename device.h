@@ -128,6 +128,9 @@ struct tenstorrent_device_class {
 	// Optional MSI handler invoked from the driver's IRQ handler. May be NULL for devices
 	// with no interrupt handling.
 	void (*interrupt)(struct tenstorrent_device *ttdev);
+	// Optional. Called after init_device and before MSI vectors are allocated.
+	// Returns the most vectors the device can raise; NULL means one.
+	unsigned int (*prepare_msi_vectors)(struct tenstorrent_device *ttdev);
 	// Reset-safe scalar NOC transfers. width is one of 1, 2, 4, 8.
 	// Return 0 on success or a negative errno.
 	int (*noc_read)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, void *value, u32 width, int noc);

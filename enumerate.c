@@ -363,13 +363,14 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	pci_set_drvdata(dev, tt_dev);
 	dev_set_drvdata(&tt_dev->dev, tt_dev);
 
-	tt_dev->interrupt_enabled = tenstorrent_enable_interrupts(tt_dev);
-
 	if (!device_class->init_device(tt_dev)) {
 		dev_err(&dev->dev, "Device initialization failed\n");
 		err = -EIO;
 		goto fail_init_device;
 	}
+
+	// After init_device: preparing MSI vectors may need NOC access.
+	tt_dev->interrupt_enabled = tenstorrent_enable_interrupts(tt_dev);
 
 	tt_dev->needs_hw_init = !device_class->init_hardware(tt_dev);
 
@@ -395,7 +396,6 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	return 0;
 
 fail_init_device:
-	tenstorrent_disable_interrupts(tt_dev);
 	pci_disable_pcie_error_reporting(dev);
 	pci_set_drvdata(dev, NULL);
 	pci_dev_put(dev);

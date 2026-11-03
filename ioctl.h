@@ -558,13 +558,13 @@ struct tenstorrent_noc_io {
  * device with MSI enabled, and Blackhole; otherwise the CQE result is
  * -EOPNOTSUPP.
  *
- * The descriptors run in order, one at a time. The CQE result is 0 once the
- * engine has issued every write, or a negative errno for the first descriptor
- * that failed; the ones after it do not run. -EINVAL means a descriptor broke
- * a rule below, -EBUSY that no address window was free, -EIO that the engine
- * aborted, -ETIMEDOUT that a descriptor did not finish in time, and -ENODEV
- * that the device was reset or removed. Commands from all fds of a device run
- * in submission order.
+ * Commands from all fds of a device run in submission order, and the engine
+ * chains descriptors of queued commands without stopping in between. The CQE
+ * result is 0 once the engine has issued every write of the command, or a
+ * negative errno, in which case any part of it may have run. -EINVAL means a
+ * descriptor broke a rule below and nothing ran, -EBUSY that no address window
+ * was free, -EIO that the engine aborted, -ETIMEDOUT that the engine did not
+ * finish in time, and -ENODEV that the device was reset or removed.
  *
  * While any command of an fd is in flight, UNPIN_PAGES on it fails with
  * -EBUSY, so the engine never reads memory that was released.

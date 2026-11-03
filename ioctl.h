@@ -32,6 +32,9 @@
 #define TENSTORRENT_IOCTL_NOC_READ		_IO(TENSTORRENT_IOCTL_MAGIC, 18)
 #define TENSTORRENT_IOCTL_NOC_WRITE		_IO(TENSTORRENT_IOCTL_MAGIC, 19)
 
+// io_uring command opcodes (io_uring_sqe.cmd_op), a separate space from ioctls.
+#define TENSTORRENT_URING_CMD_DMA_WRITE		_IO(TENSTORRENT_IOCTL_MAGIC, 0x80)
+
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
 #define TENSTORRENT_MAPPING_RESOURCE0_UC	1
@@ -544,6 +547,63 @@ struct tenstorrent_noc_io {
 	__u8 reserved0[2];
 	__u64 addr;
 	__u64 value;
+};
+
+/**
+ * TENSTORRENT_URING_CMD_DMA_WRITE - Copy host memory to NOC endpoints with the DMA engine
+ *
+ * An io_uring command, not an ioctl: submit an IORING_OP_URING_CMD SQE on a
+ * device fd (plain or registered) with cmd_op set to this value and struct
+ * tenstorrent_dma_write in the SQE's command area. Needs Linux 6.6 or newer, a
+ * device with MSI enabled, and Blackhole; otherwise the CQE result is
+ * -EOPNOTSUPP.
+ *
+ * The descriptors run in order, one at a time. The CQE result is 0 once the
+ * engine has issued every write, or a negative errno for the first descriptor
+ * that failed; the ones after it do not run. -EINVAL means a descriptor broke
+ * a rule below, -EBUSY that no address window was free, -EIO that the engine
+ * aborted, -ETIMEDOUT that a descriptor did not finish in time, and -ENODEV
+ * that the device was reset or removed. Commands from all fds of a device run
+ * in submission order.
+ *
+ * While any command of an fd is in flight, UNPIN_PAGES on it fails with
+ * -EBUSY, so the engine never reads memory that was released.
+ *
+ * @descs: User pointer to @count struct tenstorrent_dma_desc.
+ * @count: Number of descriptors, 1 to TENSTORRENT_DMA_WRITE_MAX_DESCS.
+ * @flags: Reserved for future use, must be 0.
+ */
+#define TENSTORRENT_DMA_WRITE_MAX_DESCS 1024
+
+struct tenstorrent_dma_write {
+	__u64 descs;
+	__u32 count;
+	__u32 flags;
+};
+
+/**
+ * struct tenstorrent_dma_desc - One copy of a DMA_WRITE command
+ *
+ * @src: Host IOVA to read, as returned by PIN_PAGES or ALLOCATE_DMA_BUF on the
+ *       same fd; [@src, @src + @size) must lie within one such buffer.
+ * @addr: NOC address to write; [@addr, @addr + @size) must not cross a 4 GiB
+ *        boundary.
+ * @size: Bytes to copy, non-zero.
+ * @x: X coordinate of the NOC endpoint; must be in the range 0-63.
+ * @y: Y coordinate of the NOC endpoint; must be in the range 0-63.
+ * @noc: NOC ID to use; must be 0 or 1.
+ * @reserved0: Must be 0.
+ *
+ * @src, @addr and @size must be multiples of 4.
+ */
+struct tenstorrent_dma_desc {
+	__u64 src;
+	__u64 addr;
+	__u32 size;
+	__u16 x;
+	__u16 y;
+	__u8 noc;
+	__u8 reserved0[7];
 };
 
 #endif

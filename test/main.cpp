@@ -28,6 +28,7 @@ void TestProcfsPids(const EnumeratedDevice &dev);
 void TestExcl(const EnumeratedDevice &dev);
 void TestSmcMsg(const EnumeratedDevice &dev);
 void TestNocIo(const EnumeratedDevice &dev);
+void TestDmaWrite(const EnumeratedDevice &dev);
 
 int main(int argc, char *argv[])
 {
@@ -57,6 +58,11 @@ int main(int argc, char *argv[])
         TestTlbs(d);
         TestTlbExport(d);
         TestNocIo(d);
+#ifdef HAVE_LIBURING
+        TestDmaWrite(d);
+#else
+        std::cout << "Built without liburing 2.2+, skipping DMA_WRITE tests.\n";
+#endif
         TestMappingsDebugfs(d);
         TestProcfsPids(d);
         TestExcl(d);

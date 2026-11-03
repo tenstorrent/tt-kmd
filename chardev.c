@@ -25,6 +25,7 @@
 #include "memory.h"
 #include "module.h"
 #include "tlb.h"
+#include "uring_cmd.h"
 
 #define TT_POWER_FLAG_ALL 0x7FFF
 
@@ -36,6 +37,9 @@ static long tt_cdev_ioctl(struct file *, unsigned int, unsigned long);
 static int tt_cdev_mmap(struct file *, struct vm_area_struct *);
 static int tt_cdev_open(struct inode *, struct file *);
 static int tt_cdev_release(struct inode *, struct file *);
+#if TT_URING_CMD_SUPPORTED
+static int tt_cdev_uring_cmd(struct io_uring_cmd *, unsigned int);
+#endif
 
 static struct file_operations chardev_fops = {
 	.owner = THIS_MODULE,
@@ -43,6 +47,9 @@ static struct file_operations chardev_fops = {
 	.mmap = tt_cdev_mmap,
 	.open = tt_cdev_open,
 	.release = tt_cdev_release,
+#if TT_URING_CMD_SUPPORTED
+	.uring_cmd = tt_cdev_uring_cmd,
+#endif
 };
 
 int init_char_driver(unsigned int max_devices)
@@ -286,6 +293,10 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	case TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET:
 		if (tenstorrent_has_tlb_dmabuf_exports(tt_dev))
 			return -EBUSY;
+
+		// Queued commands would otherwise run on a device being reset.
+		if (tt_dev->dev_class->quiesce_uring_cmds)
+			tt_dev->dev_class->quiesce_uring_cmds(tt_dev);
 		break;
 	default:
 		break;
@@ -1021,6 +1032,32 @@ out:
 
 	return ret;
 }
+
+#if TT_URING_CMD_SUPPORTED
+static int tt_cdev_uring_cmd(struct io_uring_cmd *cmd, unsigned int issue_flags)
+{
+	struct chardev_private *priv = cmd->file->private_data;
+	struct tenstorrent_device *tt_dev = priv->device;
+	int ret;
+
+	// io_uring retries a nonblocking issue that returns -EAGAIN from a worker
+	// thread that may block.
+	if (issue_flags & IO_URING_F_NONBLOCK) {
+		if (!down_read_trylock(&tt_dev->reset_rwsem))
+			return -EAGAIN;
+	} else {
+		down_read(&tt_dev->reset_rwsem);
+	}
+
+	ret = tt_cdev_ioctl_check(priv, cmd->cmd_op);
+	if (!ret)
+		ret = tt_dev->dev_class->uring_cmd ?
+			tt_dev->dev_class->uring_cmd(priv, cmd, issue_flags) : -EOPNOTSUPP;
+
+	up_read(&tt_dev->reset_rwsem);
+	return ret;
+}
+#endif
 
 static int tt_cdev_mmap(struct file *file, struct vm_area_struct *vma)
 {

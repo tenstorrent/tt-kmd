@@ -13,11 +13,14 @@
 #include <linux/log2.h>
 
 #include "blackhole.h"
+#include "chardev_private.h"
+#include "memory.h"
 #include "pcie.h"
 #include "module.h"
 #include "msgqueue.h"
 #include "tlb.h"
 #include "telemetry.h"
+#include "uring_cmd.h"
 
 #define MAX_MRRS 4096
 
@@ -57,6 +60,7 @@
 // Vector 0 stays with firmware (ARC); the rest let other sources such as the
 // DMA engine raise their own interrupts.
 #define MSI_VECTOR_COUNT 2
+#define DMA_MSI_VECTOR 1
 // Multiple Message Capable, within the MSI capability's first dword.
 #define DBI_MSI_MULTIPLE_MESSAGE_CAPABLE ((u32)PCI_MSI_FLAGS_QMASK << 16)
 
@@ -665,9 +669,416 @@ bool fw_log_hw_release(void *hw_ctx)
 	return arc_msg_send_sync(&bh->tt, &msg) == 0;
 }
 
-static void blackhole_interrupt(struct tenstorrent_device *tt_dev)
+#if TT_URING_CMD_SUPPORTED
+
+// HDMA read channel 0, which copies host memory to the device. Offsets in BAR2.
+#define HDMA_RD_EN		0x100
+#define HDMA_RD_DOORBELL	0x104
+#define HDMA_RD_ELEM_PF		0x108
+#define HDMA_RD_XFERSIZE	0x11C
+#define HDMA_RD_SAR		0x120
+#define HDMA_RD_DAR		0x128
+#define HDMA_RD_CONTROL1	0x134
+#define HDMA_RD_INT_STATUS	0x184
+#define HDMA_RD_INT_SETUP	0x188
+#define HDMA_RD_INT_CLEAR	0x18C
+#define HDMA_RD_MSI_STOP	0x190
+// The databook and Linux disagree on which of these two is the abort message
+// and which the watermark one, so both are pointed at the MSI.
+#define HDMA_RD_MSI_198		0x198
+#define HDMA_RD_MSI_1A0		0x1A0
+#define HDMA_RD_MSI_MSGD	0x1A8
+
+#define HDMA_INT_STOP		BIT(0)
+#define HDMA_INT_ABORT		BIT(2)
+// INT_SETUP: local enables latch INT_STATUS, remote enables send the MSI, and
+// the STOP/ABORT bits mask the engine's local interrupt pins.
+#define HDMA_INT_REMOTE_STOP_EN	BIT(3)
+#define HDMA_INT_LOCAL_STOP_EN	BIT(4)
+#define HDMA_INT_REMOTE_ABORT_EN BIT(5)
+#define HDMA_INT_LOCAL_ABORT_EN	BIT(6)
+
+// The engine reaches 2M TLB window N at AXI address N * 2M.
+#define DMA_TIMEOUT_MS		2000
+
+// One URING_CMD_DMA_WRITE command, from submission until its CQE is posted.
+struct blackhole_dma_command {
+	struct list_head node;	// In blackhole_dma.queue
+	struct io_uring_cmd *cmd;
+	struct chardev_private *priv;
+	int result;
+	u32 count;
+	u32 next;		// Descriptor the engine runs, or runs next
+	u32 offset;		// Bytes of descs[next] already copied
+	struct tenstorrent_dma_desc descs[];
+};
+
+static struct blackhole_dma_command **dma_command_slot(struct io_uring_cmd *cmd)
 {
-	fw_log_interrupt(&tt_dev->fw_log);
+	BUILD_BUG_ON(sizeof(struct blackhole_dma_command *) > sizeof(cmd->pdu));
+	return (struct blackhole_dma_command **)cmd->pdu;
+}
+
+static void dma_write_reg(struct blackhole_device *bh, u32 offset, u32 value)
+{
+	iowrite32(value, bh->bar2_mapping + offset);
+}
+
+static void dma_write_reg64(struct blackhole_device *bh, u32 offset, u64 value)
+{
+	dma_write_reg(bh, offset, lower_32_bits(value));
+	dma_write_reg(bh, offset + 4, upper_32_bits(value));
+}
+
+static bool lock_mutex(struct mutex *mutex, bool nonblock)
+{
+	if (nonblock)
+		return mutex_trylock(mutex);
+
+	mutex_lock(mutex);
+	return true;
+}
+
+// Sends the channel's stop and abort messages to the host as MSIs, on the DMA
+// vector when the host granted one. Caller holds dma.lock.
+static void blackhole_dma_setup_channel(struct blackhole_device *bh)
+{
+	struct pci_dev *pdev = bh->tt.pdev;
+	u32 addr_lo, addr_hi = 0;
+	u16 flags, data;
+	u64 msi_addr;
+
+	pci_read_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, &flags);
+	pci_read_config_dword(pdev, pdev->msi_cap + PCI_MSI_ADDRESS_LO, &addr_lo);
+	if (flags & PCI_MSI_FLAGS_64BIT) {
+		pci_read_config_dword(pdev, pdev->msi_cap + PCI_MSI_ADDRESS_HI, &addr_hi);
+		pci_read_config_word(pdev, pdev->msi_cap + PCI_MSI_DATA_64, &data);
+	} else {
+		pci_read_config_word(pdev, pdev->msi_cap + PCI_MSI_DATA_32, &data);
+	}
+	msi_addr = ((u64)addr_hi << 32) | addr_lo;
+
+	// Multi-message MSI raises vector N for message data base + N.
+	if (bh->tt.interrupt_vectors > DMA_MSI_VECTOR)
+		data += DMA_MSI_VECTOR;
+
+	// Single-transfer mode: no linked list, no element prefetch.
+	dma_write_reg(bh, HDMA_RD_CONTROL1, 0);
+	dma_write_reg(bh, HDMA_RD_ELEM_PF, 0);
+
+	dma_write_reg64(bh, HDMA_RD_MSI_STOP, msi_addr);
+	dma_write_reg64(bh, HDMA_RD_MSI_198, msi_addr);
+	dma_write_reg64(bh, HDMA_RD_MSI_1A0, msi_addr);
+	dma_write_reg(bh, HDMA_RD_MSI_MSGD, data);
+	dma_write_reg(bh, HDMA_RD_INT_CLEAR, HDMA_INT_STOP | HDMA_INT_ABORT);
+	dma_write_reg(bh, HDMA_RD_INT_SETUP,
+		      HDMA_INT_LOCAL_STOP_EN | HDMA_INT_LOCAL_ABORT_EN |
+		      HDMA_INT_REMOTE_STOP_EN | HDMA_INT_REMOTE_ABORT_EN |
+		      HDMA_INT_STOP | HDMA_INT_ABORT);
+}
+
+// Bytes of desc from offset to the end of the 2M window that offset falls in:
+// one transfer through one window.
+static u32 dma_transfer_size(const struct tenstorrent_dma_desc *desc, u32 offset)
+{
+	u64 addr = desc->addr + offset;
+
+	return min_t(u64, desc->size - offset, TLB_2M_WINDOW_SIZE - (addr & TLB_2M_WINDOW_MASK));
+}
+
+// Starts the next transfer of the head command. Caller holds dma.lock.
+static void blackhole_dma_start(struct blackhole_device *bh)
+{
+	struct blackhole_dma_command *command =
+		list_first_entry(&bh->dma.queue, struct blackhole_dma_command, node);
+	const struct tenstorrent_dma_desc *desc = &command->descs[command->next];
+	struct tenstorrent_noc_tlb_config config = { 0 };
+	u64 addr = desc->addr + command->offset;
+
+	config.addr = addr & ~TLB_2M_WINDOW_MASK;
+	config.x_end = desc->x;
+	config.y_end = desc->y;
+	config.noc = desc->noc;
+	blackhole_configure_tlb_2M(bh, bh->dma.window, &config);
+
+	// The engine, not this CPU, writes through the window, so its MMIO
+	// ordering does not cover the configuration; a read back does.
+	ioread32(bh->tlb_regs + bh->dma.window * TLB_REG_SIZE);
+
+	dma_write_reg(bh, HDMA_RD_EN, 1);
+	dma_write_reg64(bh, HDMA_RD_SAR, desc->src + command->offset);
+	dma_write_reg64(bh, HDMA_RD_DAR, (u64)bh->dma.window * TLB_2M_WINDOW_SIZE + (addr & TLB_2M_WINDOW_MASK));
+	dma_write_reg(bh, HDMA_RD_XFERSIZE, dma_transfer_size(desc, command->offset));
+	dma_write_reg(bh, HDMA_RD_DOORBELL, 1);
+
+	bh->dma.started = jiffies;
+	mod_delayed_work(system_wq, &bh->dma.timeout, msecs_to_jiffies(DMA_TIMEOUT_MS));
+}
+
+static void blackhole_dma_finish(struct io_uring_cmd *cmd, unsigned int issue_flags)
+{
+	struct blackhole_dma_command *command = *dma_command_slot(cmd);
+	int result = command->result;
+
+	kfree(command);
+	tt_uring_cmd_done(cmd, result, issue_flags);
+}
+
+TT_URING_CMD_TASK_WORK(blackhole_dma_finish_tw, blackhole_dma_finish)
+
+// Caller holds dma.lock.
+static void blackhole_dma_complete(struct blackhole_dma_command *command, int result)
+{
+	list_del(&command->node);
+	atomic_dec(&command->priv->dma_writes_inflight);
+	command->result = result;
+
+	// Posting the CQE has to happen in the submitter's task, not in IRQ.
+	io_uring_cmd_complete_in_task(command->cmd, blackhole_dma_finish_tw);
+}
+
+// The engine finished or gave up on the head command's running transfer.
+// Caller holds dma.lock.
+static void blackhole_dma_transfer_done(struct blackhole_device *bh, int result)
+{
+	struct blackhole_dma_command *command =
+		list_first_entry(&bh->dma.queue, struct blackhole_dma_command, node);
+	const struct tenstorrent_dma_desc *desc = &command->descs[command->next];
+
+	// Disabling the channel clears an abort before the next start.
+	if (result)
+		dma_write_reg(bh, HDMA_RD_EN, 0);
+
+	command->offset += dma_transfer_size(desc, command->offset);
+	if (command->offset == desc->size) {
+		command->next++;
+		command->offset = 0;
+	}
+
+	if (result || command->next == command->count)
+		blackhole_dma_complete(command, result);
+
+	if (!list_empty(&bh->dma.queue))
+		blackhole_dma_start(bh);
+	else
+		schedule_work(&bh->dma.release_window);
+}
+
+static void blackhole_dma_interrupt(struct blackhole_device *bh)
+{
+	unsigned long flags;
+	u32 status;
+
+	spin_lock_irqsave(&bh->dma.lock, flags);
+
+	status = ioread32(bh->bar2_mapping + HDMA_RD_INT_STATUS) & (HDMA_INT_STOP | HDMA_INT_ABORT);
+	if (status) {
+		dma_write_reg(bh, HDMA_RD_INT_CLEAR, status);
+
+		// Nothing of ours ran if firmware drove the channel.
+		if (!list_empty(&bh->dma.queue))
+			blackhole_dma_transfer_done(bh, status & HDMA_INT_ABORT ? -EIO : 0);
+	}
+
+	spin_unlock_irqrestore(&bh->dma.lock, flags);
+}
+
+static void blackhole_dma_timeout(struct work_struct *work)
+{
+	struct blackhole_device *bh = container_of(to_delayed_work(work), struct blackhole_device, dma.timeout);
+	unsigned long deadline;
+	unsigned long flags;
+
+	spin_lock_irqsave(&bh->dma.lock, flags);
+
+	if (!list_empty(&bh->dma.queue)) {
+		deadline = bh->dma.started + msecs_to_jiffies(DMA_TIMEOUT_MS);
+
+		// The next transfer may have started just before this ran.
+		if (time_before(jiffies, deadline)) {
+			mod_delayed_work(system_wq, &bh->dma.timeout, deadline - jiffies);
+		} else {
+			dev_warn(&bh->tt.pdev->dev, "DMA write timed out\n");
+			blackhole_dma_transfer_done(bh, -ETIMEDOUT);
+		}
+	}
+
+	spin_unlock_irqrestore(&bh->dma.lock, flags);
+}
+
+static void blackhole_dma_release_window(struct work_struct *work)
+{
+	struct blackhole_device *bh = container_of(work, struct blackhole_device, dma.release_window);
+	unsigned long flags;
+	int window = -1;
+
+	mutex_lock(&bh->dma.window_mutex);
+
+	spin_lock_irqsave(&bh->dma.lock, flags);
+	if (list_empty(&bh->dma.queue)) {
+		window = bh->dma.window;
+		bh->dma.window = -1;
+	}
+	spin_unlock_irqrestore(&bh->dma.lock, flags);
+
+	if (window >= 0)
+		tenstorrent_device_free_tlb(&bh->tt, window);
+
+	mutex_unlock(&bh->dma.window_mutex);
+}
+
+static void blackhole_dma_init(struct blackhole_device *bh)
+{
+	spin_lock_init(&bh->dma.lock);
+	INIT_LIST_HEAD(&bh->dma.queue);
+	bh->dma.window = -1;
+	mutex_init(&bh->dma.window_mutex);
+	INIT_WORK(&bh->dma.release_window, blackhole_dma_release_window);
+	INIT_DELAYED_WORK(&bh->dma.timeout, blackhole_dma_timeout);
+}
+
+static int blackhole_dma_check_descs(struct chardev_private *priv,
+				     const struct tenstorrent_dma_desc *descs, u32 count)
+{
+	u64 buf_start = 0, buf_len = 0;
+	u32 i;
+
+	lockdep_assert_held(&priv->mutex);
+
+	for (i = 0; i < count; i++) {
+		const struct tenstorrent_dma_desc *desc = &descs[i];
+
+		// NOC coordinates are 6 bits wide in the TLB registers.
+		if (desc->size == 0 || ((desc->src | desc->addr | desc->size) & 3) ||
+		    desc->x > 63 || desc->y > 63 || desc->noc > 1 ||
+		    memchr_inv(desc->reserved0, 0, sizeof(desc->reserved0)))
+			return -EINVAL;
+
+		if (desc->addr + desc->size < desc->addr)
+			return -EINVAL;
+
+		// Descriptors of a command mostly read one buffer, so search the
+		// fd's buffers only when leaving the last one found.
+		if (!tenstorrent_range_within(desc->src, desc->size, buf_start, buf_len) &&
+		    !tenstorrent_find_dma_range(priv, desc->src, desc->size, &buf_start, &buf_len))
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int blackhole_uring_cmd(struct chardev_private *priv, struct io_uring_cmd *cmd,
+			       unsigned int issue_flags)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(priv->device);
+	const struct tenstorrent_dma_write *write = tt_uring_cmd_payload(cmd, struct tenstorrent_dma_write);
+	bool nonblock = issue_flags & IO_URING_F_NONBLOCK;
+	u64 descs = READ_ONCE(write->descs);
+	u32 count = READ_ONCE(write->count);
+	struct blackhole_dma_command *command;
+	unsigned long flags;
+	int ret;
+
+	// The engine can only report completion through MSI.
+	if (cmd->cmd_op != TENSTORRENT_URING_CMD_DMA_WRITE || !bh->tt.pdev->msi_enabled)
+		return -EOPNOTSUPP;
+
+	if (READ_ONCE(write->flags) != 0 || count == 0 || count > TENSTORRENT_DMA_WRITE_MAX_DESCS)
+		return -EINVAL;
+
+	command = kmalloc(struct_size(command, descs, count), GFP_KERNEL);
+	if (!command)
+		return -ENOMEM;
+
+	if (copy_from_user(command->descs, u64_to_user_ptr(descs), count * sizeof(command->descs[0]))) {
+		ret = -EFAULT;
+		goto out_free;
+	}
+
+	command->cmd = cmd;
+	command->priv = priv;
+	command->count = count;
+	command->next = 0;
+	command->offset = 0;
+	*dma_command_slot(cmd) = command;
+
+	ret = -EAGAIN;
+	if (!lock_mutex(&priv->mutex, nonblock))
+		goto out_free;
+	ret = blackhole_dma_check_descs(priv, command->descs, count);
+	if (!ret)
+		atomic_inc(&priv->dma_writes_inflight);
+	mutex_unlock(&priv->mutex);
+	if (ret)
+		goto out_free;
+
+	ret = -EAGAIN;
+	if (!lock_mutex(&bh->dma.window_mutex, nonblock))
+		goto out_inflight;
+
+	if (bh->dma.window < 0) {
+		int window = tenstorrent_device_allocate_tlb(&bh->tt, TLB_2M_WINDOW_SIZE);
+
+		if (window < 0) {
+			mutex_unlock(&bh->dma.window_mutex);
+			ret = window == -ENOMEM ? -EBUSY : window;
+			goto out_inflight;
+		}
+
+		spin_lock_irqsave(&bh->dma.lock, flags);
+		bh->dma.window = window;
+		spin_unlock_irqrestore(&bh->dma.lock, flags);
+	}
+
+	spin_lock_irqsave(&bh->dma.lock, flags);
+	list_add_tail(&command->node, &bh->dma.queue);
+	if (list_is_singular(&bh->dma.queue)) {
+		blackhole_dma_setup_channel(bh);
+		blackhole_dma_start(bh);
+	}
+	spin_unlock_irqrestore(&bh->dma.lock, flags);
+
+	mutex_unlock(&bh->dma.window_mutex);
+	return -EIOCBQUEUED;
+
+out_inflight:
+	atomic_dec(&priv->dma_writes_inflight);
+out_free:
+	kfree(command);
+	return ret;
+}
+
+static void blackhole_quiesce_uring_cmds(struct tenstorrent_device *tt_dev)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	unsigned long flags;
+
+	spin_lock_irqsave(&bh->dma.lock, flags);
+	if (!list_empty(&bh->dma.queue))
+		dma_write_reg(bh, HDMA_RD_EN, 0);
+	while (!list_empty(&bh->dma.queue))
+		blackhole_dma_complete(list_first_entry(&bh->dma.queue, struct blackhole_dma_command, node),
+				       -ENODEV);
+	spin_unlock_irqrestore(&bh->dma.lock, flags);
+
+	cancel_delayed_work_sync(&bh->dma.timeout);
+	// Return the window now rather than whenever the queued release runs.
+	cancel_work_sync(&bh->dma.release_window);
+	blackhole_dma_release_window(&bh->dma.release_window);
+}
+
+#endif // TT_URING_CMD_SUPPORTED
+
+static void blackhole_interrupt(struct tenstorrent_device *tt_dev, unsigned int vector)
+{
+#if TT_URING_CMD_SUPPORTED
+	// Without a vector of its own, the engine's MSI arrives on vector 0.
+	if (vector == DMA_MSI_VECTOR || tt_dev->interrupt_vectors <= DMA_MSI_VECTOR)
+		blackhole_dma_interrupt(tt_dev_to_bh_dev(tt_dev));
+#endif
+
+	if (vector == 0)
+		fw_log_interrupt(&tt_dev->fw_log);
 }
 
 static bool blackhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
@@ -739,6 +1150,10 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	// Claim the topmost 2M window for kernel use.
 	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
 	mutex_init(&bh->kernel_tlb_mutex);
+
+#if TT_URING_CMD_SUPPORTED
+	blackhole_dma_init(bh);
+#endif
 
 	// Initialize once and reserve the device-lifetime DMA buffer. The MSI
 	// handler may schedule work after the firmware handshake, which happens
@@ -997,6 +1412,10 @@ struct tenstorrent_device_class blackhole_class = {
 	.noc_write32 = blackhole_noc_write32,
 	.interrupt = blackhole_interrupt,
 	.prepare_msi_vectors = blackhole_prepare_msi_vectors,
+#if TT_URING_CMD_SUPPORTED
+	.uring_cmd = blackhole_uring_cmd,
+	.quiesce_uring_cmds = blackhole_quiesce_uring_cmds,
+#endif
 	.noc_read = blackhole_noc_read,
 	.noc_write = blackhole_noc_write,
 	.csm_read32 = blackhole_csm_read32,

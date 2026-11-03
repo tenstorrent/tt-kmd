@@ -62,6 +62,15 @@ void tenstorrent_reset_reclaim_iatus(struct tenstorrent_device *tt_dev);
 void tenstorrent_revoke_tlb_dmabufs(struct tenstorrent_device *tt_dev);
 bool tenstorrent_has_tlb_dmabuf_exports(struct tenstorrent_device *tt_dev);
 bool is_iommu_translated(struct device *dev);
+// Whether [addr, addr + size) lies within [start, start + len), without overflow.
+static inline bool tenstorrent_range_within(u64 addr, u64 size, u64 start, u64 len)
+{
+	return addr >= start && addr - start < len && size <= len - (addr - start);
+}
+
+// Finds the DMA buffer or pinning of this fd that holds [iova, iova + size)
+// and returns its IOVA range. Caller holds priv->mutex.
+bool tenstorrent_find_dma_range(struct chardev_private *priv, u64 iova, u64 size, u64 *start, u64 *len);
 
 #define TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS 16
 struct tenstorrent_outbound_iatu_region {

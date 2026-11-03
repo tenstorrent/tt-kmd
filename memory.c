@@ -573,6 +573,36 @@ long ioctl_free_dma_buf(struct chardev_private *priv,
 }
 
 
+static bool is_range_within(u64 addr, u64 size, u64 start, u64 len)
+{
+	return addr >= start && addr - start < len && size <= len - (addr - start);
+}
+
+bool tenstorrent_owns_dma_range(struct chardev_private *priv, u64 iova, u64 size)
+{
+	struct pinned_page_range *pinning;
+	struct dmabuf *dmabuf;
+	unsigned int i;
+
+	lockdep_assert_held(&priv->mutex);
+
+	hash_for_each(priv->dmabufs, i, dmabuf, hash_chain) {
+		if (is_range_within(iova, size, dmabuf->phys, dmabuf->size))
+			return true;
+	}
+
+	list_for_each_entry(pinning, &priv->pinnings, list) {
+		// PIN_PAGES only accepts ranges that are contiguous in IOVA space.
+		u64 start = pinning->dma_mapping.sgl ? sg_dma_address(pinning->dma_mapping.sgl)
+						     : page_to_phys(pinning->pages[0]);
+
+		if (is_range_within(iova, size, start, (u64)pinning->page_count << PAGE_SHIFT))
+			return true;
+	}
+
+	return false;
+}
+
 bool is_iommu_translated(struct device *dev)
 {
 	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
@@ -835,6 +865,12 @@ long ioctl_unpin_pages(struct chardev_private *priv,
 		return -EINVAL;
 
 	mutex_lock(&priv->mutex);
+
+	// DMA writes were checked against the pinnings under this mutex.
+	if (atomic_read(&priv->dma_writes_inflight)) {
+		mutex_unlock(&priv->mutex);
+		return -EBUSY;
+	}
 
 	list_for_each_entry_safe(pinning, tmp_pinning, &priv->pinnings, list) {
 		if (pinning->virtual_address != in.virtual_address)

@@ -47,6 +47,7 @@ struct tenstorrent_device {
 	unsigned int ordinal;
 	bool dma_capable;
 	bool interrupt_enabled;
+	unsigned int interrupt_vectors;	// Allocated while interrupt_enabled
 
 	struct mutex chardev_mutex;
 	bool chardev_excl_held;	// An O_EXCL fd is currently open
@@ -99,6 +100,7 @@ struct tenstorrent_device {
 };
 
 struct tlb_descriptor;
+struct io_uring_cmd;
 
 struct tenstorrent_device_class {
 	const char *name;
@@ -125,12 +127,19 @@ struct tenstorrent_device_class {
 	int (*configure_outbound_atu)(struct tenstorrent_device *ttdev, u32 region, u64 base, u64 limit, u64 target);
 	void (*noc_write32)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, u32 data, int noc);
 
-	// Optional MSI handler invoked from the driver's IRQ handler. May be NULL for devices
-	// with no interrupt handling.
-	void (*interrupt)(struct tenstorrent_device *ttdev);
+	// Optional MSI handler invoked from the driver's IRQ handler with the vector
+	// that fired. May be NULL for devices with no interrupt handling.
+	void (*interrupt)(struct tenstorrent_device *ttdev, unsigned int vector);
 	// Optional. Called after init_device and before MSI vectors are allocated.
 	// Returns the most vectors the device can raise; NULL means one.
 	unsigned int (*prepare_msi_vectors)(struct tenstorrent_device *ttdev);
+	// Optional io_uring command handler, called with reset_rwsem held shared
+	// after the same checks as an ioctl. Returns -EIOCBQUEUED once the command
+	// completes asynchronously, or its result.
+	int (*uring_cmd)(struct chardev_private *priv, struct io_uring_cmd *cmd, unsigned int issue_flags);
+	// Optional. Fails every queued io_uring command and stops the hardware
+	// serving them. Called before reset, suspend and removal.
+	void (*quiesce_uring_cmds)(struct tenstorrent_device *ttdev);
 	// Reset-safe scalar NOC transfers. width is one of 1, 2, 4, 8.
 	// Return 0 on success or a negative errno.
 	int (*noc_read)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, void *value, u32 width, int noc);

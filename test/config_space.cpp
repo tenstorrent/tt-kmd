@@ -31,6 +31,8 @@ const unsigned int next_capability_pointer_offset = 1;
 const unsigned int msi_cap_id = 5;
 const unsigned int msi_message_control_offset = 2;
 const std::uint16_t msi_message_control_msi_enable = 1;
+const std::uint16_t msi_message_control_multiple_message_capable_mask = 0xE;
+const std::uint16_t msi_message_control_two_vectors_capable = 0x2;
 const std::uint16_t msi_message_control_64_bit_address_capable = 0x80;
 const unsigned int msi_message_address_offset = 4;
 const unsigned int msi_message_upper_address_offset = 8;
@@ -97,7 +99,7 @@ void VerifyCommand(int config_fd)
         THROW_TEST_FAILURE("Command.BusMasterEnable is not set.");
 }
 
-void VerifyMSI(int config_fd)
+void VerifyMSI(int config_fd, DeviceType type)
 {
     // Check that MSI is enabled and has a non-zero address.
     auto maybe_msi_offset = find_capability(config_fd, msi_cap_id);
@@ -109,6 +111,10 @@ void VerifyMSI(int config_fd)
     auto message_control = read_config<std::uint16_t>(config_fd, msi_offset + msi_message_control_offset);
     if (!(message_control & msi_message_control_msi_enable))
         THROW_TEST_FAILURE("MSI is not enabled.");
+
+    if (type == Blackhole
+        && (message_control & msi_message_control_multiple_message_capable_mask) != msi_message_control_two_vectors_capable)
+        THROW_TEST_FAILURE("MSI does not advertise two vectors.");
 
     auto address_lower = read_config<std::uint32_t>(config_fd, msi_offset + msi_message_address_offset);
     auto address_upper = read_config<std::uint32_t>(config_fd, msi_offset + msi_message_upper_address_offset);
@@ -147,7 +153,7 @@ void TestConfigSpace(const EnumeratedDevice &dev, bool check_aer)
     VerifyCommand(config_fd);
     try
     {
-        VerifyMSI(config_fd);
+        VerifyMSI(config_fd, dev.type);
     }
     catch (const config_space_read_error &)
     {

@@ -1,0 +1,99 @@
+name: 'l1ecctest'
+
+# Survey: run tools/l1ecctest.c --all on every self-hosted runner. Triggered by pushing this branch; no PR needed.
+on:
+  push:
+    branches:
+      - joelsmith/l1ecctest-ci
+  workflow_dispatch:
+
+jobs:
+  l1ecctest:
+    name: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [
+          tt-ubuntu-2204-n150-stable,
+          tt-ubuntu-2204-n150-viommu-stable,
+          tt-ubuntu-2204-n300-stable,
+          tt-ubuntu-2204-n300-viommu-stable,
+          tt-ubuntu-2204-n300-llmbox-stable,
+          tt-ubuntu-2204-n300-llmbox-viommu-stable,
+          tt-ubuntu-2204-wh-glx-6u-stable,
+          tt-ubuntu-2204-wh-glx-6u-viommu-stable,
+          tt-ubuntu-2204-p100a-stable,
+          tt-ubuntu-2204-p100a-viommu-stable,
+          tt-ubuntu-2204-p150b-stable,
+          tt-ubuntu-2204-p150b-viommu-stable,
+          bh-glx-6u
+        ]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+    - name: Fix ownership and hostname
+      run: |
+        echo "127.0.0.1 $(hostname)" | sudo tee -a /etc/hosts > /dev/null 2>&1
+        sudo chown -R $USER:$USER $GITHUB_WORKSPACE || true
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Build l1ecctest
+      run: cc -O2 -Wall -o l1ecctest tools/l1ecctest.c
+
+    - name: Load a driver if none is loaded
+      shell: bash
+      run: |
+        if [ -d /dev/tenstorrent ]; then
+          echo "using loaded driver $(cat /sys/module/tenstorrent/version)"
+          exit 0
+        fi
+        until sudo apt-get update -qq; do :; done
+        sudo apt-get install -y build-essential linux-headers-$(uname -r)
+        make -j $(nproc)
+        sudo insmod tenstorrent.ko
+
+    # Raw tool output goes to files, which are uploaded untouched and shown in the job summary in a code block
+    # (no timestamps, no workflow-command parsing). The log copy has workflow commands disabled.
+    - name: Run l1ecctest --all on each Blackhole
+      shell: bash
+      run: |
+        mkdir -p out
+        rc=0
+        {
+          echo "runner $RUNNER_NAME ($(hostname)), kernel $(uname -r), driver $(cat /sys/module/tenstorrent/version)"
+          echo "cmdline: $(cat /proc/cmdline)"
+        } > out/host.txt
+        for sys in /sys/class/tenstorrent/tenstorrent!*; do
+          n=${sys##*!}
+          id=$(cat "$sys/device/device")
+          if [ "$id" != 0xb140 ]; then
+            echo "/dev/tenstorrent/$n: device $id, not a Blackhole, skipped" > out/dev$n.txt
+            continue
+          fi
+          echo "/dev/tenstorrent/$n: $(basename "$(readlink -f "$sys/device")")" > out/dev$n.txt
+          timeout 300 sudo ./l1ecctest -d $n --all >> out/dev$n.txt 2>&1 || { echo "exit $?" >> out/dev$n.txt; rc=1; }
+        done
+        ls out/dev*.txt > /dev/null 2>&1 || { echo "no tenstorrent devices" > out/dev-none.txt; rc=1; }
+
+        {
+          echo '```'
+          cat out/host.txt
+          for f in $(ls out/dev*.txt | sort -V); do echo; cat "$f"; done
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        token=$(uuidgen 2>/dev/null || echo l1ecc$RANDOM$RANDOM)
+        echo "::stop-commands::$token"
+        cat out/host.txt
+        for f in $(ls out/dev*.txt | sort -V); do echo; cat "$f"; done
+        echo "::$token::"
+        exit $rc
+
+    - name: Upload output
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: l1ecctest-${{ matrix.runner }}
+        path: out/

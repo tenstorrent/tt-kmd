@@ -16,6 +16,7 @@
 #include <linux/version.h>
 #include <linux/debugfs.h>
 #include <linux/proc_fs.h>
+#include <linux/sched/signal.h>
 
 #include "chardev_private.h"
 #include "device.h"
@@ -104,7 +105,7 @@ int tenstorrent_register_device(struct tenstorrent_device *tt_dev)
 	tt_dev->dev.devt = devt;
 	tt_dev->dev.class = tt_dev_class;
 	tt_dev->dev.parent = &tt_dev->pdev->dev;
-	tt_dev->dev.groups = NULL;
+	tt_dev->dev.groups = tt_dev->dev_class->dev_groups;
 	tt_dev->dev.release = tt_dev_release;
 
 	tt_dev->dev.id = tt_dev->ordinal;
@@ -256,6 +257,96 @@ static void tenstorrent_reset_reclaim_tlbs(struct tenstorrent_device *tt_dev)
 	mutex_unlock(&tt_dev->chardev_mutex);
 }
 
+// Finish a reset once it has reached the chip. Returns 0 on success, -EAGAIN
+// if POST_RESET_POLL should be retried, or -EIO on failure.
+static int tenstorrent_post_reset(struct tenstorrent_device *tt_dev, bool poll)
+{
+	struct pci_dev *pdev = tt_dev->pdev;
+	int r;
+
+	// While the link is down config reads return all-ones, which reads as
+	// the marker still being set.
+	if (!is_reset_marker_zero(pdev))
+		return poll ? -EAGAIN : -EIO;
+
+	// In the hotplug case, needs_hw_init is false and probe has already
+	// re-initialized the device. It waited for firmware itself, so if
+	// firmware is not ready now, POST_RESET_POLL reports that probe gave up.
+	if (!tt_dev->needs_hw_init)
+		return (poll && !tt_dev->fw_ready) ? -EIO : 0;
+
+	// This was an in-place reset, so re-initialize now, and clear
+	// needs_hw_init only if that succeeds so a failed POST_RESET can be
+	// retried.
+	if (!safe_pci_restore_state(pdev))
+		return -EIO;
+
+	r = tt_dev_check_fw_ready(tt_dev);
+
+	// A hung chip cannot be initialized.
+	if (r == -EIO)
+		return -EIO;
+
+	// POST_RESET carries on without firmware and re-initializes as far as it
+	// can, so that low-level tools can get at the chip.
+	if (r == -EAGAIN) {
+		if (poll)
+			return -EAGAIN;
+
+		dev_warn(&pdev->dev, "Firmware not ready; re-initializing without it\n");
+	}
+
+	tt_dev->dev_class->restore_reset_state(tt_dev);
+	if (!tt_dev->dev_class->init_hardware(tt_dev))
+		return -EIO;
+
+	// Rescan in case firmware was updated before this reset, and register
+	// telemetry if probe could not.
+	tt_telemetry_init(tt_dev);
+
+	tt_dev->needs_hw_init = false;
+	return 0;
+}
+
+// Callers of POST_RESET issue it once and cannot retry, so wait for firmware
+// on their behalf, checking as POST_RESET_POLL would, and carry on without it
+// if it does not come up in time. Only a fatal signal cuts the wait short.
+static int tenstorrent_post_reset_wait(struct chardev_private *priv)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	ktime_t end;
+	int r;
+
+	// A reset that has not reached the chip fails right away, as it always
+	// has, and after a hotplug reset probe has already done the waiting.
+	if (!tt_dev->needs_hw_init || !is_reset_marker_zero(tt_dev->pdev))
+		return tenstorrent_post_reset(tt_dev, false);
+
+	end = ktime_add_ms(ktime_get(), tt_dev->dev_class->fw_ready_timeout_ms);
+
+	while ((r = tenstorrent_post_reset(tt_dev, true)) == -EAGAIN) {
+		if (ktime_after(ktime_get(), end))
+			return tenstorrent_post_reset(tt_dev, false);
+
+		// Don't hold up other users of the device, or its removal, between
+		// checks; needs_hw_init keeps it restricted meanwhile. Reacquire so
+		// the caller's matching up_write in tt_cdev_ioctl stays balanced.
+		up_write(&tt_dev->reset_rwsem);
+		schedule_timeout_killable(msecs_to_jiffies(100));
+		down_write(&tt_dev->reset_rwsem);
+
+		if (fatal_signal_pending(current))
+			return -EINTR;
+
+		// A reset or remove may have happened while reset_rwsem was dropped.
+		r = tt_cdev_ioctl_check(priv, TENSTORRENT_IOCTL_RESET_DEVICE);
+		if (r)
+			return r;
+	}
+
+	return r;
+}
+
 static long ioctl_reset_device(struct chardev_private *priv,
 			       struct tenstorrent_reset_device __user *arg)
 {
@@ -275,9 +366,9 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	// Refuse a destructive in-place reset while any TLB window is exported as
 	// a dma-buf: an importer may be doing peer-to-peer DMA into it, and a
 	// pin-only importer cannot be revoked to make the reset safe. See the
-	// EXPORT_TLB_DMABUF rationale in ioctl.h. RESTORE_STATE/POST_RESET are the
-	// re-init halves of a reset sequence, not destructive, so they are left
-	// alone.
+	// EXPORT_TLB_DMABUF rationale in ioctl.h. RESTORE_STATE and the POST_RESET
+	// flags are the re-init halves of a reset sequence, not destructive, so
+	// they are left alone.
 	switch (in.flags) {
 	case TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK:
 	case TENSTORRENT_RESET_DEVICE_CONFIG_WRITE:
@@ -319,6 +410,7 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		tenstorrent_reset_reclaim_iatus(tt_dev);
 		ok = set_reset_marker(pdev);
 		priv->device->needs_hw_init = true;
+		priv->device->fw_ready = false;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
@@ -326,6 +418,7 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		tenstorrent_reset_reclaim_iatus(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
+		priv->device->fw_ready = false;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
@@ -333,25 +426,21 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		tenstorrent_reset_reclaim_iatus(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
-	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {
-		ok = is_reset_marker_zero(pdev);
+		priv->device->fw_ready = false;
+	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET ||
+		   in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET_POLL) {
+		int r;
 
-		// In the hotplug case, needs_hw_init is false and there is nothing to
-		// do here. Otherwise this was an in-place reset, so re-initialize now.
-		if (priv->device->needs_hw_init) {
-			priv->device->needs_hw_init = false;
-			if (ok && safe_pci_restore_state(pdev)) {
-				priv->device->dev_class->restore_reset_state(priv->device);
-				ok = priv->device->dev_class->init_hardware(priv->device);
+		if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET_POLL)
+			r = tenstorrent_post_reset(tt_dev, true);
+		else
+			r = tenstorrent_post_reset_wait(priv);
 
-				// Re-probe telemetry tag addresses in case
-				// firmware was updated before this reset.
-				if (ok && priv->device->dev_class->probe_telemetry)
-					priv->device->dev_class->probe_telemetry(priv->device);
-			} else {
-				ok = false;
-			}
-		}
+		// Anything but a failed reset is the ioctl's own error.
+		if (r && r != -EIO)
+			return r;
+
+		ok = (r == 0);
 	} else {
 		return -EINVAL;
 	}
@@ -630,6 +719,9 @@ static int tenstorrent_set_aggregated_power_state_locked(struct tenstorrent_devi
 	u8 max_settings_count = 0;
 
 	lockdep_assert_held(&tt_dev->chardev_mutex);
+
+	if (!tt_dev->fw_ready)
+		return -EIO;
 
 	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
 		u8 flags_count;
@@ -1111,7 +1203,9 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	    && cancel_delayed_work_sync(&tt_dev->power_down_work))
 		dev_dbg(&tt_dev->pdev->dev, "cancelled pending idle powerdown\n");
 
-	if (!power_aware && !tt_dev->detached && !tt_dev->needs_hw_init) {
+	// TODO: Replace the ad-hoc device validity checks with a single predicate
+	// (https://github.com/tenstorrent/tt-kmd/issues/280).
+	if (!power_aware && !tt_dev->detached && !tt_dev->needs_hw_init && tt_dev->fw_ready) {
 		ret = tenstorrent_set_aggregated_power_state(tt_dev);
 		if (ret < 0)
 			dev_warn(&tt_dev->pdev->dev, "Failed to set initial power state: %d\n", ret);

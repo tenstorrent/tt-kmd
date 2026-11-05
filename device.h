@@ -100,6 +100,18 @@ struct tenstorrent_device {
 
 struct tlb_descriptor;
 
+// One block transfer request, in device-class-neutral form. Keraunos uses a
+// flat SPA (or, with kla, a Keraunos-local address) and requires x, y and noc
+// to be zero.
+struct tt_block_io {
+	u64 addr;
+	u16 x;
+	u16 y;
+	u8 noc;
+	bool kla;
+	bool write;
+};
+
 struct tenstorrent_device_class {
 	const char *name;
 	u32 instance_size;
@@ -137,6 +149,21 @@ struct tenstorrent_device_class {
 	int (*noc_write)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, const void *value, u32 width, int noc);
 	int (*kla_read)(struct tenstorrent_device *ttdev, u64 addr, void *value, u32 width);
 	int (*kla_write)(struct tenstorrent_device *ttdev, u64 addr, const void *value, u32 width);
+	// Block transfers (TENSTORRENT_IOCTL_DEV_NOC_{READ,WRITE}_BLOCK). noc_block_io.c
+	// owns the user buffer; the class owns an aperture. All four or none.
+	//
+	// block_io_validate: is [req->addr, +len) addressable? Called once.
+	// block_io_lock: take the aperture. May sleep; killable.
+	// block_io_window: under the lock, return the iomem address of addr,
+	//   retargeting the aperture if needed, and trim *len to what is
+	//   contiguous there. Draining stores issued through the aperture before
+	//   retargeting it is the class's job.
+	// block_io_unlock: drain anything issued through the aperture, release it.
+	int (*block_io_validate)(struct tenstorrent_device *ttdev, const struct tt_block_io *req, u64 len);
+	int (*block_io_lock)(struct tenstorrent_device *ttdev, const struct tt_block_io *req);
+	void __iomem *(*block_io_window)(struct tenstorrent_device *ttdev, const struct tt_block_io *req,
+					 u64 addr, size_t *len);
+	void (*block_io_unlock)(struct tenstorrent_device *ttdev, const struct tt_block_io *req);
 	// Development-only bundle staging (TENSTORRENT_IOCTL_DEV_STAGE_BUNDLE).
 	// args is already validated; the op fills in args->boot_state.
 	int (*stage_bundle)(struct tenstorrent_device *ttdev, struct tenstorrent_stage_bundle *args);

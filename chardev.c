@@ -23,6 +23,7 @@
 #include "ioctl.h"
 #include "pcie.h"
 #include "memory.h"
+#include "noc_block_io.h"
 #include "module.h"
 #include "tlb.h"
 
@@ -998,6 +999,14 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		case TENSTORRENT_IOCTL_DEV_STAGE_BUNDLE:
 			ret = ioctl_dev_stage_bundle(priv, (struct tenstorrent_stage_bundle __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_DEV_NOC_READ_BLOCK:
+			ret = tenstorrent_noc_block_io(tt_dev, (struct tenstorrent_noc_block_io __user *)arg, false);
+			break;
+
+		case TENSTORRENT_IOCTL_DEV_NOC_WRITE_BLOCK:
+			ret = tenstorrent_noc_block_io(tt_dev, (struct tenstorrent_noc_block_io __user *)arg, true);
 			break;
 
 		default:

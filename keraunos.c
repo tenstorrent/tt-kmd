@@ -30,6 +30,10 @@
 // path, so claim the first free one for the kernel's scalar access window.
 #define KERNEL_APPIN0_ENTRY	164
 
+// The kernel's write-combining block I/O aperture, taken from the top so the
+// rest of 165-255 stays one contiguous range for future managed mappings.
+#define BLOCK_APPIN0_ENTRY	255
+
 // --- TLBSysIn0 (BAR2) bootstrap ---------------------------------------------
 // BAR2 offset = (sysin0_entry << 14) | within_16KB_window. Bring-up programs
 // SysIn0[2] -> 0x1804_4000, the base of the four APPIN0 config banks, so a
@@ -282,6 +286,116 @@ static int keraunos_kla_write(struct tenstorrent_device *tt_dev, u64 addr,
 	return 0;
 }
 
+// Return the WC iomem address of KLA addr, retargeting SysIn0 entries
+// KERAUNOS_BAR2_WC_FIRST_ENTRY.. if they don't already cover it, and trim *len
+// to what is contiguous from there. Caller holds kla_wc_mutex.
+static u8 __iomem *keraunos_kla_wc_window(struct keraunos_device *kd, u64 addr, size_t *len)
+{
+	u64 base = addr & ~(u64)SYSIN0_WINDOW_MASK;
+	u32 i;
+
+	lockdep_assert_held(&kd->kla_wc_mutex);
+
+	if (kd->kla_wc_base == KERAUNOS_NO_TARGET || addr < kd->kla_wc_base ||
+	    addr - kd->kla_wc_base >= KERAUNOS_BAR2_WC_SIZE) {
+		// Drain whatever went through the old targets before moving
+		// them; see keraunos_block_unlock().
+		mb();
+
+		// The WC entries are adjacent in BAR2, so pointing them at
+		// adjacent 16KB targets gives one contiguous 64KB aperture. Each
+		// config write ends in a read-back, so the new targets are in
+		// place before any data goes through them.
+		for (i = 0; i < KERAUNOS_BAR2_WC_ENTRIES; i++)
+			keraunos_program_sysin0(kd, KERAUNOS_BAR2_WC_FIRST_ENTRY + i,
+						base + (u64)i * SYSIN0_WINDOW_SIZE);
+		kd->kla_wc_base = base;
+	}
+
+	*len = min_t(u64, *len, kd->kla_wc_base + KERAUNOS_BAR2_WC_SIZE - addr);
+	return kd->bar2_wc + (addr - kd->kla_wc_base);
+}
+
+static void keraunos_invalidate_apertures(struct keraunos_device *kd)
+{
+	mutex_lock(&kd->block_mutex);
+	kd->block_base = KERAUNOS_NO_TARGET;
+	mutex_unlock(&kd->block_mutex);
+
+	mutex_lock(&kd->kla_wc_mutex);
+	kd->kla_wc_base = KERAUNOS_NO_TARGET;
+	mutex_unlock(&kd->kla_wc_mutex);
+}
+
+// --- Block I/O ---------------------------------------------------------------
+// SPA transfers go through BLOCK_APPIN0_ENTRY's WC window under block_mutex;
+// KLA transfers through the WC SysIn0 entries under kla_wc_mutex. Scalar I/O
+// keeps its own UC entries and spinlock, so the two never contend.
+//
+// MMIO ordering: these accesses use __raw accessors through a WC mapping, so
+// neither the writeX()-vs-spin_unlock() guarantee nor mmiowb tracking applies
+// to them. The rule instead is explicit: whoever issued accesses through an
+// aperture executes mb() before retargeting it or releasing the lock, so no
+// store (or load) can be translated through someone else's target. mb() drains
+// x86 WC buffers (it is mfence; wmb() would also do for writes) and on RISC-V
+// is fence iorw,iorw, which also orders MMIO loads that a lock release would
+// not. See docs/noc_block_io_design.md, "MMIO ordering".
+
+static int keraunos_block_validate(struct tenstorrent_device *tt_dev, const struct tt_block_io *req, u64 len)
+{
+	struct keraunos_device *kd = tt_dev_to_keraunos_dev(tt_dev);
+
+	if (req->x != 0 || req->y != 0 || req->noc != 0)
+		return -EINVAL;
+
+	if (len > KERAUNOS_TLB_ADDRESS_SIZE || req->addr > KERAUNOS_TLB_ADDRESS_SIZE - len)
+		return -EINVAL;
+
+	if (!kd->bar2)
+		return -ENODEV;
+
+	if (req->kla ? !kd->bar2_wc : !kd->bar0_block_wc)
+		return -ENODEV;
+
+	return 0;
+}
+
+static int keraunos_block_lock(struct tenstorrent_device *tt_dev, const struct tt_block_io *req)
+{
+	struct keraunos_device *kd = tt_dev_to_keraunos_dev(tt_dev);
+
+	return mutex_lock_killable(req->kla ? &kd->kla_wc_mutex : &kd->block_mutex);
+}
+
+static void __iomem *keraunos_block_window(struct tenstorrent_device *tt_dev, const struct tt_block_io *req,
+					   u64 addr, size_t *len)
+{
+	struct keraunos_device *kd = tt_dev_to_keraunos_dev(tt_dev);
+	u64 base = addr & ~(u64)APPIN0_WINDOW_MASK;
+
+	if (req->kla)
+		return keraunos_kla_wc_window(kd, addr, len);
+
+	lockdep_assert_held(&kd->block_mutex);
+
+	if (base != kd->block_base) {
+		mb();	// drain the old target first
+		keraunos_program_appin0(kd, BLOCK_APPIN0_ENTRY, base);
+		kd->block_base = base;
+	}
+
+	*len = min_t(u64, *len, base + APPIN0_WINDOW_SIZE - addr);
+	return kd->bar0_block_wc + (addr - base);
+}
+
+static void keraunos_block_unlock(struct tenstorrent_device *tt_dev, const struct tt_block_io *req)
+{
+	struct keraunos_device *kd = tt_dev_to_keraunos_dev(tt_dev);
+
+	mb();	// drain before the next owner may retarget
+	mutex_unlock(req->kla ? &kd->kla_wc_mutex : &kd->block_mutex);
+}
+
 static bool keraunos_init(struct tenstorrent_device *tt_dev)
 {
 	struct keraunos_device *kd = tt_dev_to_keraunos_dev(tt_dev);
@@ -298,7 +412,10 @@ static bool keraunos_init(struct tenstorrent_device *tt_dev)
 	dev_info(&pdev->dev, "Keraunos init_device\n");
 
 	spin_lock_init(&kd->kernel_tlb_lock);
-	mutex_init(&kd->staging_mutex);
+	mutex_init(&kd->kla_wc_mutex);
+	mutex_init(&kd->block_mutex);
+	kd->kla_wc_base = KERAUNOS_NO_TARGET;
+	kd->block_base = KERAUNOS_NO_TARGET;
 
 	// Map BAR2 (control plane) in two pieces: the uncached low part, through
 	// which we reprogram TLB config via SysIn0, and the write-combining top
@@ -328,8 +445,23 @@ static bool keraunos_init(struct tenstorrent_device *tt_dev)
 			 (unsigned long long)bar0_len, KERNEL_APPIN0_ENTRY);
 	}
 
-	// Reserve the entry so the TLB allocator never hands it to userspace.
+	// The block I/O window, write-combining. Its own 16MB, so it shares no
+	// page with the UC scalar window. No silent fallback to UC: without WC
+	// the block ioctls report -ENODEV.
+	window_off = (unsigned long)BLOCK_APPIN0_ENTRY << APPIN0_WINDOW_SHIFT;
+	if (window_off + APPIN0_WINDOW_SIZE <= bar0_len) {
+		kd->bar0_block_wc = pci_iomap_wc_range(pdev, 0, window_off, APPIN0_WINDOW_SIZE);
+		if (!kd->bar0_block_wc)
+			dev_warn(&pdev->dev, "Keraunos: BAR0 block I/O WC iomap failed; SPA block I/O disabled\n");
+	} else {
+		dev_warn(&pdev->dev,
+			 "Keraunos: BAR0 (0x%llx) too small for AppIn0 entry %u window; SPA block I/O disabled\n",
+			 (unsigned long long)bar0_len, BLOCK_APPIN0_ENTRY);
+	}
+
+	// Reserve the entries so the TLB allocator never hands them to userspace.
 	set_bit(KERNEL_APPIN0_ENTRY, tt_dev->tlbs);
+	set_bit(BLOCK_APPIN0_ENTRY, tt_dev->tlbs);
 
 	return true;
 }
@@ -337,6 +469,10 @@ static bool keraunos_init(struct tenstorrent_device *tt_dev)
 static bool keraunos_init_hardware(struct tenstorrent_device *tt_dev)
 {
 	dev_info(&tt_dev->pdev->dev, "Keraunos init_hardware (stub)\n");
+
+	// After reset or resume the TLB config is whatever the chip says it
+	// is, not what we last programmed.
+	keraunos_invalidate_apertures(tt_dev_to_keraunos_dev(tt_dev));
 	return true;
 }
 
@@ -434,7 +570,7 @@ static int keraunos_flush_wc(struct keraunos_device *kd)
 }
 
 // Copy len bytes from userspace to KLA addr through the WC SysIn0 entries,
-// one KERAUNOS_BAR2_WC_SIZE span at a time. Caller holds staging_mutex.
+// at most KERAUNOS_BAR2_WC_SIZE at a time. Caller holds kla_wc_mutex.
 //
 // TODO: DMA. CPU copies through a 64KB aperture are the simple first cut;
 // this is the only function that needs to change for another transport.
@@ -442,26 +578,18 @@ static int keraunos_copy_to_kla(struct keraunos_device *kd, u64 addr,
 				const u8 __user *src, size_t len, void *bounce)
 {
 	while (len) {
-		u64 base = addr & ~(u64)SYSIN0_WINDOW_MASK;
-		u32 off = addr - base;
-		size_t chunk = min_t(size_t, len, KERAUNOS_BAR2_WC_SIZE - off);
-		u32 i;
+		size_t chunk = min_t(size_t, len, KERAUNOS_BAR2_WC_SIZE);
+		u8 __iomem *win;
 		int ret;
 
 		if (copy_from_user(bounce, src, chunk))
 			return -EFAULT;
 
-		// The WC entries are adjacent in BAR2, so pointing them at
-		// adjacent 16KB targets gives one contiguous 64KB aperture. Each
-		// config write ends in a read-back, so the new targets are in
-		// place before any data goes through them.
-		for (i = 0; i < KERAUNOS_BAR2_WC_ENTRIES; i++)
-			keraunos_program_sysin0(kd, KERAUNOS_BAR2_WC_FIRST_ENTRY + i,
-						base + (u64)i * SYSIN0_WINDOW_SIZE);
+		win = keraunos_kla_wc_window(kd, addr, &chunk);
 
 		// 64-bit stores: SMC SRAM takes them, and fixed-width writes
 		// avoid the byte/halfword tails memcpy_toio() may emit.
-		__iowrite64_copy(kd->bar2_wc + off, bounce, chunk / 8);
+		__iowrite64_copy(win, bounce, chunk / 8);
 
 		// Drain before the entries are retargeted or released.
 		ret = keraunos_flush_wc(kd);
@@ -548,10 +676,10 @@ static int keraunos_stage_bundle(struct tenstorrent_device *tt_dev, struct tenst
 
 	// TODO: this holds reset_rwsem (shared) across firmware waits of up to
 	// timeout_ms, so a device reset waits for staging to finish.
-	ret = mutex_lock_interruptible(&kd->staging_mutex);
+	ret = mutex_lock_interruptible(&kd->kla_wc_mutex);
 	if (!ret) {
 		ret = keraunos_stage_bundle_locked(kd, args, bounce);
-		mutex_unlock(&kd->staging_mutex);
+		mutex_unlock(&kd->kla_wc_mutex);
 	}
 
 	kvfree(bounce);
@@ -611,6 +739,10 @@ static void keraunos_cleanup(struct tenstorrent_device *tt_dev)
 		pci_iounmap(tt_dev->pdev, kd->bar0_kernel_tlb);
 		kd->bar0_kernel_tlb = NULL;
 	}
+	if (kd->bar0_block_wc) {
+		pci_iounmap(tt_dev->pdev, kd->bar0_block_wc);
+		kd->bar0_block_wc = NULL;
+	}
 	if (kd->bar2_wc) {
 		pci_iounmap(tt_dev->pdev, kd->bar2_wc);
 		kd->bar2_wc = NULL;
@@ -650,4 +782,8 @@ struct tenstorrent_device_class keraunos_class = {
 	.kla_read = keraunos_kla_read,
 	.kla_write = keraunos_kla_write,
 	.stage_bundle = keraunos_stage_bundle,
+	.block_io_validate = keraunos_block_validate,
+	.block_io_lock = keraunos_block_lock,
+	.block_io_window = keraunos_block_window,
+	.block_io_unlock = keraunos_block_unlock,
 };

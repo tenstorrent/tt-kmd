@@ -35,6 +35,8 @@
 // Development-only ioctls are numbered from 0x80. Their ABI is unstable: they
 // may change or disappear in any release.
 #define TENSTORRENT_IOCTL_DEV_STAGE_BUNDLE	_IO(TENSTORRENT_IOCTL_MAGIC, 0x80)
+#define TENSTORRENT_IOCTL_DEV_NOC_READ_BLOCK	_IO(TENSTORRENT_IOCTL_MAGIC, 0x81)
+#define TENSTORRENT_IOCTL_DEV_NOC_WRITE_BLOCK	_IO(TENSTORRENT_IOCTL_MAGIC, 0x82)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -604,6 +606,56 @@ struct tenstorrent_stage_bundle {
 	__u64 size;
 	__u32 boot_state;
 	__u32 reserved0;
+};
+
+// Largest block transfer the ABI can describe.
+#define TENSTORRENT_NOC_BLOCK_IO_MAX_LEN	(1ULL << 32)
+
+/**
+ * TENSTORRENT_IOCTL_DEV_NOC_READ_BLOCK - Bulk read from a NOC address range (development)
+ * TENSTORRENT_IOCTL_DEV_NOC_WRITE_BLOCK - Bulk write to a NOC address range (development)
+ *
+ * Move data between a userspace buffer and a device address range through a
+ * kernel-owned aperture, so the transfer stays safe across device reset: a
+ * reset invalidates the fd rather than leaving a live userspace MMIO mapping.
+ * Unstable development ABI; Keraunos only for now.
+ *
+ * For memory-like targets (SRAM, DRAM, L1). The kernel chooses access widths
+ * (currently 32 or 64 bits) and may issue accesses in any order and combine
+ * them, so registers and anything with side effects belong on NOC_READ/WRITE.
+ *
+ * @argsz: Must be sizeof(struct tenstorrent_noc_block_io).
+ * @flags: Zero or TENSTORRENT_NOC_FLAG_KLA, which makes @addr a Keraunos-local
+ *         address, as for the scalar NOC ioctls.
+ * @x, @y, @noc: NOC endpoint; on Keraunos all must be 0.
+ * @reserved0: Must be 0.
+ * @addr: Device address of the first byte; a multiple of 4. On Keraunos a
+ *        52-bit system physical address unless TENSTORRENT_NOC_FLAG_KLA.
+ * @data_ptr: Userspace buffer; a multiple of 4; must not overlap this struct.
+ * @data_len: Bytes; nonzero, a multiple of 4, at most
+ *            TENSTORRENT_NOC_BLOCK_IO_MAX_LEN.
+ * @bytes_transferred: 0 on input. On return, success or not, the length of
+ *                     the prefix that completed. Resume by advancing @addr
+ *                     and @data_ptr and shrinking @data_len by that much.
+ *
+ * Returns 0 when everything moved. Otherwise EINVAL (bad request), EFAULT
+ * (bad buffer), EINTR (signal), ENODEV (stale fd, device gone or aperture
+ * unavailable), EOPNOTSUPP (device has no block I/O).
+ *
+ * A completed write has been issued and ordered; that does not prove the
+ * target has consumed it.
+ */
+struct tenstorrent_noc_block_io {
+	__u32 argsz;
+	__u32 flags;
+	__u16 x;
+	__u16 y;
+	__u8 noc;
+	__u8 reserved0[3];
+	__u64 addr;
+	__u64 data_ptr;
+	__u64 data_len;
+	__u64 bytes_transferred;
 };
 
 #endif

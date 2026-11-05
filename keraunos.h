@@ -62,6 +62,10 @@ enum keraunos_host_boot_state {
 	KERAUNOS_BOOT_ERROR			= 15,
 };
 
+// Aperture target cache value meaning "unknown, reprogram before use". Not
+// window-aligned, so it never matches a real target.
+#define KERAUNOS_NO_TARGET	U64_MAX
+
 struct keraunos_device {
 	struct tenstorrent_device tt;
 
@@ -83,9 +87,19 @@ struct keraunos_device {
 	u8 __iomem *bar2_wc;
 	spinlock_t kernel_tlb_lock;
 
-	// Owns the WC SysIn0 entries and serializes bundle staging, which
-	// sleeps while it polls firmware.
-	struct mutex staging_mutex;
+	// Owns the WC SysIn0 entries (block I/O with TENSTORRENT_NOC_FLAG_KLA,
+	// and bundle staging, which sleeps while it polls firmware).
+	// kla_wc_base is the 16KB-aligned KLA the first of them points at,
+	// the rest following contiguously, or KERAUNOS_NO_TARGET.
+	struct mutex kla_wc_mutex;
+	u64 kla_wc_base;
+
+	// Kernel-owned write-combining AppIn0 aperture for SPA block I/O:
+	// bar0_block_wc maps its 16MB BAR0 window, block_base is the 16MB-aligned
+	// SPA it points at (or KERAUNOS_NO_TARGET). Both under block_mutex.
+	u8 __iomem *bar0_block_wc;
+	struct mutex block_mutex;
+	u64 block_base;
 
 	bool boot_group_registered;
 };

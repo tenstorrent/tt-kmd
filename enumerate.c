@@ -316,6 +316,8 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	memcpy(tt_dev->tlb_counts, device_class->tlb_counts, sizeof(tt_dev->tlb_counts));
 
 	mutex_init(&tt_dev->chardev_mutex);
+	mutex_init(&tt_dev->power_mutex);
+	tt_dev->noc_maybe_gated = true;	// Unknown until firmware accepts an aggregate.
 	mutex_init(&tt_dev->iatu_mutex);
 	mutex_init(&tt_dev->dmabuf_export_lock);
 	mutex_init(&tt_dev->arc_msg_mutex);
@@ -530,6 +532,7 @@ static int tenstorrent_resume(struct device *dev) {
 		dev_warn(dev, "Unable to re-enable interrupts after resume\n");
 
 	ok = tt_dev->dev_class->init_hardware(tt_dev);
+	tenstorrent_forget_power_state(tt_dev);
 
 	// Suspend invalidates the saved state.
 	if (ok)

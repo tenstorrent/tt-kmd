@@ -97,7 +97,8 @@ struct chardev_private {
 	struct mutex tlb_mutex;
 
 	struct tenstorrent_set_noc_cleanup noc_cleanup; // NOC write on release action
-	struct tenstorrent_power_state power_state; // Power state for this fd; guarded by device chardev_mutex
+	struct tenstorrent_power_state power_state; // Power state for this fd; guarded by device power_mutex
+	bool noc_power_floor; // fd can reach NoC endpoints; guarded by device power_mutex
 
 	struct chardev_msg arc_msg; // Per-fd ARC message; guarded by device arc_msg_mutex
 

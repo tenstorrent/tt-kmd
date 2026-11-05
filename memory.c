@@ -19,6 +19,7 @@
 #include <linux/module.h>
 #include <linux/dma-resv.h>
 
+#include "chardev.h"
 #include "chardev_private.h"
 #include "device.h"
 #include "memory.h"
@@ -1013,6 +1014,10 @@ long ioctl_allocate_tlb(struct chardev_private *priv,
 		return -EFAULT;
 	}
 
+	// Once the bit is set another thread can map the window, so the NoC
+	// endpoints must be powered first.
+	tenstorrent_raise_noc_power_floor(priv);
+
 	mutex_lock(&priv->tlb_mutex);
 	set_bit(id, priv->tlbs);
 	mutex_unlock(&priv->tlb_mutex);
@@ -1532,6 +1537,12 @@ static int map_pci_bar(struct chardev_private *priv, struct vm_area_struct *vma,
 	struct tenstorrent_mmap_vma *mmap_vma;
 	int ret;
 
+	// BAR0 and (on Blackhole) BAR4 hold the TLB windows, and BAR0 also
+	// their config registers, so a mapping of either can reach any NoC
+	// endpoint.  A no-op on device classes without noc_power_flags.
+	if (bar == 0 || bar == 4)
+		tenstorrent_raise_noc_power_floor(priv);
+
 	mmap_vma = kzalloc(sizeof(*mmap_vma), GFP_KERNEL);
 	if (!mmap_vma)
 		return -ENOMEM;
@@ -1620,6 +1631,10 @@ static int map_tlb_window(struct chardev_private *priv, struct vm_area_struct *v
 
 	if (size > tlb_desc.size)
 		return -EINVAL;
+
+	// ALLOCATE_TLB raised this fd's floor, but firmware may have been
+	// reset or failed a message since.
+	tenstorrent_raise_noc_power_floor(priv);
 
 	// tlb_mutex (not priv->mutex) so the mmap path never nests the general
 	// per-fd mutex inside mmap_lock; priv->mutex is held across uaccess

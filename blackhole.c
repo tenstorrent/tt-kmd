@@ -966,4 +966,8 @@ struct tenstorrent_device_class blackhole_class = {
 	.arc_msg_locate_queue = blackhole_arc_msg_locate_queue,
 	.arc_msg_trigger = blackhole_arc_msg_trigger,
 	.set_power_state = blackhole_set_power_state,
+	// While these are gated (Tensix and L2CPU tile clocks stopped, GDDR
+	// PHY powered down), NoC accesses to their tiles may never complete.
+	.noc_power_flags = TT_POWER_FLAG_TENSIX_ENABLE | TT_POWER_FLAG_L2CPU_ENABLE |
+			   TT_POWER_FLAG_MRISC_PHY_WAKEUP,
 };

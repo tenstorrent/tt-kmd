@@ -356,6 +356,8 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		return -EINVAL;
 	}
 
+	tenstorrent_forget_power_state(tt_dev);
+
 	out.output_size_bytes = sizeof(out);
 	out.result = !ok;
 
@@ -535,6 +537,11 @@ static long ioctl_set_noc_cleanup(struct chardev_private *priv,
 	if (data.x > 63 || data.y > 63)
 		return -EINVAL;
 
+	// The cleanup write is issued at close() to a tile of the caller's
+	// choosing, so keep the NoC endpoints powered until then.
+	if (data.enabled)
+		tenstorrent_raise_noc_power_floor(priv);
+
 	mutex_lock(&priv->mutex);
 	priv->noc_cleanup = data;
 	mutex_unlock(&priv->mutex);
@@ -590,6 +597,8 @@ static long ioctl_noc_read(struct chardev_private *priv, struct tenstorrent_noc_
 	if (ret)
 		return ret;
 
+	tenstorrent_raise_noc_power_floor(priv);
+
 	ret = tt_dev->dev_class->noc_read(tt_dev, data.x, data.y, data.addr, &value, data.width, data.noc);
 	if (ret)
 		return ret;
@@ -619,6 +628,8 @@ static long ioctl_noc_write(struct chardev_private *priv, struct tenstorrent_noc
 	if (ret)
 		return ret;
 
+	tenstorrent_raise_noc_power_floor(priv);
+
 	// Only the low data.width bytes of data.value are written.
 	return tt_dev->dev_class->noc_write(tt_dev, data.x, data.y, data.addr, &data.value, data.width, data.noc);
 }
@@ -627,9 +638,12 @@ static int tenstorrent_set_aggregated_power_state_locked(struct tenstorrent_devi
 {
 	struct tenstorrent_power_state power_state = { 0 };
 	struct chardev_private *priv;
+	u16 noc_power_flags = tt_dev->dev_class->noc_power_flags;
 	u8 max_settings_count = 0;
+	bool noc_on;
+	int ret;
 
-	lockdep_assert_held(&tt_dev->chardev_mutex);
+	lockdep_assert_held(&tt_dev->power_mutex);
 
 	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
 		u8 flags_count;
@@ -662,6 +676,14 @@ static int tenstorrent_set_aggregated_power_state_locked(struct tenstorrent_devi
 		// OR this FD's effective flags into the aggregate.
 		power_state.power_flags |= effective_flags;
 
+		// NoC accesses to a gated domain's tiles may never complete: a
+		// host read that reaches one takes a completion timeout at the
+		// root port and the device is lost until it is reset.  While
+		// this fd can reach the NoC, keep those domains on whatever it
+		// asked for.
+		if (priv->noc_power_floor)
+			power_state.power_flags |= noc_power_flags;
+
 		// Aggregate power_settings: for each setting index, take the maximum
 		// value across all FDs that have marked that setting as valid.
 		settings_count = min_t(u8, settings_count, ARRAY_SIZE(power_state.power_settings));
@@ -669,23 +691,104 @@ static int tenstorrent_set_aggregated_power_state_locked(struct tenstorrent_devi
 			power_state.power_settings[i] = max(power_state.power_settings[i], priv->power_state.power_settings[i]);
 	}
 
+	// An exported TLB window stays reachable by its importers after the fd
+	// that exported it is gone.
+	if (noc_power_flags && tenstorrent_has_tlb_dmabuf_exports(tt_dev))
+		power_state.power_flags |= noc_power_flags;
+
 	// Always send maximum validity (15 flags, max_settings_count settings) to
 	// firmware. This ensures FW applies all bits of the aggregated power_flags,
 	// regardless of what validity individual FDs specified.
 	power_state.validity = TT_POWER_VALIDITY(15, max_settings_count);
 
-	return tt_dev->dev_class->set_power_state(tt_dev, &power_state);
+	ret = tt_dev->dev_class->set_power_state(tt_dev, &power_state);
+
+	// Track whether firmware may have any NoC endpoint domain gated, so
+	// tenstorrent_raise_noc_power_floor() knows when it must send.
+	noc_on = (power_state.power_flags & noc_power_flags) == noc_power_flags;
+	if (ret == 0) {
+		tt_dev->power_setting_acked = true;
+		tt_dev->noc_maybe_gated = !noc_on;
+	} else if (ret == -EREMOTEIO || ret == -EOPNOTSUPP) {
+		// Refused, so firmware state is unchanged.  Firmware that has
+		// never accepted POWER_SETTING predates it and does not gate.
+		if (!tt_dev->power_setting_acked)
+			tt_dev->noc_maybe_gated = false;
+	} else if (!noc_on) {
+		// Firmware may still apply it.
+		tt_dev->noc_maybe_gated = true;
+	}
+
+	return ret;
 }
 
 int tenstorrent_set_aggregated_power_state(struct tenstorrent_device *tt_dev)
 {
 	int ret;
 
-	mutex_lock(&tt_dev->chardev_mutex);
+	mutex_lock(&tt_dev->power_mutex);
 	ret = tenstorrent_set_aggregated_power_state_locked(tt_dev);
-	mutex_unlock(&tt_dev->chardev_mutex);
+	mutex_unlock(&tt_dev->power_mutex);
 
 	return ret;
+}
+
+// Record that this fd can now reach NoC endpoints (it owns a TLB window, maps
+// a BAR holding TLB windows, or has the kernel access the NoC for it) and, if
+// firmware may have any of dev_class->noc_power_flags gated, re-aggregate so
+// they are on before it can.  Call before the access becomes possible: before
+// the TLB bit is published, before the BAR or window is mapped, before the
+// NOC access.
+//
+// The floor is held until close(): munmap runs under mmap_lock and so cannot
+// re-aggregate, and dropping it on FREE_TLB would cost two firmware messages
+// per allocate/free cycle.
+//
+// If firmware cannot be told, the access still goes ahead.  By then the
+// device is usually already lost (NoC reads return all ones, which fails the
+// message at once), and refusing the mmap or ioctl would also stop the tools
+// that reset it.  noc_maybe_gated stays set, so the next call retries.
+//
+// Takes power_mutex and, beneath it, only the ARC message locks
+// (kernel_tlb_mutex, arc_msg_mutex) and dmabuf_export_lock, none of which is
+// held across uaccess, so it is safe with mmap_lock held.  Caller holds
+// reset_rwsem (shared) and has checked that the fd is still current.
+void tenstorrent_raise_noc_power_floor(struct chardev_private *priv)
+{
+	struct tenstorrent_device *tt_dev = priv->device;
+	int ret;
+
+	if (!tt_dev->dev_class->noc_power_flags)
+		return;
+
+	lockdep_assert_held(&tt_dev->reset_rwsem);
+
+	mutex_lock(&tt_dev->power_mutex);
+
+	priv->noc_power_floor = true;
+
+	// Between an in-place reset and POST_RESET, firmware is not ready
+	// for messages.  noc_maybe_gated stays set, so the first call after
+	// POST_RESET sends the floor.
+	if (tt_dev->noc_maybe_gated && !tt_dev->detached && !tt_dev->needs_hw_init) {
+		ret = tenstorrent_set_aggregated_power_state_locked(tt_dev);
+		if (tt_dev->noc_maybe_gated)
+			dev_warn_ratelimited(&tt_dev->pdev->dev,
+					     "NoC endpoint power floor not confirmed by firmware: %d\n",
+					     ret);
+	}
+
+	mutex_unlock(&tt_dev->power_mutex);
+}
+
+// Firmware may have restarted (device reset, resume) with a power state of
+// its own, so assume nothing about it until the next aggregation it accepts.
+void tenstorrent_forget_power_state(struct tenstorrent_device *tt_dev)
+{
+	mutex_lock(&tt_dev->power_mutex);
+	tt_dev->noc_maybe_gated = true;
+	tt_dev->power_setting_acked = false;
+	mutex_unlock(&tt_dev->power_mutex);
 }
 
 // Delayed work: send the aggregated idle power-down message after the
@@ -726,10 +829,10 @@ static long ioctl_set_power_state(struct chardev_private *priv, struct tenstorre
 	dev_dbg(&tt_dev->pdev->dev, "Power state request: validity=0x%x flags=0x%x\n",
 		data.validity, data.power_flags);
 
-	mutex_lock(&tt_dev->chardev_mutex);
+	mutex_lock(&tt_dev->power_mutex);
 	priv->power_state = data;
 	ret = tenstorrent_set_aggregated_power_state_locked(tt_dev);
-	mutex_unlock(&tt_dev->chardev_mutex);
+	mutex_unlock(&tt_dev->power_mutex);
 
 	return ret;
 }
@@ -1038,7 +1141,9 @@ static int admit_chardev_open(struct tenstorrent_device *tt_dev, struct chardev_
 		}
 	}
 
+	mutex_lock(&tt_dev->power_mutex);
 	list_add(&priv->open_fd, &tt_dev->open_fds_list);
+	mutex_unlock(&tt_dev->power_mutex);
 
 	mutex_unlock(&tt_dev->chardev_mutex);
 	return 0;
@@ -1166,9 +1271,11 @@ static void tt_cdev_release_power(struct chardev_private *priv)
 	bool last_close;
 
 	lockdep_assert_held(&tt_dev->chardev_mutex);
+	lockdep_assert_held(&tt_dev->power_mutex);
 
 	can_defer = tt_dev->dev_class->defer_idle_powerdown && (idle_power_down_grace_ms > 0);
-	no_power_contrib = (priv->power_state.validity == TT_POWER_VALIDITY(15, 0) && priv->power_state.power_flags == 0);
+	no_power_contrib = (priv->power_state.validity == TT_POWER_VALIDITY(15, 0) && priv->power_state.power_flags == 0 &&
+			    !priv->noc_power_floor);
 	last_close = list_empty(&tt_dev->open_fds_list);
 
 	if (tt_dev->detached || tt_dev->needs_hw_init)
@@ -1205,11 +1312,14 @@ static int tt_cdev_release(struct inode *inode, struct file *file)
 	mutex_unlock(&tt_dev->arc_msg_mutex);
 
 	mutex_lock(&tt_dev->chardev_mutex);
+	mutex_lock(&tt_dev->power_mutex);
 
 	list_del(&priv->open_fd);
 
 	// Must follow the list_del: release_power reads open_fds_list.
 	tt_cdev_release_power(priv);
+
+	mutex_unlock(&tt_dev->power_mutex);
 
 	if (list_empty(&tt_dev->open_fds_list)) {
 		WRITE_ONCE(tt_dev->chardev_excl_held, false);

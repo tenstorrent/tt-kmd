@@ -65,6 +65,28 @@ struct tenstorrent_device {
 
 	struct list_head open_fds_list;	// List of struct chardev_private, linked through open_fds field
 
+	// Serializes power-state aggregation with the firmware message that
+	// carries it, and guards each fd's power_state and noc_power_floor and
+	// the two fields below.  Also held (inside chardev_mutex) to add or
+	// remove an open_fds_list entry, so aggregation can walk the list
+	// holding only this mutex.  That lets the mmap path, which must not
+	// take chardev_mutex (tenstorrent_vma_zap() takes mmap_lock under it),
+	// power up the NoC endpoints synchronously.
+	// Ordering: reset_rwsem -> chardev_mutex -> power_mutex;
+	// mmap_lock -> power_mutex; power_mutex -> {kernel_tlb_mutex,
+	// arc_msg_mutex, dmabuf_export_lock}.
+	// Never take chardev_mutex, mmap_lock, reset_rwsem, tlb_mutex,
+	// vma_lock or a per-fd mutex, flush power_down_work, or touch
+	// userspace memory while holding it.
+	struct mutex power_mutex;
+
+	// Firmware may have a dev_class->noc_power_flags domain gated: the
+	// last aggregate it accepted lacked one, a send that lacked one
+	// failed, or its state is unknown (probe, reset, resume).
+	bool noc_maybe_gated;
+	// Firmware has accepted a POWER_SETTING since probe, reset or resume.
+	bool power_setting_acked;
+
 	// Deferred idle power-down work.  Armed by tt_cdev_release on last
 	// close when dev_class->defer_idle_powerdown is set and
 	// idle_power_down_grace_ms > 0.  Cancelled in suspend and remove so
@@ -141,6 +163,12 @@ struct tenstorrent_device_class {
 	int (*populate_telemetry_cache)(struct tenstorrent_device *ttdev,
 				       struct telem_cache_entry *cache, u16 count);
 	int (*probe_telemetry)(struct tenstorrent_device *ttdev);
+
+	// Power flags for domains whose tiles' NoC accesses may never
+	// complete while the domain is gated.  Forced on in the aggregate sent
+	// to firmware while any fd can reach the NoC; see
+	// tenstorrent_raise_noc_power_floor().  0 if none.
+	u16 noc_power_flags;
 
 	// If true, the idle power-down message is sent from a delayed work
 	// item armed when the last fd closes, rather than synchronously from

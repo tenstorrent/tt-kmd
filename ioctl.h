@@ -374,8 +374,10 @@ struct tenstorrent_set_noc_cleanup {
  *   maximum value requested across all clients.
  *
  * Behavior at open():
- * - With O_APPEND: Initial state is 0 (all off), no aggregation is triggered.
- *   The client is expected to request power via SET_POWER_STATE.
+ * - With O_APPEND: Initial state is 0 (all off), no aggregation is triggered
+ *   at open(). The client is expected to request power via SET_POWER_STATE.
+ *   An aggregation may also be triggered the first time the client can reach
+ *   the NoC (see NoC endpoint power below).
  * - Without O_APPEND (legacy): Initial state is high power, aggregation is
  *   triggered immediately.
  *
@@ -384,6 +386,33 @@ struct tenstorrent_set_noc_cleanup {
  *   contribution is removed and the aggregated state is recomputed. When the
  *   last client closes, the device will return to low power.
  * - If power_policy is disabled, no aggregation is triggered on close.
+ * - A client holding the NoC endpoint power floor (below) counts as
+ *   contributing power, so its close() re-aggregates even if it never
+ *   called SET_POWER_STATE.
+ *
+ * NoC endpoint power:
+ * - On some devices (Blackhole), a host access that reaches a tile of a
+ *   gated domain (Tensix or L2CPU clocks stopped, GDDR PHY powered down) may
+ *   never complete, taking the device down until it is reset. So once a
+ *   client can reach the NoC - it has allocated or mapped a TLB window,
+ *   mapped BAR0 or BAR4, issued NOC_READ or NOC_WRITE, or enabled a NOC
+ *   cleanup action - TT_POWER_FLAG_TENSIX_ENABLE, TT_POWER_FLAG_L2CPU_ENABLE
+ *   and TT_POWER_FLAG_MRISC_PHY_WAKEUP are on in every aggregate sent while
+ *   its file descriptor is open, whatever it requests. The same applies
+ *   while any TLB window is exported as a dma-buf. The domains may be gated
+ *   again at the next aggregation after that (with power_policy disabled,
+ *   close does not trigger one). A long-running client that keeps a window
+ *   or mapping, such as a monitoring tool, therefore keeps these domains
+ *   powered while it runs.
+ * - If firmware may have one of these domains gated when a client first
+ *   reaches the NoC, the driver sends the full aggregate before allowing
+ *   the access, even with power_policy disabled. As with SET_POWER_STATE,
+ *   any flag or setting no client requests is sent as off or minimum,
+ *   TT_POWER_FLAG_MAX_AI_CLK included.
+ * - Raw ARC messages (TENSTORRENT_IOCTL_SMC_MSG) that change power state
+ *   bypass this. Nor does it cover a peer device reaching this device's
+ *   BARs through MAP_PEER_BAR after every local client that set up its TLB
+ *   windows has closed.
  *
  * @argsz: Must be sizeof(struct tenstorrent_power_state).
  * @flags: Reserved for future use, must be 0.

@@ -29,6 +29,7 @@ extern bool power_policy;
 extern uint idle_power_down_grace_ms;
 extern bool fw_logging;
 extern uint fw_log_level;
+extern bool wc_mappings;
 
 extern struct tenstorrent_device_class wormhole_class;
 extern struct tenstorrent_device_class blackhole_class;

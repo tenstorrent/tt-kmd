@@ -64,6 +64,15 @@ MODULE_PARM_DESC(fw_log_level,
 		 "Maximum firmware log level forwarded to the kernel log: "
 		 "1=error, 2=warning, 3=info, 4=debug (default=2).");
 
+bool wc_mappings = true;
+module_param(wc_mappings, bool, 0444);
+MODULE_PARM_DESC(wc_mappings,
+		 "Honor write-combining mmap requests for BARs and TLB windows. "
+		 "When off, the driver maps them uncached instead, so the CPU "
+		 "does not speculatively read through them. On non-x86 hosts "
+		 "those mappings then need naturally aligned accesses "
+		 "(default=on).");
+
 uint idle_power_down_grace_ms = 5000;
 module_param(idle_power_down_grace_ms, uint, 0644);
 MODULE_PARM_DESC(idle_power_down_grace_ms,
@@ -89,6 +98,9 @@ static int __init ttdriver_init(void)
 	int err = 0;
 
 	pr_info("Loading Tenstorrent AI driver module v%s\n", TENSTORRENT_DRIVER_VERSION_STRING);
+
+	if (!wc_mappings)
+		pr_info("Write-combining mappings disabled; WC mmap requests will be mapped uncached\n");
 
 	tt_debugfs_root = debugfs_create_dir("tenstorrent", NULL);
 

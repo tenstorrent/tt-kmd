@@ -25,6 +25,7 @@
 #include "ioctl.h"
 #include "sg_helpers.h"
 #include "tlb.h"
+#include "module.h"
 
 #define BAR0_SIZE (1UL << 29)
 
@@ -1670,6 +1671,25 @@ unlock:
 	return ret;
 }
 
+// Page protection for a write-combining mmap request. With wc_mappings=0
+// the request is mapped uncached instead: the CPU may speculatively read
+// WC memory, and a speculative read of a TLB window aimed at an unmapped
+// NoC address (e.g. the 2M-aligned base below a Tensix register block)
+// never completes, which ends in a PCIe completion timeout and a lost card.
+// The uncached fallback matches the UC path; on arm64 that is Device memory,
+// so userspace must then use naturally aligned accesses.
+// Returns the cache mode actually used so the mapping is recorded truthfully.
+static enum bar_mapping_type vma_set_wc_prot(struct vm_area_struct *vma)
+{
+	if (!wc_mappings) {
+		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
+		return BAR_MAPPING_UC;
+	}
+
+	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+	return BAR_MAPPING_WC;
+}
+
 int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 {
 	struct pci_dev *pdev = priv->device->pdev;
@@ -1686,7 +1706,9 @@ int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 	// device using the mapping offset to determine which entity you get.
 	// Each mapping must be contained within a single entity.
 	// - PCI BAR 0/2/4 uncacheable mapping
-	// - PCI BAR 0/2/4 write-combining mapping
+	// - PCI BAR 0/2/4 write-combining mapping (uncached if !wc_mappings)
+	// - TLB window uncacheable mapping
+	// - TLB window write-combining mapping (uncached if !wc_mappings)
 	// - DMA buffer mapping
 
 	if (vma_target_range(vma, MMAP_OFFSET_RESOURCE0_UC, pci_resource_len(pdev, 0))) {
@@ -1694,32 +1716,28 @@ int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma)
 		return map_pci_bar(priv, vma, 0, BAR_MAPPING_UC);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE0_WC, pci_resource_len(pdev, 0))) {
-		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-		return map_pci_bar(priv, vma, 0, BAR_MAPPING_WC);
+		return map_pci_bar(priv, vma, 0, vma_set_wc_prot(vma));
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE1_UC, pci_resource_len(pdev, 2))) {
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
 		return map_pci_bar(priv, vma, 2, BAR_MAPPING_UC);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE1_WC, pci_resource_len(pdev, 2))) {
-		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-		return map_pci_bar(priv, vma, 2, BAR_MAPPING_WC);
+		return map_pci_bar(priv, vma, 2, vma_set_wc_prot(vma));
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE2_UC, pci_resource_len(pdev, 4))) {
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
 		return map_pci_bar(priv, vma, 4, BAR_MAPPING_UC);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_RESOURCE2_WC, pci_resource_len(pdev, 4))) {
-		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-		return map_pci_bar(priv, vma, 4, BAR_MAPPING_WC);
+		return map_pci_bar(priv, vma, 4, vma_set_wc_prot(vma));
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_TLB_UC, MMAP_RESOURCE_SIZE)) {
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
 		return map_tlb_window(priv, vma, BAR_MAPPING_UC);
 
 	} else if (vma_target_range(vma, MMAP_OFFSET_TLB_WC, MMAP_RESOURCE_SIZE)) {
-		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-		return map_tlb_window(priv, vma, BAR_MAPPING_WC);
+		return map_tlb_window(priv, vma, vma_set_wc_prot(vma));
 
 	} else {
 		struct dmabuf *dmabuf = vma_dmabuf_target(priv, vma);

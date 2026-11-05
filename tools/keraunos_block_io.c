@@ -18,6 +18,7 @@
 //   ./keraunos_block_io <device_id>                          # test suite
 //   ./keraunos_block_io <device_id> bench [spa] [len]        # write/read timing
 //   ./keraunos_block_io <device_id> dump [-k] <addr> <len>   # hexdump a range
+//   ./keraunos_block_io <device_id> l1                       # qsr: Tensix L1 suite
 
 #include <errno.h>
 #include <fcntl.h>
@@ -72,6 +73,11 @@ struct tenstorrent_noc_block_io {
 #define SPM_SPA		UINT64_C(0x1202060000)
 #define SPM_KLA		UINT64_C(0x08060000)
 #define SPM_SIZE	(1u << 20)
+// qsr only: T tile i's 16 MiB window, L1 in its first 4 MiB. Static AppIn0
+// entries 0-31 point at the same SPAs; ttsim leaves 32-63's ATT rows unset.
+#define L1_SPA(i)	(UINT64_C(0x10000000000) + ((uint64_t)(i) << 24))
+#define L1_SIZE		(4u << 20)
+#define NUM_T_TILES	32
 
 static int fd = -1;
 static int failures;
@@ -379,6 +385,40 @@ static void test_partial(void)
 	munmap(p, 2 * 4096);
 }
 
+// Each tile's L1 is distinct memory: write a different pattern into every
+// tile, then read all of them back. Crosses no window, but retargets entry 255
+// on every transfer.
+static void test_l1(void)
+{
+	static uint32_t w[1024], r[1024];
+	unsigned i, bad;
+	uint32_t v;
+	int rc;
+
+	printf("Tensix L1 round trips\n");
+	round_trip("l1 tile0 all", L1_SPA(0), L1_SIZE, 0, 0, 500);
+	round_trip("l1 tile31 tail", L1_SPA(31) + L1_SIZE - 65536, 65536, 0, 4, 501);
+
+	printf("Tensix L1 per-tile isolation\n");
+	for (i = 0; i < NUM_T_TILES; i++) {
+		fill(w, sizeof(w), 600 + i);
+		rc = block_io(1, L1_SPA(i) + 0x1000, w, sizeof(w), 0, NULL);
+		CHECK(rc == 0, "tile %u write: %d", i, rc);
+	}
+	for (i = 0, bad = 0; i < NUM_T_TILES; i++) {
+		fill(w, sizeof(w), 600 + i);
+		rc = block_io(0, L1_SPA(i) + 0x1000, r, sizeof(r), 0, NULL);
+		if (rc || memcmp(w, r, sizeof(w))) {
+			printf("  tile %u: rc=%d mismatch\n", i, rc);
+			bad++;
+		}
+		// The scalar path reaches the same memory.
+		rc = scalar(0, L1_SPA(i) + 0x1000 + 4 * 17, 0, &v);
+		CHECK(rc == 0 && v == w[17], "tile %u scalar read: rc=%d 0x%x != 0x%x", i, rc, v, w[17]);
+	}
+	CHECK(bad == 0, "%u tiles read back wrong data", bad);
+}
+
 static void bench(uint64_t addr, uint32_t len)
 {
 	uint8_t *buf = alloc_buf(len);
@@ -418,7 +458,7 @@ int main(int argc, char **argv)
 	char path[64];
 
 	if (argc < 2) {
-		fprintf(stderr, "usage: %s <device_id> [bench [spa] [len] | dump [-k] <addr> <len>]\n", argv[0]);
+		fprintf(stderr, "usage: %s <device_id> [bench [spa] [len] | dump [-k] <addr> <len> | l1]\n", argv[0]);
 		return 2;
 	}
 	snprintf(path, sizeof(path), "/dev/tenstorrent/%s", argv[1]);
@@ -445,6 +485,12 @@ int main(int argc, char **argv)
 		dump(strtoull(argv[3 + k], NULL, 0), strtoul(argv[4 + k], NULL, 0),
 		     k ? TENSTORRENT_NOC_FLAG_KLA : 0);
 		return 0;
+	}
+
+	if (argc >= 3 && !strcmp(argv[2], "l1")) {
+		test_l1();
+		printf("%d passed, %d failed\n", passes, failures);
+		return failures ? 1 : 0;
 	}
 
 	test_validation();

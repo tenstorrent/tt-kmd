@@ -400,6 +400,10 @@ long ioctl_query_mappings(struct chardev_private *priv,
 	memset(mappings, 0, sizeof(mappings));
 	next_mapping = mappings;
 
+	// Don't advertise what map_pci_bar() would refuse.
+	if (priv->device->dev_class->no_bar_mmap)
+		goto out;
+
 	resource_len = pci_resource_len(priv->device->pdev, 0);
 	if (resource_len > 0) {
 		next_mapping->mapping_id = TENSTORRENT_MAPPING_RESOURCE0_UC;
@@ -439,6 +443,7 @@ long ioctl_query_mappings(struct chardev_private *priv,
 		next_mapping++;
 	}
 
+out:
 	valid_mappings = next_mapping - mappings;
 
 	valid_mappings_to_copy = min(in.output_mapping_count, valid_mappings);
@@ -1533,10 +1538,11 @@ static int map_pci_bar(struct chardev_private *priv, struct vm_area_struct *vma,
 	struct tenstorrent_mmap_vma *mmap_vma;
 	int ret;
 
-	// Keraunos BAR2 is kernel-internal: the driver splits it into UC and WC
-	// mappings that a user mapping could alias with the wrong attribute,
-	// and the layout is not described by QUERY_MAPPINGS. Use the ioctls.
-	if (bar == 2 && priv->device->dev_class == &keraunos_class)
+	// Some classes keep kernel-owned apertures in their BARs: windows the
+	// driver retargets at arbitrary addresses, and mappings with a cache
+	// attribute a user mapping would alias. Userspace goes through the
+	// ioctls (and, later, driver-managed mappings) instead.
+	if (priv->device->dev_class->no_bar_mmap)
 		return -EPERM;
 
 	mmap_vma = kzalloc(sizeof(*mmap_vma), GFP_KERNEL);

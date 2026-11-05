@@ -110,6 +110,9 @@ struct tenstorrent_device_class {
 	u32 tlb_kinds;
 	u32 tlb_counts[MAX_TLB_KINDS];
 	u64 tlb_sizes[MAX_TLB_KINDS];
+	// Refuse raw BAR mmaps and omit them from QUERY_MAPPINGS. Set by classes
+	// whose BARs hold kernel-owned apertures that userspace must not alias.
+	bool no_bar_mmap;
 	bool (*reset)(struct tenstorrent_device *ttdev, u32 reset_flag);
 	bool (*init_device)(struct tenstorrent_device *ttdev);
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);

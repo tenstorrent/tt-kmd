@@ -633,6 +633,10 @@ struct tenstorrent_device_class keraunos_class = {
 	.instance_size = sizeof(struct keraunos_device),
 	.coherent_dma_bits = 44,
 	.streaming_dma_bits = 44,
+	// BAR0 holds the kernel's AppIn0 apertures and BAR2 the TLB config
+	// plane, so a raw BAR mapping could write wherever the kernel last
+	// pointed a window, or retarget any window outright.
+	.no_bar_mmap = true,
 	.init_device = keraunos_init,
 	.init_hardware = keraunos_init_hardware,
 	.save_reset_state = keraunos_save_reset_state,

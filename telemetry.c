@@ -251,6 +251,7 @@ ssize_t tt_sysfs_show_card_type(struct device *dev, struct device_attribute *att
 	case 0x45: card_name = "p300a"; break;
 	case 0x46: card_name = "p300c"; break;
 	case 0x47: card_name = "galaxy-blackhole"; break;
+	case 0x202: card_name = "galaxy-blackhole"; break;
 	default: card_name = "unknown"; break;
 	}
 

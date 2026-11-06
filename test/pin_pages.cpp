@@ -10,6 +10,8 @@
 // Verify that pin pages can pin multiple pages if they are contiguous.
 // Verify that pin pages can pin discontiguous memory if and only if IOMMU is enabled.
 // Verify that pin pages rejects a duplicate pin of the same range, including concurrent pins.
+// Verify that TENSTORRENT_PIN_PAGES_NO_PRIVATE_FILE rejects a range with any private file mapping with EXDEV,
+// and accepts anonymous, shared file, and private hugetlb mappings.
 
 #include <atomic>
 #include <iostream>
@@ -479,6 +481,74 @@ void VerifyPinPagesDuplicateRace(const EnumeratedDevice &dev)
     }
 }
 
+
+// Private file mappings are refused with the flag and pinned without it.
+// Shared file, anonymous and private hugetlb mappings are pinned with it.
+void VerifyPinPagesNoPrivateFile(const EnumeratedDevice &dev)
+{
+    static const unsigned int flags = TENSTORRENT_PIN_PAGES_CONTIGUOUS | TENSTORRENT_PIN_PAGES_NO_PRIVATE_FILE;
+    auto page_size = getpagesize();
+
+    int shm_fd = make_shared_mem();
+    if (ftruncate(shm_fd, page_size))
+        throw_system_error("failed to resize shared memory object.");
+
+    void *m = mmap(nullptr, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, shm_fd, 0);
+    if (m == MAP_FAILED)
+        throw_system_error("private file mapping failed.");
+    std::unique_ptr<void, Unmapper> private_file(m, Unmapper{1});
+
+    m = mmap(nullptr, page_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (m == MAP_FAILED)
+        throw_system_error("shared file mapping failed.");
+    std::unique_ptr<void, Unmapper> shared_file(m, Unmapper{1});
+
+    // An anonymous page followed by a private file page.
+    m = mmap(nullptr, 2 * page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (m == MAP_FAILED)
+        throw_system_error("mixed mapping failed.");
+    std::unique_ptr<unsigned char, Unmapper> mixed(static_cast<unsigned char*>(m), Unmapper{2});
+
+    if (mmap(mixed.get() + page_size, page_size, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE, shm_fd, 0) == MAP_FAILED)
+        throw_system_error("private file mapping over anonymous mapping failed.");
+
+    close(shm_fd);
+
+    DevFd dev_fd(dev.path);
+
+    int error = PinRange(dev_fd, private_file.get(), page_size, flags);
+    if (error != EXDEV)
+        THROW_TEST_FAILURE(std::string("PIN_PAGES of a private file mapping returned ") + std::strerror(error)
+                           + " instead of EXDEV.");
+
+    error = PinRange(dev_fd, mixed.get(), 2 * page_size, flags);
+    if (error != EXDEV)
+        THROW_TEST_FAILURE(std::string("PIN_PAGES of a partly private file mapping returned ") + std::strerror(error)
+                           + " instead of EXDEV.");
+
+    if (PinRange(dev_fd, private_file.get(), page_size, TENSTORRENT_PIN_PAGES_CONTIGUOUS) != 0)
+        THROW_TEST_FAILURE("PIN_PAGES without NO_PRIVATE_FILE failed on a private file mapping.");
+
+    if (PinRange(dev_fd, shared_file.get(), page_size, flags) != 0)
+        THROW_TEST_FAILURE("PIN_PAGES with NO_PRIVATE_FILE failed on a shared file mapping.");
+
+    if (PinRange(dev_fd, mixed.get(), page_size, flags) != 0)
+        THROW_TEST_FAILURE("PIN_PAGES with NO_PRIVATE_FILE failed on an anonymous mapping.");
+
+    // MAP_HUGETLB has a vm_file but its pages are anonymous.
+    static const std::size_t huge_size = 2 << 20;
+    m = mmap(nullptr, huge_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+    if (m == MAP_FAILED)
+    {
+        std::cout << "No 2MB huge pages available, private hugetlb part of VerifyPinPagesNoPrivateFile skipped.\n";
+        return;
+    }
+    std::unique_ptr<void, Unmapper> huge(m, Unmapper{huge_size / page_size});
+
+    if (PinRange(dev_fd, huge.get(), huge_size, flags) != 0)
+        THROW_TEST_FAILURE("PIN_PAGES with NO_PRIVATE_FILE failed on a private hugetlb mapping.");
+}
+
 }
 
 void VerifyUnpinPagesSimple(const EnumeratedDevice &dev)
@@ -574,4 +644,5 @@ void TestPinPages(const EnumeratedDevice &dev)
     VerifyUnpinPagesBadSize(dev);
     VerifyPinPagesDuplicate(dev);
     VerifyPinPagesDuplicateRace(dev);
+    VerifyPinPagesNoPrivateFile(dev);
 }

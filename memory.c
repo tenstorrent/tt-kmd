@@ -10,6 +10,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/version.h>
 #include <linux/mm.h>
+#include <linux/hugetlb.h>
 
 #include <linux/iommu.h>
 #include <linux/file.h>
@@ -34,6 +35,13 @@
 #if LINUX_VERSION_CODE < KERNEL_VERSION(7, 1, 0)
 #define zap_special_vma_range(vma, addr, size) zap_vma_ptes(vma, addr, size)
 #define dma_buf_invalidate_mappings(dmabuf) dma_buf_move_notify(dmabuf)
+#endif
+
+// Compatibility for kernels < 5.8 (mmap_sem vs mmap_lock)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+#define mmap_read_lock(mm)       down_read(&(mm)->mmap_sem)
+#define mmap_read_lock_killable(mm) down_read_killable(&(mm)->mmap_sem)
+#define mmap_read_unlock(mm)     up_read(&(mm)->mmap_sem)
 #endif
 
 static int get_sorted_iatu_region_indices(const struct tenstorrent_outbound_iatu_region *regions, int *sorted_indices)
@@ -197,6 +205,33 @@ static int setup_noc_dma(struct chardev_private *priv, bool top_down, size_t siz
 
 	mutex_unlock(&tt_dev->iatu_mutex);
 	return iatu_region;
+}
+
+// GUP copies the pages of a private file mapping into anonymous memory
+// before it pins them.  With PMD-mapped page cache, a FOLL_LONGTERM R/O pin
+// can loop forever (unshare drops the PMD, the read fault reinstalls it).
+// The test is is_cow_mapping(), which gup_must_unshare() uses, open-coded
+// for older kernels.  Anonymous VMAs (e.g. private /dev/zero) and hugetlb
+// VMAs (MAP_HUGETLB has a vm_file but anonymous pages) are not refused.
+// Pages already copied by an earlier write are refused all the same.
+static int check_no_private_file_mapping(struct mm_struct *mm, unsigned long start, unsigned long end)
+{
+	struct vm_area_struct *vma;
+	int ret = 0;
+
+	if (mmap_read_lock_killable(mm))
+		return -EINTR;
+
+	for (vma = find_vma(mm, start); vma && vma->vm_start < end; vma = find_vma(mm, vma->vm_end)) {
+		if (vma->vm_file && !vma_is_anonymous(vma) && !is_vm_hugetlb_page(vma) &&
+		    (vma->vm_flags & (VM_SHARED | VM_MAYWRITE)) == VM_MAYWRITE) {
+			ret = -EXDEV;
+			break;
+		}
+	}
+
+	mmap_read_unlock(mm);
+	return ret;
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
@@ -609,7 +644,8 @@ long ioctl_pin_pages(struct chardev_private *priv,
 		     struct tenstorrent_pin_pages __user *arg)
 {
 	const u32 valid_flags = TENSTORRENT_PIN_PAGES_CONTIGUOUS | TENSTORRENT_PIN_PAGES_NOC_DMA |
-				TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN | TENSTORRENT_PIN_PAGES_READ_ONLY;
+				TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN | TENSTORRENT_PIN_PAGES_READ_ONLY |
+				TENSTORRENT_PIN_PAGES_NO_PRIVATE_FILE;
 	unsigned long nr_pages;
 	struct page **pages;
 	int pages_pinned;
@@ -622,6 +658,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	bool noc_dma = false;
 	bool top_down = false;
 	bool read_only = false;
+	bool no_private_file = false;
 	bool duplicate;
 	unsigned int gup_flags;
 	enum dma_data_direction dir;
@@ -649,6 +686,7 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	noc_dma = in.flags & (TENSTORRENT_PIN_PAGES_NOC_DMA | TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN);
 	top_down = in.flags & TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN;
 	read_only = in.flags & TENSTORRENT_PIN_PAGES_READ_ONLY;
+	no_private_file = in.flags & TENSTORRENT_PIN_PAGES_NO_PRIVATE_FILE;
 
 	if (read_only && !is_iommu_translated(&priv->device->pdev->dev))
 		return -EOPNOTSUPP;
@@ -673,10 +711,19 @@ long ioctl_pin_pages(struct chardev_private *priv,
 	// and, because the rwsem is writer-fair, every ioctl, open() and close()
 	// queued behind them.  Drop it for the pin and reacquire before touching
 	// the device, so the caller's matching up_read in tt_cdev_ioctl stays
-	// balanced.
+	// balanced.  The VMA check is here too: mmap_lock can wait behind a
+	// writer.  The range can change between the check and the pin, but only
+	// by the caller's own threads.
 	up_read(&priv->device->reset_rwsem);
-	pages_pinned = pin_user_pages_fast_longterm(in.virtual_address, nr_pages, gup_flags, pages);
+	ret = 0;
+	if (no_private_file)
+		ret = check_no_private_file_mapping(current->mm, in.virtual_address, in.virtual_address + in.size);
+	if (ret == 0)
+		pages_pinned = pin_user_pages_fast_longterm(in.virtual_address, nr_pages, gup_flags, pages);
 	down_read(&priv->device->reset_rwsem);
+
+	if (ret)
+		goto err_vfree_pages;
 
 	if (pages_pinned < 0) {
 		dev_warn(&priv->device->pdev->dev, "pin_user_pages_longterm failed: %d\n", pages_pinned);
@@ -1763,11 +1810,6 @@ void tenstorrent_memory_cleanup(struct chardev_private *priv)
 	mutex_unlock(&priv->mutex);
 }
 
-// Compatibility for kernels < 5.8 (mmap_sem vs mmap_lock)
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
-#define mmap_read_lock(mm)       down_read(&(mm)->mmap_sem)
-#define mmap_read_unlock(mm)     up_read(&(mm)->mmap_sem)
-#endif
 // Zap all TLB and BAR mappings for this device, to prevent userspace from
 // accessing device memory after the device has been reset.
 void tenstorrent_vma_zap(struct tenstorrent_device *tt_dev)

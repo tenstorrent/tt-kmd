@@ -33,6 +33,9 @@
 #define TENSTORRENT_IOCTL_NOC_WRITE		_IO(TENSTORRENT_IOCTL_MAGIC, 19)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
+// The *_WC mappings (and allocate_tlb's mmap_offset_wc) are mapped uncached
+// instead when the driver is loaded with wc_mappings=0. On non-x86 hosts,
+// accesses through them must then be naturally aligned.
 #define TENSTORRENT_MAPPING_UNUSED		0
 #define TENSTORRENT_MAPPING_RESOURCE0_UC	1
 #define TENSTORRENT_MAPPING_RESOURCE0_WC	2

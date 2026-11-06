@@ -252,7 +252,13 @@ static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsig
 	if (vmas == NULL)
 		return -ENOMEM;
 
+	// Unlike the _fast variant, this requires the caller to hold mmap_lock.
+	if (mmap_read_lock_killable(current->mm)) {
+		kvfree(vmas);
+		return -EINTR;
+	}
 	ret = pin_user_pages(start, nr_pages, gup_flags | FOLL_LONGTERM, pages, vmas);
+	mmap_read_unlock(current->mm);
 
 	kvfree(vmas);
 	return ret;
@@ -269,7 +275,13 @@ static int pin_user_pages_fast_longterm(unsigned long start, int nr_pages, unsig
 	if (vmas == NULL)
 		return -ENOMEM;
 
+	// Unlike the _fast variant, this requires the caller to hold mmap_lock.
+	if (mmap_read_lock_killable(current->mm)) {
+		kvfree(vmas);
+		return -EINTR;
+	}
 	ret = get_user_pages(start, nr_pages, gup_flags | FOLL_LONGTERM, pages, vmas);
+	mmap_read_unlock(current->mm);
 
 	kvfree(vmas);
 	return ret;

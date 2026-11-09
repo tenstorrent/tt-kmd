@@ -8,7 +8,6 @@
 #include <linux/device.h>
 #include <linux/pci.h>
 #include <linux/cdev.h>
-#include <linux/reboot.h>
 #include <linux/refcount.h>
 #include <linux/rwsem.h>
 #include <linux/wait.h>
@@ -56,8 +55,6 @@ struct tenstorrent_device {
 	struct mutex chardev_mutex;
 	bool chardev_excl_held;	// An O_EXCL fd is currently open
 	wait_queue_head_t chardev_excl_waitqueue;
-
-	struct notifier_block reboot_notifier;
 
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
 	wait_queue_head_t resource_lock_waitqueue;
@@ -121,9 +118,10 @@ struct tenstorrent_device_class {
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);
 	bool (*init_telemetry)(struct tenstorrent_device *ttdev);
 	void (*cleanup_telemetry)(struct tenstorrent_device *ttdev);
+	// Tell firmware the driver is going away.  Called by suspend and remove
+	// with interrupts disabled, and only on a device that is reachable.
 	void (*cleanup_hardware)(struct tenstorrent_device *ttdev);
 	void (*cleanup_device)(struct tenstorrent_device *ttdev);
-	void (*reboot)(struct tenstorrent_device *ttdev);
 	int (*configure_tlb)(struct tenstorrent_device *ttdev, int tlb, struct tenstorrent_noc_tlb_config *config);
 	int (*describe_tlb)(struct tenstorrent_device *ttdev, int tlb, struct tlb_descriptor *tlb_desc);
 	void (*save_reset_state)(struct tenstorrent_device *ttdev);

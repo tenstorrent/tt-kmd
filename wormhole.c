@@ -800,8 +800,7 @@ static void wormhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
 static void wormhole_cleanup_hardware(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
-	if (!tt_dev->detached)
-		wormhole_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
+	wormhole_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
 }
 
 static void wormhole_cleanup(struct tenstorrent_device *tt_dev) {
@@ -1133,7 +1132,6 @@ struct tenstorrent_device_class wormhole_class = {
 	.probe_telemetry = wormhole_probe_telemetry,
 	.cleanup_hardware = wormhole_cleanup_hardware,
 	.cleanup_device = wormhole_cleanup,
-	.reboot = wormhole_cleanup_hardware,
 	.configure_tlb = wormhole_configure_tlb,
 	.describe_tlb = wormhole_describe_tlb,
 	.save_reset_state = wormhole_save_reset_state,

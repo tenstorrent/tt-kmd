@@ -802,13 +802,10 @@ static void blackhole_cleanup_hardware(struct tenstorrent_device *tt_dev)
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	struct arc_msg msg = { 0 };
 
-	if (tt_dev->detached)
-		return;
-
 	// Suspend retains the DMA allocation and reuses it at resume. IRQs were
-	// disabled by the common suspend path, so drain any batch that was queued
-	// before firmware is told to stop; otherwise it could run concurrently
-	// with fw_log_setup() clearing and reinitializing the shared buffer.
+	// disabled by the caller, so drain any batch that was queued before
+	// firmware is told to stop; otherwise it could run concurrently with
+	// fw_log_setup() clearing and reinitializing the shared buffer.
 	fw_log_quiesce(&tt_dev->fw_log);
 
 	// Tell firmware to stop writing the shared log buffer while the device

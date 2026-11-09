@@ -254,16 +254,6 @@ int pids_proc_show(struct seq_file *s, void *v)
 	return 0;
 }
 
-static int tenstorrent_reboot_notifier(struct notifier_block *nb,
-				       unsigned long action, void *data) {
-	struct tenstorrent_device *tt_dev = container_of(nb, struct tenstorrent_device, reboot_notifier);
-
-	if (action != SYS_POWER_OFF)
-		tt_dev->dev_class->reboot(tt_dev);
-
-	return NOTIFY_DONE;
-}
-
 static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	struct tenstorrent_device *tt_dev = NULL;
@@ -387,11 +377,6 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	tenstorrent_register_device(tt_dev);
 
-	if (device_class->reboot) {
-		tt_dev->reboot_notifier.notifier_call = tenstorrent_reboot_notifier;
-		register_reboot_notifier(&tt_dev->reboot_notifier);
-	}
-
 	if (!tt_dev->needs_hw_init)
 		device_class->init_telemetry(tt_dev);
 
@@ -457,22 +442,25 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	tt_telemetry_cleanup(tt_dev);
 	tenstorrent_unregister_device(tt_dev);
 
-	// In a hotplug scenario, the device may not be accessible anymore. Check
-	// if it is still accessible by reading the vendor ID. If it is not, skip
-	// cleanup_hardware (which requires device access).
-	pci_read_config_word(dev, PCI_VENDOR_ID, &vendor_id);
-	if (vendor_id != U16_MAX)
-		tt_dev->dev_class->cleanup_hardware(tt_dev);
-
-	// Disable interrupts before cleanup_device(). A device-class interrupt
-	// handler may schedule work and cleanup_device() then cancels that work
-	// and frees the buffer it touches. free_irq() waits for in-flight handlers
-	// but does not flush already-scheduled work, so it must run before the drain
-	// otherwise a late interrupt could re-schedule log_work after
-	// cancel_work_sync().
+	// Quiesce the hardware.  Remove is the only thing still using it, so no
+	// lock is needed from here on.
+	//
+	// Interrupts go first, as in suspend: a device-class interrupt handler
+	// may schedule work, which cleanup_hardware() and cleanup_device() drain.
+	// free_irq() waits for in-flight handlers, so no interrupt can schedule
+	// more work behind those drains.
 	tenstorrent_disable_interrupts(tt_dev);
 
-	// Nothing else can reach the BARs any more, so no lock is needed.
+	// Tell firmware to stop, unless it cannot hear us.  A device that is
+	// mid-reset (needs_hw_init) has not been reinitialized, and where reset
+	// is seen as a hotplug event that is why we are here.  A device that has
+	// dropped off the bus reads back all-ones.  Neither should be sent
+	// messages; any other device must be, or its firmware carries on doing
+	// DMA into memory that is about to be freed.
+	pci_read_config_word(dev, PCI_VENDOR_ID, &vendor_id);
+	if (!tt_dev->needs_hw_init && vendor_id != U16_MAX)
+		tt_dev->dev_class->cleanup_hardware(tt_dev);
+
 	tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
 
 	mutex_lock(&tt_dev->chardev_mutex);
@@ -500,9 +488,6 @@ void tt_dev_release(struct device *dev)
 {
 	struct tenstorrent_device *tt_dev = container_of(dev, struct tenstorrent_device, dev);
 	struct pci_dev *pdev = tt_dev->pdev;
-
-	if (tt_dev->dev_class->reboot)
-		unregister_reboot_notifier(&tt_dev->reboot_notifier);
 
 	pci_dev_put(pdev);
 	kfree(tt_dev);

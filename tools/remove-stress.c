@@ -45,6 +45,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -160,6 +161,7 @@ struct worker {
     void (*fn)(struct worker *);
     bool enabled;
     pthread_t thread;
+    atomic_int tid;
     atomic_ulong beat;     // bumped on every iteration; watched for hangs
     atomic_ulong ok;       // iterations that did the whole operation
     atomic_ulong dead_fds; // opens that returned an fd for an already-dead device
@@ -654,6 +656,7 @@ static void *worker_main(void *arg)
 {
     struct worker *w = arg;
 
+    atomic_store(&w->tid, syscall(SYS_gettid));
     w->fn(w);
     return NULL;
 }
@@ -764,6 +767,23 @@ static void on_kick(int sig)
     (void)sig;
 }
 
+// Show where in the kernel a stuck worker is blocked.
+static void print_kernel_stack(struct worker *w)
+{
+    char path[64];
+    char line[256];
+    FILE *f;
+
+    snprintf(path, sizeof(path), "/proc/self/task/%d/stack", atomic_load(&w->tid));
+    f = fopen(path, "r");
+    if (!f)
+        return;
+
+    while (fgets(line, sizeof(line), f))
+        printf("    %s", line);
+    fclose(f);
+}
+
 static void check_hangs(void)
 {
     double t = now();
@@ -784,6 +804,7 @@ static void check_hangs(void)
 
         if (t - w->last_beat_time > HANG_SECONDS) {
             printf("  worker %s made no progress for %d s; interrupting it\n", w->name, HANG_SECONDS);
+            print_kernel_stack(w);
             w->hangs++;
             w->last_beat_time = t;
             pthread_kill(w->thread, SIGUSR1);

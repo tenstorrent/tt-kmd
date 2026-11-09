@@ -6,6 +6,7 @@
 
 #include <linux/types.h>
 #include <linux/device.h>
+#include <linux/lockdep.h>
 #include <linux/pci.h>
 #include <linux/cdev.h>
 #include <linux/refcount.h>
@@ -40,7 +41,9 @@ struct tenstorrent_device {
 	// Whoever holds reset_rwsem (either mode) and finds this clear may use
 	// the hardware until they release it.  Once set, entry points from
 	// outside the driver fail with -ENODEV or skip their hardware access;
-	// only remove itself still touches the device.
+	// only remove itself still touches the device.  Read it through
+	// tenstorrent_device_detached(); a lockless READ_ONCE is good only as a
+	// wake-up condition that is rechecked under the lock.
 	bool detached;
 	bool needs_hw_init;
 	atomic_long_t reset_gen; // Generation counter, incremented on reset
@@ -156,5 +159,13 @@ struct tenstorrent_device_class {
 };
 
 void tt_dev_release(struct device *dev);
+
+// Has the device been removed?  If not, the caller may use the hardware for
+// as long as it keeps holding reset_rwsem.
+static inline bool tenstorrent_device_detached(struct tenstorrent_device *tt_dev)
+{
+	lockdep_assert_held(&tt_dev->reset_rwsem);
+	return tt_dev->detached;
+}
 
 #endif

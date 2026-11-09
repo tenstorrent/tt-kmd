@@ -398,11 +398,11 @@ static long acquire_resource_lock_blocking(struct chardev_private *priv, u8 idx)
 	while (!got_bit) {
 		w = wait_event_interruptible(tt_dev->resource_lock_waitqueue,
 			!test_bit(idx, tt_dev->resource_lock) ||
-			tt_dev->detached ||
+			READ_ONCE(tt_dev->detached) ||
 			atomic_long_read(&tt_dev->reset_gen) != priv->open_reset_gen);
 		if (w)
 			break;
-		if (tt_dev->detached ||
+		if (READ_ONCE(tt_dev->detached) ||
 		    atomic_long_read(&tt_dev->reset_gen) != priv->open_reset_gen)
 			break;
 		got_bit = !test_and_set_bit(idx, tt_dev->resource_lock);
@@ -417,7 +417,7 @@ static long acquire_resource_lock_blocking(struct chardev_private *priv, u8 idx)
 	// bit back: the reset is treated as having won against the unlock
 	// that would have made the bit takeable.  The caller never observes
 	// a successful acquire on a fd that is now invalid.
-	if (tt_dev->detached ||
+	if (tenstorrent_device_detached(tt_dev) ||
 	    atomic_long_read(&tt_dev->reset_gen) != priv->open_reset_gen) {
 		if (got_bit) {
 			clear_bit(idx, tt_dev->resource_lock);
@@ -713,10 +713,9 @@ static int tenstorrent_update_power_state_locked(struct tenstorrent_device *tt_d
 {
 	struct tenstorrent_power_state power_state;
 
-	lockdep_assert_held(&tt_dev->reset_rwsem);
 	lockdep_assert_held(&tt_dev->chardev_mutex);
 
-	if (tt_dev->detached || tt_dev->needs_hw_init)
+	if (tenstorrent_device_detached(tt_dev) || tt_dev->needs_hw_init)
 		return 0;
 
 	aggregate_power_state_locked(tt_dev, &power_state);
@@ -892,10 +891,8 @@ long tt_cdev_ioctl_check(struct chardev_private *priv, unsigned int cmd)
 {
 	struct tenstorrent_device *tt_dev = priv->device;
 
-	lockdep_assert_held(&tt_dev->reset_rwsem);
-
 	// File descriptor from a removed/hotplugged device is permanently invalid.
-	if (tt_dev->detached)
+	if (tenstorrent_device_detached(tt_dev))
 		return -ENODEV;
 
 	// File descriptor opened before the reset is permanently invalid.
@@ -1037,7 +1034,7 @@ static int tt_cdev_mmap(struct file *file, struct vm_area_struct *vma)
 	if (!down_read_trylock(&tt_dev->reset_rwsem))
 		return -ENODEV;
 
-	if (tt_dev->detached) {
+	if (tenstorrent_device_detached(tt_dev)) {
 		ret = -ENODEV;
 		goto out;
 	}
@@ -1085,7 +1082,7 @@ static int admit_chardev_open(struct tenstorrent_device *tt_dev, struct chardev_
 		down_read(&tt_dev->reset_rwsem);
 		mutex_lock(&tt_dev->chardev_mutex);
 
-		if (tt_dev->detached) {
+		if (tenstorrent_device_detached(tt_dev)) {
 			ret = -ENODEV;
 			break;
 		}
@@ -1196,7 +1193,7 @@ static void tt_cdev_release_noc_cleanup(struct chardev_private *priv)
 {
 	struct tenstorrent_device *tt_dev = priv->device;
 
-	if (tt_dev->detached || !priv->noc_cleanup.enabled)
+	if (tenstorrent_device_detached(tt_dev) || !priv->noc_cleanup.enabled)
 		return;
 
 	tt_dev->dev_class->noc_write32(tt_dev, priv->noc_cleanup.x, priv->noc_cleanup.y,

@@ -295,7 +295,7 @@ static void teardown_outbound_iatu(struct chardev_private *priv, int iatu_region
 
 	mutex_lock(&tt_dev->iatu_mutex);
 
-	if (!tt_dev->detached)
+	if (!tenstorrent_device_detached(tt_dev))
 		tt_dev->dev_class->configure_outbound_atu(tt_dev, iatu_region, 0, 0, 0);
 
 	release_outbound_iatu_slot(tt_dev, iatu_region);

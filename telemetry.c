@@ -139,7 +139,7 @@ int tt_telemetry_read32(struct tenstorrent_device *tt_dev, u16 tag_id, u32 *valu
 
 	down_read(&tt_dev->reset_rwsem);
 
-	if (tt_dev->detached) {
+	if (tenstorrent_device_detached(tt_dev)) {
 		r = -ENODEV;
 		goto out;
 	}

@@ -469,12 +469,16 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	// Release the DMA memory of the fds that are still open: they may stay
 	// open indefinitely, and their pinnings and buffers must not outlive the
 	// driver's binding to the device.  No fd has joined the list since the
-	// detach; close() can still take one off it, hence chardev_mutex.
+	// detach; close() can still take one off it, hence chardev_mutex.  This
+	// is the cleanup close() does, so it runs under reset_rwsem as close()
+	// does.
+	down_read(&tt_dev->reset_rwsem);
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
 		tenstorrent_memory_cleanup(priv);
 	}
 	mutex_unlock(&tt_dev->chardev_mutex);
+	up_read(&tt_dev->reset_rwsem);
 
 	tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
 

@@ -435,8 +435,11 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	// slip an arm past the cancel and fire its FW message into a
 	// torn-down device.
 	mutex_lock(&tt_dev->chardev_mutex);
-	tt_dev->detached = true;
+	WRITE_ONCE(tt_dev->detached, true);
 	mutex_unlock(&tt_dev->chardev_mutex);
+
+	// Fail any open() waiting for admission; see admit_chardev_open.
+	wake_up_interruptible_all(&tt_dev->chardev_excl_waitqueue);
 
 	cancel_delayed_work_sync(&tt_dev->power_down_work);
 

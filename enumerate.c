@@ -461,13 +461,22 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	if (!tt_dev->needs_hw_init && vendor_id != U16_MAX)
 		tt_dev->dev_class->cleanup_hardware(tt_dev);
 
-	tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
+	// Whatever firmware made of that, the device can issue no more DMA once
+	// bus mastering is off.  Only now is it safe to release the memory it
+	// could reach.
+	pci_clear_master(dev);
 
+	// Release the DMA memory of the fds that are still open: they may stay
+	// open indefinitely, and their pinnings and buffers must not outlive the
+	// driver's binding to the device.  No fd has joined the list since the
+	// detach; close() can still take one off it, hence chardev_mutex.
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
 		tenstorrent_memory_cleanup(priv);
 	}
 	mutex_unlock(&tt_dev->chardev_mutex);
+
+	tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
 
 	pci_disable_pcie_error_reporting(dev);
 	pci_disable_device(dev);

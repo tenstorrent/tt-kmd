@@ -398,8 +398,11 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	debugfs_create_file("mappings", 0444, tt_dev->debugfs_root, tt_dev, &mappings_fops);
 
 	// Set initial low-power state via aggregation logic.
-	if (power_policy)
+	if (power_policy) {
+		down_read(&tt_dev->reset_rwsem);
 		tenstorrent_update_power_state(tt_dev);
+		up_read(&tt_dev->reset_rwsem);
+	}
 
 	return 0;
 
@@ -422,26 +425,37 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	struct chardev_private *priv;
 	u16 vendor_id;
 
-	// Tear down telemetry first.
-	tt_telemetry_cleanup(tt_dev);
-
-	// Fence deferred-powerdown arming before draining.
-	// tenstorrent_update_power_state_locked arms power_down_work under
-	// chardev_mutex only when it observes !detached, so writing
-	// detached=true here under the same mutex partitions concurrent
-	// updates cleanly: any that armed did so strictly before this write
-	// and are drained by the cancel below; any that run after observe
-	// detached and skip the arm.  Without this ordering an update could
-	// slip an arm past the cancel and fire its FW message into a
-	// torn-down device.
-	mutex_lock(&tt_dev->chardev_mutex);
+	// Detach.  Everything that enters the driver from outside holds
+	// reset_rwsem while it works and checks detached under it, so taking it
+	// for write drains whatever is in flight, and setting detached before
+	// releasing it turns away whatever comes next: ioctl, mmap and open fail
+	// with -ENODEV, and close() and telemetry reads stay off the hardware.
+	// Nothing below has to consider a concurrent ioctl or reset.
+	//
+	// While here, revoke what userspace and dma-buf importers already hold:
+	// - power_down_work is armed only with reset_rwsem held and detached
+	//   clear, so after this cancel it can never be armed again.
+	// - No BAR or TLB mapping can be created after the zap.
+	// - Every TLB dma-buf export was created by an ioctl, so the revoke walk
+	//   sees them all and no more can appear.
+	down_write(&tt_dev->reset_rwsem);
 	WRITE_ONCE(tt_dev->detached, true);
-	mutex_unlock(&tt_dev->chardev_mutex);
-
-	// Fail any open() waiting for admission; see admit_chardev_open.
-	wake_up_interruptible_all(&tt_dev->chardev_excl_waitqueue);
-
 	cancel_delayed_work_sync(&tt_dev->power_down_work);
+	tenstorrent_vma_zap(tt_dev);
+	tenstorrent_revoke_tlb_dmabufs(tt_dev);
+	up_write(&tt_dev->reset_rwsem);
+
+	// Waiters in open() and LOCK_CTL ACQUIRE_BLOCKING hold no locks; wake
+	// them so they observe detached and return -ENODEV.
+	wake_up_interruptible_all(&tt_dev->chardev_excl_waitqueue);
+	wake_up_interruptible(&tt_dev->resource_lock_waitqueue);
+
+	// Unpublish.  This must follow the detach: telemetry is re-probed by the
+	// reset ioctl, which could otherwise bring it back after its cleanup.
+	// Telemetry goes before the chardev because its sysfs groups hang off
+	// tt_dev->dev, which tenstorrent_unregister_device deletes.
+	tt_telemetry_cleanup(tt_dev);
+	tenstorrent_unregister_device(tt_dev);
 
 	// In a hotplug scenario, the device may not be accessible anymore. Check
 	// if it is still accessible by reading the vendor ID. If it is not, skip
@@ -458,36 +472,14 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	// cancel_work_sync().
 	tenstorrent_disable_interrupts(tt_dev);
 
-	// Drain in-flight ioctls before BAR unmap.  detached was already
-	// set under chardev_mutex above.
-	down_write(&tt_dev->reset_rwsem);
-	tenstorrent_vma_zap(tt_dev);
+	// Nothing else can reach the BARs any more, so no lock is needed.
 	tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
-	up_write(&tt_dev->reset_rwsem);
-
-	// Revoke all TLB dma-buf exports.  Correctness depends on reset_rwsem:
-	// every export is created by an ioctl holding it shared, and the
-	// detached check at ioctl entry runs under that same hold.  An export
-	// in flight at this point therefore completes its list_add before the
-	// write-side drain above finishes, and this walk sees it.  An export
-	// ioctl arriving after the drain takes the read lock after our
-	// up_write -- an acquire of our release -- so it is guaranteed to
-	// observe detached (written before down_write) and fail at entry
-	// before a dma-buf can be created.  Do not move this call above the
-	// drain, and do not move the detached check outside the rwsem.
-	tenstorrent_revoke_tlb_dmabufs(tt_dev);
-
-	// Wake any LOCK_CTL ACQUIRE_BLOCKING waiters parked on this device so
-	// they observe detached and return -ENODEV instead of waiting forever.
-	wake_up_interruptible(&tt_dev->resource_lock_waitqueue);
 
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
 		tenstorrent_memory_cleanup(priv);
 	}
 	mutex_unlock(&tt_dev->chardev_mutex);
-
-	tenstorrent_unregister_device(tt_dev);
 
 	pci_disable_pcie_error_reporting(dev);
 	pci_disable_device(dev);

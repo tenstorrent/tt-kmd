@@ -655,14 +655,15 @@ static bool is_fw_ready_for_telemetry(struct wormhole_device *wh)
 // firmware readiness, then scans the telemetry tag table. On first init it also
 // registers the sysfs group and hwmon device; on re-probe after reset it just
 // refreshes the tag cache (sysfs/hwmon are already registered).
+//
+// It is scheduled by probe and by the reset ioctl. Remove cancels it only after
+// fencing off ioctls, and before unmapping the BARs, so it never runs on a
+// detached device.
 static void fw_ready_work_func(struct work_struct *work)
 {
 	struct delayed_work *dwork = to_delayed_work(work);
 	struct wormhole_device *wh = container_of(dwork, struct wormhole_device, fw_ready_work);
 	struct tenstorrent_device *tt_dev = &wh->tt;
-
-	if (tt_dev->detached)
-		return;
 
 	if (!is_fw_ready_for_telemetry(wh)) {
 		if (wh->telemetry_retries-- > 0)

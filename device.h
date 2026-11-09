@@ -37,7 +37,12 @@ struct tenstorrent_device {
 	struct cdev chardev;
 	struct pci_dev *pdev;
 	const struct tenstorrent_device_class *dev_class;
-	bool detached; // No longer valid for hardware access
+	// Set once, by tenstorrent_pci_remove, with reset_rwsem held for write.
+	// Whoever holds reset_rwsem (either mode) and finds this clear may use
+	// the hardware until they release it.  Once set, entry points from
+	// outside the driver fail with -ENODEV or skip their hardware access;
+	// only remove itself still touches the device.
+	bool detached;
 	bool needs_hw_init;
 	atomic_long_t reset_gen; // Generation counter, incremented on reset
 	struct rw_semaphore reset_rwsem;
@@ -68,8 +73,8 @@ struct tenstorrent_device {
 	// Deferred idle power-down work.  Armed by
 	// tenstorrent_update_power_state_locked when the fds' vote drops to
 	// idle, dev_class->defer_idle_powerdown is set and
-	// idle_power_down_grace_ms > 0.  Cancelled in suspend and remove so
-	// an in-flight FW message cannot race cleanup_hardware.
+	// idle_power_down_grace_ms > 0.  Cancelled in suspend, reset and remove
+	// so an in-flight FW message cannot race them.
 	struct delayed_work power_down_work;
 
 	DECLARE_BITMAP(tlbs, TENSTORRENT_MAX_INBOUND_TLBS);

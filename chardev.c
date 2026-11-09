@@ -704,14 +704,16 @@ static bool power_state_is_idle(const struct tenstorrent_power_state *power_stat
 // An idle vote is not sent; it arms power_down_work, so a close followed by
 // an open within the grace period never reaches firmware.
 //
-// This is the only place power_down_work is armed.  Arming happens under
-// chardev_mutex and only while !detached, which lets tenstorrent_pci_remove
-// fence it, and every caller holds reset_rwsem shared, which lets the reset
-// ioctl fence it.
+// This is the only place power_down_work is armed.  Every caller holds
+// reset_rwsem shared, and arming happens only while !detached.  Both the reset
+// ioctl and tenstorrent_pci_remove cancel the work with reset_rwsem held for
+// write, so neither can have an arm slip in behind its cancel, and after
+// remove's cancel the work is never armed again.
 static int tenstorrent_update_power_state_locked(struct tenstorrent_device *tt_dev)
 {
 	struct tenstorrent_power_state power_state;
 
+	lockdep_assert_held(&tt_dev->reset_rwsem);
 	lockdep_assert_held(&tt_dev->chardev_mutex);
 
 	if (tt_dev->detached || tt_dev->needs_hw_init)
@@ -745,7 +747,8 @@ int tenstorrent_update_power_state(struct tenstorrent_device *tt_dev)
 
 // Delayed work: power down once the vote has stayed idle for the grace
 // period.  A vote for power cancels this, or, if it raced the cancel, has
-// already been sent, so only send if the vote is still idle.
+// already been sent, so only send if the vote is still idle.  This cannot run
+// on a detached device: see tenstorrent_update_power_state_locked.
 void tenstorrent_power_down_work_func(struct work_struct *work)
 {
 	struct tenstorrent_device *tt_dev = container_of(to_delayed_work(work),
@@ -755,7 +758,7 @@ void tenstorrent_power_down_work_func(struct work_struct *work)
 
 	mutex_lock(&tt_dev->chardev_mutex);
 
-	if (!tt_dev->detached && !tt_dev->needs_hw_init) {
+	if (!tt_dev->needs_hw_init) {
 		aggregate_power_state_locked(tt_dev, &power_state);
 		if (power_state_is_idle(&power_state))
 			tt_dev->dev_class->set_power_state(tt_dev, &power_state);

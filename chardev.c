@@ -1063,46 +1063,78 @@ static struct tenstorrent_device *inode_to_tt_dev(struct inode *inode)
 // cases O_NONBLOCK turns the wait into -EAGAIN.  While an O_EXCL fd is held it
 // is the only fd on the list, so the holder's release is exactly the
 // list_empty transition that wakes both kinds of waiter.
+//
+// The wait itself holds no locks.  Admission is then decided and committed in
+// one step under reset_rwsem (shared) and chardev_mutex, so that an fd joins
+// open_fds_list only on a device that has not been removed, carrying the reset
+// generation that is current as it joins, and with its power vote applied
+// before a reset can intervene.  A removed device fails the open with -ENODEV,
+// including for opens that were already waiting.
 static int admit_chardev_open(struct tenstorrent_device *tt_dev, struct chardev_private *priv, unsigned int f_flags)
 {
 	bool want_excl = f_flags & O_EXCL;
 	bool nonblock = f_flags & O_NONBLOCK;
+	bool power_aware = f_flags & O_APPEND;
+	bool admissible;
 	int ret;
 
-	mutex_lock(&tt_dev->chardev_mutex);
+	for (;;) {
+		down_read(&tt_dev->reset_rwsem);
+		mutex_lock(&tt_dev->chardev_mutex);
 
-	if (want_excl) {
-		// Writer: wait until no other fd is open, then take exclusivity.
-		while (!list_empty(&tt_dev->open_fds_list)) {
-			mutex_unlock(&tt_dev->chardev_mutex);
-			if (nonblock)
-				return -EAGAIN;
+		if (tt_dev->detached) {
+			ret = -ENODEV;
+			break;
+		}
+
+		// Writer: no other fd may be open.  Reader: no O_EXCL fd may be held.
+		if (want_excl)
+			admissible = list_empty(&tt_dev->open_fds_list);
+		else
+			admissible = !tt_dev->chardev_excl_held;
+
+		if (admissible) {
+			if (want_excl)
+				WRITE_ONCE(tt_dev->chardev_excl_held, true);
+
+			priv->open_reset_gen = atomic_long_read(&tt_dev->reset_gen);
+			list_add(&priv->open_fd, &tt_dev->open_fds_list);
+
+			// A power-aware fd votes nothing until it asks, so only a
+			// legacy open changes the vote.
+			if (!power_aware) {
+				ret = tenstorrent_update_power_state_locked(tt_dev);
+				if (ret < 0)
+					dev_warn(&tt_dev->pdev->dev, "Failed to set initial power state: %d\n", ret);
+			}
+
+			ret = 0;
+			break;
+		}
+
+		mutex_unlock(&tt_dev->chardev_mutex);
+		up_read(&tt_dev->reset_rwsem);
+
+		if (nonblock)
+			return -EAGAIN;
+
+		// Writers are registered exclusively so a release wakes one of them;
+		// readers are not, so they all wake together when the holder releases.
+		if (want_excl)
 			ret = wait_event_interruptible_exclusive(tt_dev->chardev_excl_waitqueue,
-								 list_empty(&tt_dev->open_fds_list));
-			if (ret)
-				return ret;
-			mutex_lock(&tt_dev->chardev_mutex);
-		}
-		WRITE_ONCE(tt_dev->chardev_excl_held, true);
-	} else {
-		// Reader: wait until no O_EXCL fd is held.  Registered non-exclusively
-		// so all readers wake together when the holder releases.
-		while (tt_dev->chardev_excl_held) {
-			mutex_unlock(&tt_dev->chardev_mutex);
-			if (nonblock)
-				return -EAGAIN;
+								 list_empty(&tt_dev->open_fds_list) ||
+								 READ_ONCE(tt_dev->detached));
+		else
 			ret = wait_event_interruptible(tt_dev->chardev_excl_waitqueue,
-						       !READ_ONCE(tt_dev->chardev_excl_held));
-			if (ret)
-				return ret;
-			mutex_lock(&tt_dev->chardev_mutex);
-		}
+						       !READ_ONCE(tt_dev->chardev_excl_held) ||
+						       READ_ONCE(tt_dev->detached));
+		if (ret)
+			return ret;
 	}
 
-	list_add(&priv->open_fd, &tt_dev->open_fds_list);
-
 	mutex_unlock(&tt_dev->chardev_mutex);
-	return 0;
+	up_read(&tt_dev->reset_rwsem);
+	return ret;
 }
 
 static int tt_cdev_open(struct inode *inode, struct file *file)
@@ -1132,7 +1164,6 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	// long-lived reference, dropped in tt_cdev_release.
 	get_device(&tt_dev->dev);
 	private_data->device = tt_dev;
-	private_data->open_reset_gen = atomic_long_read(&tt_dev->reset_gen);
 
 	private_data->pid = get_pid(task_pid(current->group_leader));
 	get_task_comm(private_data->comm, current);
@@ -1152,21 +1183,6 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 		put_device(&tt_dev->dev);
 		return ret;
 	}
-
-	// Hold reset_rwsem (shared) so the reset ioctl (which holds it exclusive)
-	// cannot interleave with the power update; see
-	// tenstorrent_update_power_state_locked.
-	down_read(&tt_dev->reset_rwsem);
-
-	// A power-aware fd votes nothing until it asks, so only a legacy open
-	// changes the vote.
-	if (!power_aware) {
-		ret = tenstorrent_update_power_state(tt_dev);
-		if (ret < 0)
-			dev_warn(&tt_dev->pdev->dev, "Failed to set initial power state: %d\n", ret);
-	}
-
-	up_read(&tt_dev->reset_rwsem);
 
 	file->private_data = private_data;
 

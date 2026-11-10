@@ -295,8 +295,9 @@ static void teardown_outbound_iatu(struct chardev_private *priv, int iatu_region
 
 	mutex_lock(&tt_dev->iatu_mutex);
 
-	if (!tt_dev->detached)
-		tt_dev->dev_class->configure_outbound_atu(tt_dev, iatu_region, 0, 0, 0);
+	// Never reached on a detached device: the remove handler leaves no fd
+	// with memory to release.  See tenstorrent_remove_memory_cleanup.
+	tt_dev->dev_class->configure_outbound_atu(tt_dev, iatu_region, 0, 0, 0);
 
 	release_outbound_iatu_slot(tt_dev, iatu_region);
 
@@ -342,6 +343,10 @@ static void forget_outbound_iatus(struct chardev_private *priv)
 // slots until a close() that never comes, and a later close() would disable a
 // slot that a post-reset fd has since claimed, or write to a device that is
 // mid-reset.  The resetting fd is included: its windows no longer translate.
+//
+// The remove handler calls this for a device it cannot reach, so that
+// releasing the fds' memory does not write to it: a reset has left the iATU
+// clear, or the device is absent and cannot do DMA.
 void tenstorrent_forget_iatus(struct tenstorrent_device *tt_dev)
 {
 	struct chardev_private *priv;
@@ -349,6 +354,23 @@ void tenstorrent_forget_iatus(struct tenstorrent_device *tt_dev)
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
 		forget_outbound_iatus(priv);
+	}
+	mutex_unlock(&tt_dev->chardev_mutex);
+}
+
+// Release the DMA memory of every open fd, disabling the outbound iATU regions
+// it holds.  Called by the remove handler with reset_rwsem held for write,
+// once the device can no longer issue DMA.  The fds may stay open
+// indefinitely, and their pinnings and buffers must not outlive the driver's
+// binding to the device.  Each fd is left with no memory for close() to
+// release.
+void tenstorrent_remove_memory_cleanup(struct tenstorrent_device *tt_dev)
+{
+	struct chardev_private *priv;
+
+	mutex_lock(&tt_dev->chardev_mutex);
+	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
+		tenstorrent_memory_cleanup(priv);
 	}
 	mutex_unlock(&tt_dev->chardev_mutex);
 }

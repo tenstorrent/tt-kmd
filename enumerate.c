@@ -254,16 +254,6 @@ int pids_proc_show(struct seq_file *s, void *v)
 	return 0;
 }
 
-static int tenstorrent_reboot_notifier(struct notifier_block *nb,
-				       unsigned long action, void *data) {
-	struct tenstorrent_device *tt_dev = container_of(nb, struct tenstorrent_device, reboot_notifier);
-
-	if (action != SYS_POWER_OFF)
-		tt_dev->dev_class->reboot(tt_dev);
-
-	return NOTIFY_DONE;
-}
-
 static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	struct tenstorrent_device *tt_dev = NULL;
@@ -387,19 +377,17 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 
 	tenstorrent_register_device(tt_dev);
 
-	if (device_class->reboot) {
-		tt_dev->reboot_notifier.notifier_call = tenstorrent_reboot_notifier;
-		register_reboot_notifier(&tt_dev->reboot_notifier);
-	}
-
 	if (!tt_dev->needs_hw_init)
 		device_class->init_telemetry(tt_dev);
 
 	debugfs_create_file("mappings", 0444, tt_dev->debugfs_root, tt_dev, &mappings_fops);
 
 	// Set initial low-power state via aggregation logic.
-	if (power_policy)
+	if (power_policy) {
+		down_read(&tt_dev->reset_rwsem);
 		tenstorrent_update_power_state(tt_dev);
+		up_read(&tt_dev->reset_rwsem);
+	}
 
 	return 0;
 
@@ -419,75 +407,81 @@ fail_init_device:
 static void tenstorrent_pci_remove(struct pci_dev *dev)
 {
 	struct tenstorrent_device *tt_dev = pci_get_drvdata(dev);
-	struct chardev_private *priv;
+	bool reachable;
 	u16 vendor_id;
 
-	// Tear down telemetry first.
-	tt_telemetry_cleanup(tt_dev);
-
-	// Fence deferred-powerdown arming before draining.
-	// tenstorrent_update_power_state_locked arms power_down_work under
-	// chardev_mutex only when it observes !detached, so writing
-	// detached=true here under the same mutex partitions concurrent
-	// updates cleanly: any that armed did so strictly before this write
-	// and are drained by the cancel below; any that run after observe
-	// detached and skip the arm.  Without this ordering an update could
-	// slip an arm past the cancel and fire its FW message into a
-	// torn-down device.
-	mutex_lock(&tt_dev->chardev_mutex);
-	WRITE_ONCE(tt_dev->detached, true);
-	mutex_unlock(&tt_dev->chardev_mutex);
-
-	// Fail any open() waiting for admission; see admit_chardev_open.
-	wake_up_interruptible_all(&tt_dev->chardev_excl_waitqueue);
-
-	cancel_delayed_work_sync(&tt_dev->power_down_work);
-
-	// In a hotplug scenario, the device may not be accessible anymore. Check
-	// if it is still accessible by reading the vendor ID. If it is not, skip
-	// cleanup_hardware (which requires device access).
-	pci_read_config_word(dev, PCI_VENDOR_ID, &vendor_id);
-	if (vendor_id != U16_MAX)
-		tt_dev->dev_class->cleanup_hardware(tt_dev);
-
-	// Disable interrupts before cleanup_device(). A device-class interrupt
-	// handler may schedule work and cleanup_device() then cancels that work
-	// and frees the buffer it touches. free_irq() waits for in-flight handlers
-	// but does not flush already-scheduled work, so it must run before the drain
-	// otherwise a late interrupt could re-schedule log_work after
-	// cancel_work_sync().
-	tenstorrent_disable_interrupts(tt_dev);
-
-	// Drain in-flight ioctls before BAR unmap.  detached was already
-	// set under chardev_mutex above.
+	// Detach.  Everything that enters the driver from outside holds
+	// reset_rwsem while it works and checks detached under it, so taking it
+	// for write drains whatever is in flight, and setting detached before
+	// releasing it turns away whatever comes next: ioctl, mmap and open fail
+	// with -ENODEV, and close() and telemetry reads stay off the hardware.
+	//
+	// Everything that needs the hardware, or that must happen before memory
+	// the device can reach is freed, is done here, before detached is set.
+	// A close() arriving later has no memory left to release, and skips its
+	// NOC cleanup write.
 	down_write(&tt_dev->reset_rwsem);
-	tenstorrent_vma_zap(tt_dev);
-	tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
-	up_write(&tt_dev->reset_rwsem);
 
-	// Revoke all TLB dma-buf exports.  Correctness depends on reset_rwsem:
-	// every export is created by an ioctl holding it shared, and the
-	// detached check at ioctl entry runs under that same hold.  An export
-	// in flight at this point therefore completes its list_add before the
-	// write-side drain above finishes, and this walk sees it.  An export
-	// ioctl arriving after the drain takes the read lock after our
-	// up_write -- an acquire of our release -- so it is guaranteed to
-	// observe detached (written before down_write) and fail at entry
-	// before a dma-buf can be created.  Do not move this call above the
-	// drain, and do not move the detached check outside the rwsem.
+	// Decide, once, whether the hardware can still be reached.  A device
+	// that is mid-reset (needs_hw_init) has not been reinitialized, and where
+	// reset is seen as a hotplug event that is why we are here.  A device
+	// that has dropped off the bus reads back all-ones.  The second check is
+	// only a snapshot, but it is the best available for a surprise removal.
+	pci_read_config_word(dev, PCI_VENDOR_ID, &vendor_id);
+	reachable = !tt_dev->needs_hw_init && vendor_id != U16_MAX;
+
+	// Revoke what userspace and dma-buf importers already hold:
+	// - power_down_work is armed only with reset_rwsem held and detached
+	//   clear, so after this cancel it can never be armed again.
+	// - No BAR or TLB mapping can be created after the zap.
+	// - Every TLB dma-buf export was created by an ioctl, so the revoke walk
+	//   sees them all and no more can appear.
+	cancel_delayed_work_sync(&tt_dev->power_down_work);
+	tenstorrent_vma_zap(tt_dev);
 	tenstorrent_revoke_tlb_dmabufs(tt_dev);
 
-	// Wake any LOCK_CTL ACQUIRE_BLOCKING waiters parked on this device so
-	// they observe detached and return -ENODEV instead of waiting forever.
+	// Quiesce the hardware.  Interrupts go first, as in suspend: a
+	// device-class interrupt handler may schedule work, which
+	// cleanup_hardware() and cleanup_device() drain.  free_irq() waits for
+	// in-flight handlers, so no interrupt can schedule more work behind those
+	// drains.  None of this takes reset_rwsem.
+	tenstorrent_disable_interrupts(tt_dev);
+
+	// Tell firmware to stop, unless it cannot hear us.
+	if (reachable)
+		tt_dev->dev_class->cleanup_hardware(tt_dev);
+
+	// Whatever firmware made of that, the device can issue no more DMA once
+	// bus mastering is off.  Userspace can start device DMA that the driver
+	// has no record of, so only now is it safe to release the memory the
+	// device could reach.
+	pci_clear_master(dev);
+
+	// The open fds' DMA memory and outbound iATU regions.  The regions are
+	// disabled so that a later probe does not inherit windows onto freed
+	// memory.  An unreachable device needs no write: a reset leaves the iATU
+	// clear, and an absent device cannot do DMA.
+	if (!reachable)
+		tenstorrent_forget_iatus(tt_dev);
+	tenstorrent_remove_memory_cleanup(tt_dev);
+
+	WRITE_ONCE(tt_dev->detached, true);
+	up_write(&tt_dev->reset_rwsem);
+
+	// Waiters in open() and LOCK_CTL ACQUIRE_BLOCKING hold no locks; wake
+	// them so they observe detached and return -ENODEV.
+	wake_up_interruptible_all(&tt_dev->chardev_excl_waitqueue);
 	wake_up_interruptible(&tt_dev->resource_lock_waitqueue);
 
-	mutex_lock(&tt_dev->chardev_mutex);
-	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
-		tenstorrent_memory_cleanup(priv);
-	}
-	mutex_unlock(&tt_dev->chardev_mutex);
-
+	// Unpublish.  This must follow the detach: telemetry is re-probed by the
+	// reset ioctl, which could otherwise bring it back after its cleanup.
+	// Telemetry goes before the chardev because its sysfs groups hang off
+	// tt_dev->dev, which tenstorrent_unregister_device deletes.
+	tt_telemetry_cleanup(tt_dev);
 	tenstorrent_unregister_device(tt_dev);
+
+	// Nothing else can reach the BARs any more, so no lock is needed.
+	tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
 
 	pci_disable_pcie_error_reporting(dev);
 	pci_disable_device(dev);
@@ -508,9 +502,6 @@ void tt_dev_release(struct device *dev)
 {
 	struct tenstorrent_device *tt_dev = container_of(dev, struct tenstorrent_device, dev);
 	struct pci_dev *pdev = tt_dev->pdev;
-
-	if (tt_dev->dev_class->reboot)
-		unregister_reboot_notifier(&tt_dev->reboot_notifier);
 
 	pci_dev_put(pdev);
 	kfree(tt_dev);

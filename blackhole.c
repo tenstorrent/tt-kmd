@@ -10,6 +10,7 @@
 #include <linux/jiffies.h>
 #include <linux/delay.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
+#include <linux/log2.h>
 
 #include "blackhole.h"
 #include "pcie.h"
@@ -52,6 +53,12 @@
 
 // this points to outbound NOC_TLB_62 configured by CMFW
 #define PCIE_DBI_ADDR 0xF800000000000000ULL
+
+// Vector 0 stays with firmware (ARC); the rest let other sources such as the
+// DMA engine raise their own interrupts.
+#define MSI_VECTOR_COUNT 2
+// Multiple Message Capable, within the MSI capability's first dword.
+#define DBI_MSI_MULTIPLE_MESSAGE_CAPABLE ((u32)PCI_MSI_FLAGS_QMASK << 16)
 
 // ARC owns telemetry
 #define ARC_X 8
@@ -356,6 +363,25 @@ static bool blackhole_detect_pcie_noc_x(struct blackhole_device *bh, u32 *noc_x)
 	return (*noc_x == 2 || *noc_x == 11);
 }
 
+// The device advertises one MSI vector after every reset, and that field is
+// read-only from host config space, so raise it through DBI.
+static bool blackhole_set_msi_capability(struct blackhole_device *bh, u32 x)
+{
+	u8 msi_cap = bh->tt.pdev->msi_cap;
+	u64 addr = PCIE_DBI_ADDR + msi_cap;
+	u32 cap;
+
+	// A failed read would write garbage over the capability header.
+	if (!msi_cap || blackhole_noc_read(&bh->tt, x, 0, addr, &cap, sizeof(cap), 0) != 0 ||
+	    (cap & 0xFF) != PCI_CAP_ID_MSI)
+		return false;
+
+	cap &= ~DBI_MSI_MULTIPLE_MESSAGE_CAPABLE;
+	cap |= FIELD_PREP(DBI_MSI_MULTIPLE_MESSAGE_CAPABLE, ilog2(MSI_VECTOR_COUNT));
+	noc_write32(bh, x, 0, addr, cap, 0);
+	return true;
+}
+
 static void blackhole_save_reset_state(struct tenstorrent_device *tt_dev) {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 	u32 x;
@@ -382,6 +408,20 @@ static void blackhole_restore_reset_state(struct tenstorrent_device *tt_dev) {
 	device_control &= ~PCI_EXP_DEVCTL_PAYLOAD;
 	device_control |= FIELD_PREP(PCI_EXP_DEVCTL_PAYLOAD, bh->saved_mps);
 	noc_write32(bh, x, y, PCIE_DBI_ADDR + DBI_DEVICE_CONTROL_DEVICE_STATUS, device_control, 0);
+
+	// Reset reverts the capability while the host keeps the vectors it granted.
+	blackhole_set_msi_capability(bh, x);
+}
+
+static unsigned int blackhole_prepare_msi_vectors(struct tenstorrent_device *tt_dev)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+	u32 x;
+
+	if (!blackhole_detect_pcie_noc_x(bh, &x))
+		return 1;
+
+	return blackhole_set_msi_capability(bh, x) ? MSI_VECTOR_COUNT : 1;
 }
 
 static ssize_t bh_show_pcie_single_counter(struct device *dev, char *buf, u32 counter_offset, int noc)
@@ -956,6 +996,7 @@ struct tenstorrent_device_class blackhole_class = {
 	.configure_outbound_atu = blackhole_configure_outbound_atu,
 	.noc_write32 = blackhole_noc_write32,
 	.interrupt = blackhole_interrupt,
+	.prepare_msi_vectors = blackhole_prepare_msi_vectors,
 	.noc_read = blackhole_noc_read,
 	.noc_write = blackhole_noc_write,
 	.csm_read32 = blackhole_csm_read32,

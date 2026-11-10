@@ -310,27 +310,27 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
 		tenstorrent_reset_reclaim_tlbs(tt_dev);
-		tenstorrent_reset_reclaim_iatus(tt_dev);
+		tenstorrent_forget_iatus(tt_dev);
 		ok = pcie_timer_interrupt(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_USER_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
 		tenstorrent_reset_reclaim_tlbs(tt_dev);
-		tenstorrent_reset_reclaim_iatus(tt_dev);
+		tenstorrent_forget_iatus(tt_dev);
 		ok = set_reset_marker(pdev);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
 		tenstorrent_reset_reclaim_tlbs(tt_dev);
-		tenstorrent_reset_reclaim_iatus(tt_dev);
+		tenstorrent_forget_iatus(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
 		tenstorrent_reset_reclaim_tlbs(tt_dev);
-		tenstorrent_reset_reclaim_iatus(tt_dev);
+		tenstorrent_forget_iatus(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {
@@ -1189,11 +1189,13 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
+// Perform the fd's registered NOC write, unless the device is gone or is
+// mid-reset.
 static void tt_cdev_release_noc_cleanup(struct chardev_private *priv)
 {
 	struct tenstorrent_device *tt_dev = priv->device;
 
-	if (tt_dev->detached || !priv->noc_cleanup.enabled)
+	if (tt_dev->detached || tt_dev->needs_hw_init || !priv->noc_cleanup.enabled)
 		return;
 
 	tt_dev->dev_class->noc_write32(tt_dev, priv->noc_cleanup.x, priv->noc_cleanup.y,

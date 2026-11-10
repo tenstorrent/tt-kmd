@@ -703,6 +703,17 @@ bool fw_log_hw_release(void *hw_ctx)
 #define HDMA_INT_REMOTE_ABORT_EN BIT(5)
 #define HDMA_INT_LOCAL_ABORT_EN	BIT(6)
 #define HDMA_ELEMENT_CB		BIT(0)
+#define HDMA_ELEMENT_TCB	BIT(1)
+#define HDMA_ELEMENT_LLP	BIT(2)
+#define HDMA_ELEMENT_LWIE	BIT(3)
+#define HDMA_ELEMENT_RWIE	BIT(4)
+// The engine reloads ELEM_PF from these bits of a link element's control.
+#define HDMA_LINK_PREFETCH_SHIFT 17
+#define HDMA_LINK_PREFETCH_MASK	0x1F
+#define HDMA_INT_WATERMARK	BIT(1)
+#define HDMA_RD_STATUS		0x180
+#define HDMA_STATUS_MASK	0x3
+#define HDMA_STATUS_RUNNING	1
 
 // The engine reaches 4G TLB window N at this AXI address plus N * 4G.
 #define HDMA_TLB_4G_AXI_BASE	0x2000000000ULL
@@ -710,10 +721,16 @@ bool fw_log_hw_release(void *hw_ctx)
 // The list lives in host memory, so the engine fetches it over PCIe; prefetching
 // hides that. Never more than the channel's prefetch queue holds (QOS.PF_DEPTH),
 // or the engine hangs.
-#define DMA_ELEMENT_PREFETCH	7
+#define DMA_ELEMENT_PREFETCH	15
 #define DMA_LIST_ELEMENTS	TENSTORRENT_DMA_WRITE_MAX_DESCS
 // Prefetch may read up to 128 elements past the terminator.
-#define DMA_LIST_BYTES		((DMA_LIST_ELEMENTS + 1 + 128) * sizeof(struct hdma_element))
+// Ring mode: slots, then the link back to slot 0, then filler the engine may
+// prefetch past the link. Chain mode uses the start of the same buffer.
+#define DMA_RING_SLOTS		2048
+#define DMA_RING_PAD		160
+// Never fill closer than this to the slot the engine has not finished.
+#define DMA_RING_MARGIN		32
+#define DMA_LIST_BYTES		((DMA_RING_SLOTS + 1 + DMA_RING_PAD) * sizeof(struct hdma_element))
 // Base timeout per chain, plus 1 ms per MiB.
 #define DMA_TIMEOUT_MS		2000
 
@@ -734,6 +751,8 @@ struct blackhole_dma_command {
 	u32 count;
 	u32 next;		// First descriptor not yet run
 	u32 in_chain;		// Descriptors from next on in the running chain
+	u64 seq_end;		// Ring mode: ring sequence after its last element
+	bool cached;		// Allocated from dma.cmd_cache
 	struct tenstorrent_dma_desc descs[];
 };
 
@@ -888,12 +907,29 @@ start:
 	mod_delayed_work(system_wq, &bh->dma.timeout, timeout);
 }
 
+// Commands with up to this many descriptors come from dma.cmd_cache.
+#define DMA_CMD_CACHED_DESCS	64
+
+// A constructor keeps init_on_alloc from zeroing every command; each field is
+// set before use.
+static void dma_cmd_ctor(void *object)
+{
+}
+
+static void dma_command_free(struct blackhole_device *bh, struct blackhole_dma_command *command)
+{
+	if (command->cached)
+		kmem_cache_free(bh->dma.cmd_cache, command);
+	else
+		kfree(command);
+}
+
 static void blackhole_dma_finish(struct io_uring_cmd *cmd, unsigned int issue_flags)
 {
 	struct blackhole_dma_command *command = *dma_command_slot(cmd);
 	int result = command->result;
 
-	kfree(command);
+	dma_command_free(tt_dev_to_bh_dev(command->priv->device), command);
 	tt_uring_cmd_done(cmd, result, issue_flags);
 }
 
@@ -936,12 +972,353 @@ static void blackhole_dma_chain_done(struct blackhole_device *bh, int result)
 		schedule_work(&bh->dma.release_windows);
 }
 
+
+// ---- Experimental ring mode (round 6, not for merging) ----
+static bool dma_ring;
+module_param(dma_ring, bool, 0644);
+MODULE_PARM_DESC(dma_ring, "Experimental: run Blackhole DMA_WRITE on a persistent ring");
+static bool dma_watermark;
+module_param(dma_watermark, bool, 0644);
+static uint dma_guard_ns;
+module_param(dma_guard_ns, uint, 0644);
+// 0: spin for the guard before publishing; 1: publish once the guard has
+// passed, at a later submit or interrupt, or at once when the engine is stopped;
+// 2: as 1, but never publish within the guard, even on a stopped engine.
+static uint dma_guard_mode;
+module_param(dma_guard_mode, uint, 0644);
+// Single-pass descriptor checks and unzeroed command allocation.
+static bool dma_fast_submit;
+module_param(dma_fast_submit, bool, 0644);
+// Keep windows and the ring set up this long after the queue drains.
+static uint dma_keep_ms;
+module_param(dma_keep_ms, uint, 0644);
+static ulong dma_stat_stops, dma_stat_watermarks, dma_stat_doorbells, dma_stat_fresh,
+	     dma_stat_full, dma_stat_window_waits, dma_stat_resumes;
+module_param(dma_stat_stops, ulong, 0444);
+module_param(dma_stat_watermarks, ulong, 0444);
+module_param(dma_stat_doorbells, ulong, 0444);
+module_param(dma_stat_fresh, ulong, 0444);
+module_param(dma_stat_full, ulong, 0444);
+module_param(dma_stat_window_waits, ulong, 0444);
+module_param(dma_stat_resumes, ulong, 0444);
+
+struct hdma_link {
+	u32 control;
+	u32 reserved;
+	u64 llp;
+};
+
+static u32 ring_link_control(struct blackhole_device *bh, u32 lap_cb)
+{
+	// The engine toggles its cycle state at the link before checking CB, so a
+	// link it should follow carries the next lap's CB.
+	return HDMA_ELEMENT_LLP | HDMA_ELEMENT_TCB | (lap_cb ^ 1) |
+	       ((bh->dma.element_prefetch & HDMA_LINK_PREFETCH_MASK) << HDMA_LINK_PREFETCH_SHIFT);
+}
+
+static void ring_refresh_deadline(struct blackhole_device *bh)
+{
+	bh->dma.deadline = jiffies + msecs_to_jiffies(DMA_TIMEOUT_MS);
+	if (!delayed_work_pending(&bh->dma.timeout))
+		mod_delayed_work(system_wq, &bh->dma.timeout, msecs_to_jiffies(DMA_TIMEOUT_MS));
+}
+
+// Empties the ring and programs the channel to start at slot 0. Caller holds lock.
+static void ring_fresh_start(struct blackhole_device *bh)
+{
+	struct hdma_element *list = bh->dma.list;
+	struct hdma_link *link = (struct hdma_link *)&list[DMA_RING_SLOTS];
+
+	bh->dma.ring_watermark = dma_watermark;
+	bh->dma.ring_guard_ns = dma_guard_ns;
+	memset(list, 0, DMA_LIST_BYTES);
+	// CB 1 reads as the end of lap 0.
+	link->llp = bh->dma.list_axi;
+	link->control = HDMA_ELEMENT_LLP | HDMA_ELEMENT_TCB | HDMA_ELEMENT_CB;
+	bh->dma.produced = 0;
+	bh->dma.published = 0;
+	bh->dma.done = 0;
+	bh->dma.pcs = 1;
+	bh->dma.ring_used = 0;
+	bh->dma.engine_running = false;
+	dma_wmb();
+
+	dma_write_reg(bh, HDMA_RD_EN, 1);
+	dma_write_reg(bh, HDMA_RD_CONTROL1, HDMA_CONTROL1_LLEN);
+	dma_write_reg(bh, HDMA_RD_ELEM_PF, bh->dma.element_prefetch);
+	dma_write_reg64(bh, HDMA_RD_MSI_STOP, bh->dma.msi_addr);
+	dma_write_reg64(bh, HDMA_RD_MSI_WATERMARK, bh->dma.msi_addr);
+	dma_write_reg64(bh, HDMA_RD_MSI_ABORT, bh->dma.msi_addr);
+	dma_write_reg(bh, HDMA_RD_MSI_MSGD, bh->dma.msi_data);
+	dma_write_reg(bh, HDMA_RD_INT_CLEAR, HDMA_INT_STOP | HDMA_INT_ABORT | HDMA_INT_WATERMARK);
+	dma_write_reg(bh, HDMA_RD_INT_SETUP,
+		      HDMA_INT_LOCAL_STOP_EN | HDMA_INT_LOCAL_ABORT_EN |
+		      HDMA_INT_REMOTE_STOP_EN | HDMA_INT_REMOTE_ABORT_EN |
+		      HDMA_INT_STOP | HDMA_INT_WATERMARK | HDMA_INT_ABORT);
+	dma_write_reg64(bh, HDMA_RD_LLP, bh->dma.list_axi);
+	dma_write_reg(bh, HDMA_RD_CYCLE, HDMA_CYCLE_STATE | HDMA_CYCLE_BIT);
+	bh->dma.ring_active = true;
+	dma_stat_fresh++;
+}
+
+// Index of the window that reaches desc, giving an unused window that target
+// while no element references it. -1 if the ring must go idle first.
+static int ring_window_for(struct blackhole_device *bh, const struct tenstorrent_dma_desc *desc)
+{
+	struct tenstorrent_noc_tlb_config *target;
+	unsigned int w;
+
+	for (w = 0; w < bh->dma.ring_used; w++)
+		if (is_same_target(&bh->dma.ring_targets[w], desc))
+			return w;
+
+	if (bh->dma.ring_used == bh->dma.window_count)
+		return -1;
+
+	target = &bh->dma.ring_targets[w];
+	memset(target, 0, sizeof(*target));
+	target->addr = desc->addr & ~TLB_4G_WINDOW_MASK;
+	target->x_end = desc->x;
+	target->y_end = desc->y;
+	target->noc = desc->noc;
+	blackhole_configure_tlb_4G(bh, bh->dma.windows[w], target);
+	// The engine, not this CPU, uses the window; a read back orders the config.
+	ioread32(bh->tlb_regs + bh->dma.windows[w] * TLB_REG_SIZE);
+	return bh->dma.ring_used++;
+}
+
+// Writes the control words of every staged element, then rings the doorbell.
+// The guard makes a fetch that sees a new CB unable to hold the slot's
+// previous fields: either it waits (mode 0), or publication is deferred until
+// the guard has passed or the engine is known to be stopped (mode 1), when no
+// fetch can be in flight. Returns whether it published. Caller holds lock.
+static bool ring_publish(struct blackhole_device *bh)
+{
+	struct hdma_element *list = bh->dma.list;
+	struct hdma_link *link = (struct hdma_link *)&list[DMA_RING_SLOTS];
+	u32 guard = bh->dma.ring_guard_ns;
+	u64 seq;
+
+	if (bh->dma.published == bh->dma.produced)
+		return false;
+
+	if (guard && dma_guard_mode >= 1) {
+		// Deferring needs a later interrupt to publish. Once everything published
+		// is done, the last watermark and the stop may arrive as one MSI and none
+		// follows, so wait out the guard here instead. Mode 1 publishes at once
+		// when the engine is known stopped; mode 2 waits out the guard then too.
+		bool drained = bh->dma.done >= bh->dma.published;
+
+		if (ktime_get_ns() - bh->dma.staged_ns < guard) {
+			if (bh->dma.engine_running && !drained)
+				return false;
+			if (bh->dma.engine_running || dma_guard_mode == 2) {
+				while (ktime_get_ns() - bh->dma.staged_ns < guard)
+					cpu_relax();
+			}
+		}
+	} else if (guard) {
+		while (ktime_get_ns() - bh->dma.staged_ns < guard)
+			cpu_relax();
+	}
+
+	dma_wmb();
+	for (seq = bh->dma.published; seq < bh->dma.produced; seq++) {
+		u32 slot = seq % DMA_RING_SLOTS;
+
+		WRITE_ONCE(list[slot].control, bh->dma.ring_ctl[slot]);
+		if (slot == DMA_RING_SLOTS - 1)
+			WRITE_ONCE(link->control, ring_link_control(bh, bh->dma.ring_ctl[slot] & HDMA_ELEMENT_CB));
+	}
+	bh->dma.published = bh->dma.produced;
+	wmb();
+	// Harmless on a running engine (round 3); restarts a stopped one.
+	dma_write_reg(bh, HDMA_RD_DOORBELL, 1);
+	bh->dma.engine_running = true;
+	dma_stat_doorbells++;
+	ring_refresh_deadline(bh);
+	return true;
+}
+
+// Writes the fields of queued descriptors into free slots, leaving their
+// control words staged, then publishes what the guard allows. Returns whether
+// it published. Caller holds lock.
+static bool ring_fill(struct blackhole_device *bh)
+{
+	struct hdma_element *list = bh->dma.list;
+	struct blackhole_dma_command *command;
+	u64 start = bh->dma.produced;
+
+	list_for_each_entry(command, &bh->dma.queue, node) {
+		while (command->next < command->count) {
+			const struct tenstorrent_dma_desc *desc = &command->descs[command->next];
+			u32 slot = bh->dma.produced % DMA_RING_SLOTS;
+			u32 control = bh->dma.pcs;
+			int w;
+
+			if (bh->dma.produced - bh->dma.done >= DMA_RING_SLOTS - DMA_RING_MARGIN) {
+				dma_stat_full++;
+				goto staged;
+			}
+			w = ring_window_for(bh, desc);
+			if (w < 0) {
+				dma_stat_window_waits++;
+				goto staged;
+			}
+
+			list[slot].size = desc->size;
+			list[slot].sar = desc->src;
+			list[slot].dar = HDMA_TLB_4G_AXI_BASE +
+					 (u64)(bh->dma.windows[w] - TLB_2M_WINDOW_COUNT) * TLB_4G_WINDOW_SIZE +
+					 (desc->addr & TLB_4G_WINDOW_MASK);
+			command->next++;
+			// RWIE sends the MSI; LWIE latches INT_STATUS, whose local pin is masked.
+			if (bh->dma.ring_watermark && command->next == command->count)
+				control |= HDMA_ELEMENT_RWIE | HDMA_ELEMENT_LWIE;
+			bh->dma.ring_ctl[slot] = control;
+			bh->dma.produced++;
+			if (bh->dma.produced % DMA_RING_SLOTS == 0)
+				bh->dma.pcs ^= 1;
+			if (command->next == command->count)
+				command->seq_end = bh->dma.produced;
+		}
+	}
+
+staged:
+	if (bh->dma.produced != start && bh->dma.ring_guard_ns) {
+		dma_wmb();
+		bh->dma.staged_ns = ktime_get_ns();
+	}
+	return ring_publish(bh);
+}
+
+// Ring sequence number of the slot an LLP value points at; the link counts as
+// the next lap's slot 0.
+static u64 ring_seq_of_llp(struct blackhole_device *bh, u32 llp_lo)
+{
+	u64 produced = bh->dma.produced;
+	u32 index = (llp_lo - lower_32_bits(bh->dma.list_axi)) / sizeof(struct hdma_element);
+
+	if (index >= DMA_RING_SLOTS)
+		index = 0;
+	return produced - ((produced % DMA_RING_SLOTS + DMA_RING_SLOTS - index) % DMA_RING_SLOTS);
+}
+
+static void blackhole_dma_complete(struct blackhole_dma_command *command, int result);
+
+// Fails every queued command and leaves the channel to be reprogrammed. Caller holds lock.
+static void ring_fail(struct blackhole_device *bh, int result)
+{
+	dma_write_reg(bh, HDMA_RD_EN, 0);
+	while (!list_empty(&bh->dma.queue))
+		blackhole_dma_complete(list_first_entry(&bh->dma.queue, struct blackhole_dma_command, node),
+				       result);
+	bh->dma.ring_active = false;
+	schedule_work(&bh->dma.release_windows);
+}
+
+// The queue drained: return the windows now, or after dma_keep_ms without
+// new work, so a burst after a short pause skips setup. Caller holds lock.
+static void ring_drained(struct blackhole_device *bh)
+{
+	if (!dma_keep_ms) {
+		schedule_work(&bh->dma.release_windows);
+		return;
+	}
+	bh->dma.idle_since = jiffies;
+	mod_delayed_work(system_wq, &bh->dma.idle_release, msecs_to_jiffies(dma_keep_ms));
+}
+
+static void blackhole_dma_idle_release(struct work_struct *work)
+{
+	struct blackhole_device *bh = container_of(to_delayed_work(work), struct blackhole_device, dma.idle_release);
+	unsigned long keep = msecs_to_jiffies(dma_keep_ms);
+	unsigned long flags;
+
+	spin_lock_irqsave(&bh->dma.lock, flags);
+	if (list_empty(&bh->dma.queue)) {
+		if (time_after_eq(jiffies, bh->dma.idle_since + keep))
+			schedule_work(&bh->dma.release_windows);
+		else
+			mod_delayed_work(system_wq, &bh->dma.idle_release, bh->dma.idle_since + keep - jiffies);
+	}
+	spin_unlock_irqrestore(&bh->dma.lock, flags);
+}
+
+// Caller holds lock.
+static void ring_interrupt(struct blackhole_device *bh, u32 status)
+{
+	struct blackhole_dma_command *command, *tmp;
+	u64 done;
+
+	if (status & HDMA_INT_ABORT) {
+		ring_fail(bh, -EIO);
+		return;
+	}
+
+	if (status & HDMA_INT_STOP) {
+		// A stopped engine holds the first unfinished element in LLP.
+		dma_stat_stops++;
+		done = ring_seq_of_llp(bh, ioread32(bh->bar2_mapping + HDMA_RD_LLP));
+		// With nothing published past the stop, no doorbell since has work to
+		// run, so the engine stays stopped until the next publish.
+		if (done >= bh->dma.published)
+			bh->dma.engine_running = false;
+	} else {
+		// LLP freezes at the latest marked element while the engine runs.
+		u32 llp = ioread32(bh->bar2_mapping + HDMA_RD_LLP);
+		u32 state = ioread32(bh->bar2_mapping + HDMA_RD_STATUS) & HDMA_STATUS_MASK;
+
+		dma_stat_watermarks++;
+		if (state == HDMA_STATUS_RUNNING)
+			done = ring_seq_of_llp(bh, llp) + 1;
+		else
+			done = ring_seq_of_llp(bh, ioread32(bh->bar2_mapping + HDMA_RD_LLP));
+	}
+	if (done > bh->dma.done)
+		bh->dma.done = done;
+
+	list_for_each_entry_safe(command, tmp, &bh->dma.queue, node) {
+		if (command->next != command->count || command->seq_end > bh->dma.done)
+			break;
+		blackhole_dma_complete(command, 0);
+	}
+
+	// Windows can take new targets only once nothing in the ring uses them.
+	if (bh->dma.done == bh->dma.produced)
+		bh->dma.ring_used = 0;
+
+	if (list_empty(&bh->dma.queue)) {
+		ring_drained(bh);
+		return;
+	}
+	ring_refresh_deadline(bh);
+	if (!ring_fill(bh) && (status & HDMA_INT_STOP) && bh->dma.done < bh->dma.published) {
+		// Stopped on a slot published after it was fetched: resume from LLP.
+		dma_write_reg(bh, HDMA_RD_DOORBELL, 1);
+		bh->dma.engine_running = true;
+		dma_stat_resumes++;
+	}
+}
+
 static void blackhole_dma_interrupt(struct blackhole_device *bh)
 {
 	unsigned long flags;
 	u32 status;
 
 	spin_lock_irqsave(&bh->dma.lock, flags);
+
+	if (bh->dma.ring_mode && bh->dma.ring_active) {
+		status = ioread32(bh->bar2_mapping + HDMA_RD_INT_STATUS) &
+			 (HDMA_INT_STOP | HDMA_INT_ABORT | HDMA_INT_WATERMARK);
+		if (status) {
+			dma_write_reg(bh, HDMA_RD_INT_CLEAR, status);
+			if (!list_empty(&bh->dma.queue))
+				ring_interrupt(bh, status);
+		}
+		spin_unlock_irqrestore(&bh->dma.lock, flags);
+		return;
+	}
 
 	status = ioread32(bh->bar2_mapping + HDMA_RD_INT_STATUS) & (HDMA_INT_STOP | HDMA_INT_ABORT);
 	if (status) {
@@ -968,7 +1345,10 @@ static void blackhole_dma_timeout(struct work_struct *work)
 			mod_delayed_work(system_wq, &bh->dma.timeout, bh->dma.deadline - jiffies);
 		} else {
 			dev_warn(&bh->tt.pdev->dev, "DMA write timed out\n");
-			blackhole_dma_chain_done(bh, -ETIMEDOUT);
+			if (bh->dma.ring_active)
+				ring_fail(bh, -ETIMEDOUT);
+			else
+				blackhole_dma_chain_done(bh, -ETIMEDOUT);
 		}
 	}
 
@@ -993,6 +1373,7 @@ static void blackhole_dma_release_windows(struct work_struct *work)
 		if (bh->dma.list_window >= 0)
 			dma_write_reg(bh, HDMA_RD_CONTROL1, 0);
 
+		bh->dma.ring_active = false;
 		window_count = bh->dma.window_count;
 		memcpy(windows, bh->dma.windows, sizeof(windows));
 		list_window = bh->dma.list_window;
@@ -1011,6 +1392,8 @@ static void blackhole_dma_release_windows(struct work_struct *work)
 
 static void blackhole_dma_init(struct blackhole_device *bh)
 {
+	char cache_name[48];
+
 	spin_lock_init(&bh->dma.lock);
 	INIT_LIST_HEAD(&bh->dma.queue);
 	mutex_init(&bh->dma.window_mutex);
@@ -1020,12 +1403,31 @@ static void blackhole_dma_init(struct blackhole_device *bh)
 
 	// Without a list, DMA_WRITE fails with -ENOMEM.
 	bh->dma.list = dma_alloc_coherent(&bh->tt.pdev->dev, DMA_LIST_BYTES, &bh->dma.list_iova, GFP_KERNEL);
+	bh->dma.ring_ctl = kcalloc(DMA_RING_SLOTS, sizeof(u32), GFP_KERNEL);
+	INIT_DELAYED_WORK(&bh->dma.idle_release, blackhole_dma_idle_release);
+	// The slab layer copies the name; one cache per device keeps sysfs names unique.
+	snprintf(cache_name, sizeof(cache_name), "tenstorrent_dma_cmd_%s", pci_name(bh->tt.pdev));
+	// Hardened usercopy rejects copy_from_user into a cache with no declared
+	// user region, so declare the descriptor array.
+	bh->dma.cmd_cache = kmem_cache_create_usercopy(cache_name,
+						       sizeof(struct blackhole_dma_command) +
+							       DMA_CMD_CACHED_DESCS * sizeof(struct tenstorrent_dma_desc),
+						       0, 0, offsetof(struct blackhole_dma_command, descs),
+						       DMA_CMD_CACHED_DESCS * sizeof(struct tenstorrent_dma_desc),
+						       dma_cmd_ctor);
+	if (bh->dma.list && !bh->dma.ring_ctl) {
+		dma_free_coherent(&bh->tt.pdev->dev, DMA_LIST_BYTES, bh->dma.list, bh->dma.list_iova);
+		bh->dma.list = NULL;
+	}
 }
 
 static void blackhole_dma_cleanup(struct blackhole_device *bh)
 {
 	if (bh->dma.list)
 		dma_free_coherent(&bh->tt.pdev->dev, DMA_LIST_BYTES, bh->dma.list, bh->dma.list_iova);
+	kfree(bh->dma.ring_ctl);
+	cancel_delayed_work_sync(&bh->dma.idle_release);
+	kmem_cache_destroy(bh->dma.cmd_cache);
 }
 
 static int blackhole_dma_check_descs(struct chardev_private *priv,
@@ -1109,6 +1511,56 @@ static int blackhole_dma_take_windows(struct blackhole_device *bh, unsigned int 
 	return bh->dma.window_count ? 0 : -EBUSY;
 }
 
+// blackhole_dma_check_descs and blackhole_dma_count_targets in one pass, with
+// the source buffer looked up once and reused while descriptors stay inside it.
+static int blackhole_dma_check_descs_fast(struct chardev_private *priv, const struct tenstorrent_dma_desc *descs,
+					  u32 count, unsigned int *targets_out)
+{
+	struct tenstorrent_noc_tlb_config targets[BLACKHOLE_DMA_MAX_WINDOWS] = { 0 };
+	unsigned int used = 0;
+	u64 buf_start = 0, buf_len = 0;
+	unsigned int w;
+	u32 i;
+
+	lockdep_assert_held(&priv->mutex);
+
+	for (i = 0; i < count; i++) {
+		const struct tenstorrent_dma_desc *desc = &descs[i];
+		u64 tail;
+
+		// noc and the 7 reserved bytes, as one little-endian word.
+		memcpy(&tail, &desc->noc, sizeof(tail));
+		if (desc->size == 0 || ((desc->src | desc->addr | desc->size) & 3) ||
+		    desc->x > 63 || desc->y > 63 || (tail & 0xff) > 1 || (tail >> 8))
+			return -EINVAL;
+
+		if ((desc->addr & TLB_4G_WINDOW_MASK) + desc->size > TLB_4G_WINDOW_SIZE)
+			return -EINVAL;
+
+		if (desc->src < buf_start || desc->src - buf_start >= buf_len ||
+		    desc->size > buf_len - (desc->src - buf_start)) {
+			if (!tenstorrent_dma_range_bounds(priv, desc->src, desc->size, &buf_start, &buf_len))
+				return -EINVAL;
+		}
+
+		if (used < BLACKHOLE_DMA_MAX_WINDOWS) {
+			for (w = 0; w < used && !is_same_target(&targets[w], desc); w++)
+				;
+			if (w == used) {
+				targets[w].addr = desc->addr & ~TLB_4G_WINDOW_MASK;
+				targets[w].x_end = desc->x;
+				targets[w].y_end = desc->y;
+				targets[w].noc = desc->noc;
+				used++;
+			}
+		}
+	}
+
+	*targets_out = used;
+	return 0;
+}
+
+
 static int blackhole_uring_cmd(struct chardev_private *priv, struct io_uring_cmd *cmd,
 			       unsigned int issue_flags)
 {
@@ -1118,7 +1570,9 @@ static int blackhole_uring_cmd(struct chardev_private *priv, struct io_uring_cmd
 	u64 descs = READ_ONCE(write->descs);
 	u32 count = READ_ONCE(write->count);
 	struct blackhole_dma_command *command;
+	unsigned int targets = 0;
 	unsigned long flags;
+	bool fast;
 	int ret;
 
 	// The engine can only report completion through MSI.
@@ -1131,9 +1585,18 @@ static int blackhole_uring_cmd(struct chardev_private *priv, struct io_uring_cmd
 	if (!bh->dma.list)
 		return -ENOMEM;
 
-	command = kmalloc(struct_size(command, descs, count), GFP_KERNEL);
-	if (!command)
-		return -ENOMEM;
+	fast = dma_fast_submit && bh->dma.cmd_cache;
+	if (fast && count <= DMA_CMD_CACHED_DESCS) {
+		command = kmem_cache_alloc(bh->dma.cmd_cache, GFP_KERNEL);
+		if (!command)
+			return -ENOMEM;
+		command->cached = true;
+	} else {
+		command = kmalloc(struct_size(command, descs, count), GFP_KERNEL);
+		if (!command)
+			return -ENOMEM;
+		command->cached = false;
+	}
 
 	if (copy_from_user(command->descs, u64_to_user_ptr(descs), count * sizeof(command->descs[0]))) {
 		ret = -EFAULT;
@@ -1150,7 +1613,10 @@ static int blackhole_uring_cmd(struct chardev_private *priv, struct io_uring_cmd
 	ret = -EAGAIN;
 	if (!lock_mutex(&priv->mutex, nonblock))
 		goto out_free;
-	ret = blackhole_dma_check_descs(priv, command->descs, count);
+	if (fast)
+		ret = blackhole_dma_check_descs_fast(priv, command->descs, count, &targets);
+	else
+		ret = blackhole_dma_check_descs(priv, command->descs, count);
 	if (!ret)
 		atomic_inc(&priv->dma_writes_inflight);
 	mutex_unlock(&priv->mutex);
@@ -1161,7 +1627,7 @@ static int blackhole_uring_cmd(struct chardev_private *priv, struct io_uring_cmd
 	if (!lock_mutex(&bh->dma.window_mutex, nonblock))
 		goto out_inflight;
 
-	ret = blackhole_dma_take_windows(bh, blackhole_dma_count_targets(command->descs, count));
+	ret = blackhole_dma_take_windows(bh, fast ? targets : blackhole_dma_count_targets(command->descs, count));
 	if (ret) {
 		mutex_unlock(&bh->dma.window_mutex);
 		goto out_inflight;
@@ -1169,10 +1635,16 @@ static int blackhole_uring_cmd(struct chardev_private *priv, struct io_uring_cmd
 
 	spin_lock_irqsave(&bh->dma.lock, flags);
 	list_add_tail(&command->node, &bh->dma.queue);
-	if (list_is_singular(&bh->dma.queue)) {
+	if (!bh->dma.ring_active && list_is_singular(&bh->dma.queue)) {
+		bh->dma.ring_mode = dma_ring;
 		blackhole_dma_setup(bh);
-		blackhole_dma_start_chain(bh);
+		if (bh->dma.ring_mode)
+			ring_fresh_start(bh);
+		else
+			blackhole_dma_start_chain(bh);
 	}
+	if (bh->dma.ring_active)
+		ring_fill(bh);
 	spin_unlock_irqrestore(&bh->dma.lock, flags);
 
 	mutex_unlock(&bh->dma.window_mutex);
@@ -1181,7 +1653,7 @@ static int blackhole_uring_cmd(struct chardev_private *priv, struct io_uring_cmd
 out_inflight:
 	atomic_dec(&priv->dma_writes_inflight);
 out_free:
-	kfree(command);
+	dma_command_free(bh, command);
 	return ret;
 }
 
@@ -1196,9 +1668,11 @@ static void blackhole_quiesce_uring_cmds(struct tenstorrent_device *tt_dev)
 	while (!list_empty(&bh->dma.queue))
 		blackhole_dma_complete(list_first_entry(&bh->dma.queue, struct blackhole_dma_command, node),
 				       -ENODEV);
+	bh->dma.ring_active = false;
 	spin_unlock_irqrestore(&bh->dma.lock, flags);
 
 	cancel_delayed_work_sync(&bh->dma.timeout);
+	cancel_delayed_work_sync(&bh->dma.idle_release);
 	// Return the windows now rather than whenever the queued release runs.
 	cancel_work_sync(&bh->dma.release_windows);
 	blackhole_dma_release_windows(&bh->dma.release_windows);

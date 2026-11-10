@@ -31,6 +31,25 @@ struct blackhole_dma {
 	struct delayed_work timeout;
 	void *list;		// Elements of the running chain, in host memory
 	dma_addr_t list_iova;
+
+	// Experimental ring mode (round 6, not for merging): a persistent ring the
+	// host appends to while the engine runs. Guarded by lock.
+	bool ring_mode;		// Mode chosen at the last fresh start
+	bool ring_active;	// Channel programmed for the ring
+	bool ring_watermark;
+	u32 ring_guard_ns;
+	u64 produced;		// Elements published, monotonic
+	u64 done;		// Elements the engine finished, monotonic
+	u32 pcs;		// Cycle bit of the lap being produced
+	u32 *ring_ctl;		// Control words staged until publication
+	struct tenstorrent_noc_tlb_config ring_targets[BLACKHOLE_DMA_MAX_WINDOWS];
+	unsigned int ring_used;	// Windows given a target since the ring went idle
+	u64 published;		// Elements whose control word is written; <= produced
+	bool engine_running;	// A doorbell may have the engine running
+	u64 staged_ns;		// When the last unpublished element's fields were written
+	struct kmem_cache *cmd_cache; // Commands of few descriptors, not zeroed on alloc
+	struct delayed_work idle_release; // Releases the windows after a quiet period
+	unsigned long idle_since; // jiffies when the queue last drained
 };
 
 struct blackhole_device {

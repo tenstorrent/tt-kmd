@@ -578,7 +578,8 @@ static bool is_range_within(u64 addr, u64 size, u64 start, u64 len)
 	return addr >= start && addr - start < len && size <= len - (addr - start);
 }
 
-bool tenstorrent_owns_dma_range(struct chardev_private *priv, u64 iova, u64 size)
+// The buffer of priv that holds [iova, iova + size), as [*start, *start + *len).
+bool tenstorrent_dma_range_bounds(struct chardev_private *priv, u64 iova, u64 size, u64 *start, u64 *len)
 {
 	struct pinned_page_range *pinning;
 	struct dmabuf *dmabuf;
@@ -587,20 +588,34 @@ bool tenstorrent_owns_dma_range(struct chardev_private *priv, u64 iova, u64 size
 	lockdep_assert_held(&priv->mutex);
 
 	hash_for_each(priv->dmabufs, i, dmabuf, hash_chain) {
-		if (is_range_within(iova, size, dmabuf->phys, dmabuf->size))
+		if (is_range_within(iova, size, dmabuf->phys, dmabuf->size)) {
+			*start = dmabuf->phys;
+			*len = dmabuf->size;
 			return true;
+		}
 	}
 
 	list_for_each_entry(pinning, &priv->pinnings, list) {
 		// PIN_PAGES only accepts ranges that are contiguous in IOVA space.
-		u64 start = pinning->dma_mapping.sgl ? sg_dma_address(pinning->dma_mapping.sgl)
-						     : page_to_phys(pinning->pages[0]);
+		u64 base = pinning->dma_mapping.sgl ? sg_dma_address(pinning->dma_mapping.sgl)
+						    : page_to_phys(pinning->pages[0]);
+		u64 bytes = (u64)pinning->page_count << PAGE_SHIFT;
 
-		if (is_range_within(iova, size, start, (u64)pinning->page_count << PAGE_SHIFT))
+		if (is_range_within(iova, size, base, bytes)) {
+			*start = base;
+			*len = bytes;
 			return true;
+		}
 	}
 
 	return false;
+}
+
+bool tenstorrent_owns_dma_range(struct chardev_private *priv, u64 iova, u64 size)
+{
+	u64 start, len;
+
+	return tenstorrent_dma_range_bounds(priv, iova, size, &start, &len);
 }
 
 bool is_iommu_translated(struct device *dev)

@@ -65,6 +65,7 @@ bool is_iommu_translated(struct device *dev);
 // Whether [iova, iova + size) lies within one DMA buffer or pinning of this fd.
 // Caller holds priv->mutex.
 bool tenstorrent_owns_dma_range(struct chardev_private *priv, u64 iova, u64 size);
+bool tenstorrent_dma_range_bounds(struct chardev_private *priv, u64 iova, u64 size, u64 *start, u64 *len);
 
 #define TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS 16
 struct tenstorrent_outbound_iatu_region {

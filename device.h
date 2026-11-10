@@ -8,7 +8,6 @@
 #include <linux/device.h>
 #include <linux/pci.h>
 #include <linux/cdev.h>
-#include <linux/reboot.h>
 #include <linux/refcount.h>
 #include <linux/rwsem.h>
 #include <linux/wait.h>
@@ -37,7 +36,13 @@ struct tenstorrent_device {
 	struct cdev chardev;
 	struct pci_dev *pdev;
 	const struct tenstorrent_device_class *dev_class;
-	bool detached; // No longer valid for hardware access
+	// The driver has finished with the hardware.  Set once, by
+	// tenstorrent_pci_remove, with reset_rwsem held for write, after its last
+	// hardware access.  Whoever holds reset_rwsem (either mode) and finds this
+	// clear may use the hardware until they release it.  Once set, entry
+	// points from outside the driver fail with -ENODEV or skip their hardware
+	// access.
+	bool detached;
 	bool needs_hw_init;
 	bool fw_ready; // Firmware answered the last check_fw_ready; cleared by reset
 	atomic_long_t reset_gen; // Generation counter, incremented on reset
@@ -52,8 +57,6 @@ struct tenstorrent_device {
 	struct mutex chardev_mutex;
 	bool chardev_excl_held;	// An O_EXCL fd is currently open
 	wait_queue_head_t chardev_excl_waitqueue;
-
-	struct notifier_block reboot_notifier;
 
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
 	wait_queue_head_t resource_lock_waitqueue;
@@ -70,8 +73,8 @@ struct tenstorrent_device {
 	// Deferred idle power-down work.  Armed by
 	// tenstorrent_update_power_state_locked when the fds' vote drops to
 	// idle, dev_class->defer_idle_powerdown is set and
-	// idle_power_down_grace_ms > 0.  Cancelled in suspend and remove so
-	// an in-flight FW message cannot race cleanup_hardware.
+	// idle_power_down_grace_ms > 0.  Cancelled in suspend, reset and remove
+	// so an in-flight FW message cannot race them.
 	struct delayed_work power_down_work;
 
 	DECLARE_BITMAP(tlbs, TENSTORRENT_MAX_INBOUND_TLBS);
@@ -114,8 +117,8 @@ struct tenstorrent_device_class {
 	u32 tlb_counts[MAX_TLB_KINDS];
 	u64 tlb_sizes[MAX_TLB_KINDS];
 	// Attribute groups created with the device and removed with it.  The group
-	// exists from device_add until device_del, which is after cleanup_device
-	// has unmapped the BARs, so show functions must take reset_rwsem shared and
+	// exists from device_add until device_del, which is after the remove
+	// handler has detached, so show functions must take reset_rwsem shared and
 	// check the detached and needs_hw_init flags before touching hardware.
 	const struct attribute_group **dev_groups;
 	bool (*reset)(struct tenstorrent_device *ttdev, u32 reset_flag);
@@ -126,9 +129,10 @@ struct tenstorrent_device_class {
 	int (*check_fw_ready)(struct tenstorrent_device *ttdev);
 	u32 fw_ready_timeout_ms; // How long probe waits for check_fw_ready
 	bool (*init_hardware)(struct tenstorrent_device *ttdev);
+	// Tell firmware the driver is going away.  Called by suspend and remove
+	// with interrupts disabled, and only on a device that is reachable.
 	void (*cleanup_hardware)(struct tenstorrent_device *ttdev);
 	void (*cleanup_device)(struct tenstorrent_device *ttdev);
-	void (*reboot)(struct tenstorrent_device *ttdev);
 	int (*configure_tlb)(struct tenstorrent_device *ttdev, int tlb, struct tenstorrent_noc_tlb_config *config);
 	int (*describe_tlb)(struct tenstorrent_device *ttdev, int tlb, struct tlb_descriptor *tlb_desc);
 	void (*save_reset_state)(struct tenstorrent_device *ttdev);

@@ -59,6 +59,7 @@ int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma);
 void tenstorrent_memory_cleanup(struct chardev_private *priv);
 void tenstorrent_vma_zap(struct tenstorrent_device *tt_dev);
 void tenstorrent_forget_iatus(struct tenstorrent_device *tt_dev);
+void tenstorrent_remove_memory_cleanup(struct tenstorrent_device *tt_dev);
 void tenstorrent_revoke_tlb_dmabufs(struct tenstorrent_device *tt_dev);
 bool tenstorrent_has_tlb_dmabuf_exports(struct tenstorrent_device *tt_dev);
 bool is_iommu_translated(struct device *dev);

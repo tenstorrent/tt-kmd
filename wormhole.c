@@ -409,8 +409,8 @@ static ssize_t wh_show_pcie_single_counter(struct device *dev, char *buf, u32 co
 	u32 value;
 	ssize_t r;
 
-	// The group outlives cleanup_device and spans resets; serialize against
-	// both the BAR unmap and the reset window.
+	// The group outlives the detach and spans resets; serialize against
+	// both the remove handler and the reset window.
 	down_read(&tt_dev->reset_rwsem);
 
 	if (tt_dev->detached) {
@@ -739,8 +739,7 @@ static bool wormhole_init_hardware(struct tenstorrent_device *tt_dev) {
 static void wormhole_cleanup_hardware(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
-	if (!tt_dev->detached)
-		wormhole_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
+	wormhole_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
 }
 
 static void wormhole_cleanup(struct tenstorrent_device *tt_dev) {
@@ -1078,7 +1077,6 @@ struct tenstorrent_device_class wormhole_class = {
 	.hwmon_chip_info = &wh_hwmon_chip_info,
 	.cleanup_hardware = wormhole_cleanup_hardware,
 	.cleanup_device = wormhole_cleanup,
-	.reboot = wormhole_cleanup_hardware,
 	.configure_tlb = wormhole_configure_tlb,
 	.describe_tlb = wormhole_describe_tlb,
 	.save_reset_state = wormhole_save_reset_state,

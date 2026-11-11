@@ -331,6 +331,7 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
 	INIT_LIST_HEAD(&tt_dev->arc_msg_queue);
 	INIT_LIST_HEAD(&tt_dev->dmabuf_exports);
 	INIT_DELAYED_WORK(&tt_dev->power_down_work, tenstorrent_power_down_work_func);
+	init_rwsem(&tt_dev->power_rwsem);
 
 	// Both DMA masks come from the device class; the reasons for each chip's
 	// numbers are next to them in the class definitions. The

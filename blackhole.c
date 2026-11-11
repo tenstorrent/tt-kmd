@@ -963,4 +963,11 @@ struct tenstorrent_device_class blackhole_class = {
 	.arc_msg_locate_queue = blackhole_arc_msg_locate_queue,
 	.arc_msg_trigger = blackhole_arc_msg_trigger,
 	.set_power_state = blackhole_set_power_state,
+	// Lowering power soft-resets and clock-gates the Tensix cores, gates
+	// the L2CPU clocks and powers the GDDR PHYs down.  A host read that
+	// reaches one of those tiles during the transition never completes,
+	// and on a host where firmware owns AER the resulting PCIe completion
+	// timeout is fatal.  Deferring the powerdown means a close followed by
+	// a reopen within the grace period never cycles the chip.
+	.defer_idle_powerdown = true,
 };

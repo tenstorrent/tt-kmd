@@ -72,6 +72,15 @@ struct tenstorrent_device {
 	// an in-flight FW message cannot race cleanup_hardware.
 	struct delayed_work power_down_work;
 
+	// Held exclusive while a power state message is outstanding to
+	// firmware, which may be clock-gating or powering up parts of the
+	// chip, and shared by NOC_READ, NOC_WRITE and the close-time NOC
+	// cleanup write around their transfer.
+	// Lock order: reset_rwsem, then chardev_mutex, then power_rwsem, then
+	// arc_msg_mutex and the class's kernel TLB lock.  Nothing is taken
+	// with power_rwsem held shared except the kernel TLB lock.
+	struct rw_semaphore power_rwsem;
+
 	DECLARE_BITMAP(tlbs, TENSTORRENT_MAX_INBOUND_TLBS);
 	u32 tlb_counts[MAX_TLB_KINDS];	// Per-device TLB counts (may differ from dev_class defaults)
 	refcount_t tlb_refcount[TENSTORRENT_MAX_INBOUND_TLBS];

@@ -16,6 +16,9 @@
 #include <linux/version.h>
 #include <linux/debugfs.h>
 #include <linux/proc_fs.h>
+#include <linux/ktime.h>
+#include <linux/delay.h>
+#include <linux/sched/signal.h>
 
 #include "chardev_private.h"
 #include "device.h"
@@ -27,6 +30,13 @@
 #include "tlb.h"
 
 #define TT_POWER_FLAG_ALL 0x7FFF
+
+// How long NOC_READ/NOC_WRITE wait for a power transition to finish.
+// Firmware bounds each GDDR MRISC hand-shake at 1 s.
+#define POWER_TRANSITION_WAIT_MS 2000
+
+// Transitions slower than this are logged.
+#define POWER_TRANSITION_SLOW_MS 500
 
 static dev_t tt_device_id;
 static struct class *tt_dev_class;
@@ -572,6 +582,32 @@ static long validate_noc_io(u32 argsz, u32 flags, u16 x, u16 y, const u8 reserve
 	return 0;
 }
 
+// Take power_rwsem shared, so that no power transition starts while a NOC
+// transfer is in flight and none is in flight while firmware is changing the
+// chip's power state.  Gives up with -EBUSY if a transition is still holding
+// it after POWER_TRANSITION_WAIT_MS.  Polls rather than sleeping in
+// down_read() so the wait is bounded and a fatal signal ends it.
+static int noc_io_power_lock(struct tenstorrent_device *tt_dev)
+{
+	unsigned long timeout = jiffies + msecs_to_jiffies(POWER_TRANSITION_WAIT_MS);
+
+	while (!down_read_trylock(&tt_dev->power_rwsem)) {
+		if (fatal_signal_pending(current))
+			return -EINTR;
+
+		if (time_after(jiffies, timeout)) {
+			dev_warn_ratelimited(&tt_dev->pdev->dev,
+					     "Power transition still in progress after %d ms\n",
+					     POWER_TRANSITION_WAIT_MS);
+			return -EBUSY;
+		}
+
+		usleep_range(500, 1000);
+	}
+
+	return 0;
+}
+
 static long ioctl_noc_read(struct chardev_private *priv, struct tenstorrent_noc_io __user *arg)
 {
 	struct tenstorrent_device *tt_dev = priv->device;
@@ -590,7 +626,12 @@ static long ioctl_noc_read(struct chardev_private *priv, struct tenstorrent_noc_
 	if (ret)
 		return ret;
 
+	ret = noc_io_power_lock(tt_dev);
+	if (ret)
+		return ret;
+
 	ret = tt_dev->dev_class->noc_read(tt_dev, data.x, data.y, data.addr, &value, data.width, data.noc);
+	up_read(&tt_dev->power_rwsem);
 	if (ret)
 		return ret;
 
@@ -619,8 +660,16 @@ static long ioctl_noc_write(struct chardev_private *priv, struct tenstorrent_noc
 	if (ret)
 		return ret;
 
+	ret = noc_io_power_lock(tt_dev);
+	if (ret)
+		return ret;
+
 	// Only the low data.width bytes of data.value are written.
-	return tt_dev->dev_class->noc_write(tt_dev, data.x, data.y, data.addr, &data.value, data.width, data.noc);
+	ret = tt_dev->dev_class->noc_write(tt_dev, data.x, data.y, data.addr, &data.value,
+					   data.width, data.noc);
+	up_read(&tt_dev->power_rwsem);
+
+	return ret;
 }
 
 // An fd votes for power unless it is power-aware and has requested nothing.
@@ -699,6 +748,35 @@ static bool power_state_is_idle(const struct tenstorrent_power_state *power_stat
 	return true;
 }
 
+static int send_power_state_locked(struct tenstorrent_device *tt_dev,
+				   struct tenstorrent_power_state *power_state)
+{
+	ktime_t start;
+	s64 elapsed_ms;
+	int ret;
+
+	lockdep_assert_held(&tt_dev->chardev_mutex);
+
+	// Waits for NOC transfers in flight to finish and holds new ones off
+	// until firmware has answered.
+	down_write(&tt_dev->power_rwsem);
+	start = ktime_get();
+
+	ret = tt_dev->dev_class->set_power_state(tt_dev, power_state);
+
+	elapsed_ms = ktime_ms_delta(ktime_get(), start);
+	up_write(&tt_dev->power_rwsem);
+
+	if (ret)
+		dev_warn(&tt_dev->pdev->dev, "Power state %#x failed after %lld ms: %d\n",
+			 power_state->power_flags, elapsed_ms, ret);
+	else if (elapsed_ms > POWER_TRANSITION_SLOW_MS)
+		dev_warn(&tt_dev->pdev->dev, "Power state %#x took %lld ms\n",
+			 power_state->power_flags, elapsed_ms);
+
+	return ret;
+}
+
 // Make the device's power state follow the fds' votes.  Call after any vote
 // changes.  A vote for power is sent now and cancels any pending powerdown.
 // An idle vote is not sent; it arms power_down_work, so a close followed by
@@ -729,7 +807,7 @@ static int tenstorrent_update_power_state_locked(struct tenstorrent_device *tt_d
 	// it will see this vote once we drop the mutex and do nothing.
 	cancel_delayed_work(&tt_dev->power_down_work);
 
-	return tt_dev->dev_class->set_power_state(tt_dev, &power_state);
+	return send_power_state_locked(tt_dev, &power_state);
 }
 
 int tenstorrent_update_power_state(struct tenstorrent_device *tt_dev)
@@ -758,7 +836,7 @@ void tenstorrent_power_down_work_func(struct work_struct *work)
 	if (!tt_dev->detached && !tt_dev->needs_hw_init) {
 		aggregate_power_state_locked(tt_dev, &power_state);
 		if (power_state_is_idle(&power_state))
-			tt_dev->dev_class->set_power_state(tt_dev, &power_state);
+			send_power_state_locked(tt_dev, &power_state);
 	}
 
 	mutex_unlock(&tt_dev->chardev_mutex);
@@ -1180,9 +1258,13 @@ static void tt_cdev_release_noc_cleanup(struct chardev_private *priv)
 	if (tt_dev->detached || !priv->noc_cleanup.enabled)
 		return;
 
+	// Unbounded, unlike the NOC ioctls: close cannot fail, and a transition
+	// ends when set_power_state() returns.
+	down_read(&tt_dev->power_rwsem);
 	tt_dev->dev_class->noc_write32(tt_dev, priv->noc_cleanup.x, priv->noc_cleanup.y,
 				       priv->noc_cleanup.addr, priv->noc_cleanup.data & 0xFFFFFFFF,
 				       priv->noc_cleanup.noc);
+	up_read(&tt_dev->power_rwsem);
 }
 
 static void tt_cdev_release_resource_locks(struct chardev_private *priv)

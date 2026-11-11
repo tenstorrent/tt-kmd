@@ -516,6 +516,11 @@ struct tenstorrent_smc_msg {
  * fault on a zapped MMIO mapping. This trades throughput and latency for
  * robustness, which suits long-running device management and telemetry tools.
  *
+ * Transfers and the KMD's power state changes exclude each other, since tiles
+ * being clock-gated or powered down may not respond: a transfer issued during
+ * a change waits for it to finish, and fails with -EBUSY if it has not
+ * finished after 2 s.
+ *
  * The target endpoint is identified by NOC coordinates (@x, @y) plus a local
  * @addr. @flags is reserved for future addressing modes (e.g. hardware without
  * X/Y coordinates) and must currently be 0.

@@ -152,6 +152,21 @@ struct tenstorrent_get_driver_info {
 #define TENSTORRENT_RESET_DEVICE_ASIC_RESET 4
 #define TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET 5
 #define TENSTORRENT_RESET_DEVICE_POST_RESET 6
+#define TENSTORRENT_RESET_DEVICE_POST_RESET_POLL 7
+
+// POST_RESET re-initializes the device after a reset and reports the outcome
+// in out.result. If the reset has not reached the chip yet, that is reported
+// as a failure, so the caller must first wait for the reset marker to clear.
+// It then waits for firmware to come up, for up to a minute or two depending
+// on the chip. If firmware does not, the device is re-initialized as far as is
+// possible without it, and that is reported as success.
+//
+// POST_RESET_POLL never waits. While the reset has not reached the chip or
+// firmware has not come up, it fails with EAGAIN, leaving out untouched; call
+// it again until it returns anything else. The caller decides how long to
+// keep trying. Otherwise it behaves as POST_RESET does, except after a reset
+// that removes and re-adds the device: probe waits for firmware itself, and
+// POST_RESET_POLL reports failure if firmware did not come up in time.
 
 struct tenstorrent_reset_device_in {
 	__u32 output_size_bytes;

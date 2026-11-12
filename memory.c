@@ -295,53 +295,82 @@ static void teardown_outbound_iatu(struct chardev_private *priv, int iatu_region
 
 	mutex_lock(&tt_dev->iatu_mutex);
 
-	if (!tt_dev->detached)
-		tt_dev->dev_class->configure_outbound_atu(tt_dev, iatu_region, 0, 0, 0);
+	// Never reached on a detached device: the remove handler leaves no fd
+	// with memory to release.  See tenstorrent_remove_memory_cleanup.
+	tt_dev->dev_class->configure_outbound_atu(tt_dev, iatu_region, 0, 0, 0);
 
 	release_outbound_iatu_slot(tt_dev, iatu_region);
 
 	mutex_unlock(&tt_dev->iatu_mutex);
 }
 
-// Reclaim outbound iATU slots from fds this reset invalidated (stale
-// open_reset_gen); a wedged process would otherwise hold them until a
-// close() that never comes.  Only the bookkeeping is released: reset leaves
-// the ATU default-clear, which is what a free slot means.  Nulling each
-// back-reference makes the stale fd's close() a no-op, so it cannot disable
-// a slot a post-reset fd has since claimed.  Caller holds reset_rwsem
-// exclusive and has already called bump_reset_gen().
-void tenstorrent_reset_reclaim_iatus(struct tenstorrent_device *tt_dev)
+// Release the bookkeeping of every outbound iATU region the fd holds, without
+// touching the hardware.  Nulling each back-reference makes the fd's later
+// teardown of that region a no-op.
+static void forget_outbound_iatus(struct chardev_private *priv)
 {
-	long gen = atomic_long_read(&tt_dev->reset_gen);
-	struct chardev_private *priv;
+	struct tenstorrent_device *tt_dev = priv->device;
 	struct pinned_page_range *pinning;
 	struct dmabuf *dmabuf;
 	unsigned int i;
 
+	mutex_lock(&priv->mutex);
+	mutex_lock(&tt_dev->iatu_mutex);
+
+	hash_for_each(priv->dmabufs, i, dmabuf, hash_chain) {
+		if (dmabuf->outbound_iatu_region >= 0) {
+			release_outbound_iatu_slot(tt_dev, dmabuf->outbound_iatu_region);
+			dmabuf->outbound_iatu_region = -1;
+		}
+	}
+
+	list_for_each_entry(pinning, &priv->pinnings, list) {
+		if (pinning->outbound_iatu_region >= 0) {
+			release_outbound_iatu_slot(tt_dev, pinning->outbound_iatu_region);
+			pinning->outbound_iatu_region = -1;
+		}
+	}
+
+	mutex_unlock(&tt_dev->iatu_mutex);
+	mutex_unlock(&priv->mutex);
+}
+
+// Make every open fd forget its outbound iATU regions, releasing the slots
+// without touching the hardware.  Caller holds reset_rwsem for write.
+//
+// The reset ioctl calls this because reset leaves the iATU default-clear,
+// which is what a free slot means.  A wedged process would otherwise hold its
+// slots until a close() that never comes, and a later close() would disable a
+// slot that a post-reset fd has since claimed, or write to a device that is
+// mid-reset.  The resetting fd is included: its windows no longer translate.
+//
+// The remove handler calls this for a device it cannot reach, so that
+// releasing the fds' memory does not write to it: a reset has left the iATU
+// clear, or the device is absent and cannot do DMA.
+void tenstorrent_forget_iatus(struct tenstorrent_device *tt_dev)
+{
+	struct chardev_private *priv;
+
 	mutex_lock(&tt_dev->chardev_mutex);
 	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
-		if (priv->open_reset_gen == gen)
-			continue;
+		forget_outbound_iatus(priv);
+	}
+	mutex_unlock(&tt_dev->chardev_mutex);
+}
 
-		mutex_lock(&priv->mutex);
-		mutex_lock(&tt_dev->iatu_mutex);
+// Release the DMA memory of every open fd, disabling the outbound iATU regions
+// it holds.  Called by the remove handler with reset_rwsem held for write,
+// once the device can no longer issue DMA.  The fds may stay open
+// indefinitely, and their pinnings and buffers must not outlive the driver's
+// binding to the device.  Each fd is left with no memory for close() to
+// release.
+void tenstorrent_remove_memory_cleanup(struct tenstorrent_device *tt_dev)
+{
+	struct chardev_private *priv;
 
-		hash_for_each(priv->dmabufs, i, dmabuf, hash_chain) {
-			if (dmabuf->outbound_iatu_region >= 0) {
-				release_outbound_iatu_slot(tt_dev, dmabuf->outbound_iatu_region);
-				dmabuf->outbound_iatu_region = -1;
-			}
-		}
-
-		list_for_each_entry(pinning, &priv->pinnings, list) {
-			if (pinning->outbound_iatu_region >= 0) {
-				release_outbound_iatu_slot(tt_dev, pinning->outbound_iatu_region);
-				pinning->outbound_iatu_region = -1;
-			}
-		}
-
-		mutex_unlock(&tt_dev->iatu_mutex);
-		mutex_unlock(&priv->mutex);
+	mutex_lock(&tt_dev->chardev_mutex);
+	list_for_each_entry(priv, &tt_dev->open_fds_list, open_fd) {
+		tenstorrent_memory_cleanup(priv);
 	}
 	mutex_unlock(&tt_dev->chardev_mutex);
 }

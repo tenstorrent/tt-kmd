@@ -655,14 +655,17 @@ static bool is_fw_ready_for_telemetry(struct wormhole_device *wh)
 // firmware readiness, then scans the telemetry tag table. On first init it also
 // registers the sysfs group and hwmon device; on re-probe after reset it just
 // refreshes the tag cache (sysfs/hwmon are already registered).
+//
+// It is scheduled by probe and by the reset ioctl. Remove cancels it after
+// detaching (so the reset ioctl cannot reschedule it) and before unmapping the
+// BARs. It can therefore still run once on a detached device, either blocked
+// on reset_rwsem behind the detach or fired before the cancel; it checks
+// detached under the lock and leaves telemetry alone.
 static void fw_ready_work_func(struct work_struct *work)
 {
 	struct delayed_work *dwork = to_delayed_work(work);
 	struct wormhole_device *wh = container_of(dwork, struct wormhole_device, fw_ready_work);
 	struct tenstorrent_device *tt_dev = &wh->tt;
-
-	if (tt_dev->detached)
-		return;
 
 	if (!is_fw_ready_for_telemetry(wh)) {
 		if (wh->telemetry_retries-- > 0)
@@ -673,6 +676,10 @@ static void fw_ready_work_func(struct work_struct *work)
 	}
 
 	down_write(&tt_dev->reset_rwsem);
+	if (tt_dev->detached) {
+		up_write(&tt_dev->reset_rwsem);
+		return;
+	}
 	tt_telemetry_probe(tt_dev);
 	up_write(&tt_dev->reset_rwsem);
 
@@ -799,8 +806,7 @@ static void wormhole_cleanup_telemetry(struct tenstorrent_device *tt_dev)
 static void wormhole_cleanup_hardware(struct tenstorrent_device *tt_dev) {
 	struct wormhole_device *wh_dev = tt_dev_to_wh_dev(tt_dev);
 
-	if (!tt_dev->detached)
-		wormhole_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
+	wormhole_shutdown_firmware(tt_dev->pdev, reset_unit_regs(wh_dev));
 }
 
 static void wormhole_cleanup(struct tenstorrent_device *tt_dev) {
@@ -1132,7 +1138,6 @@ struct tenstorrent_device_class wormhole_class = {
 	.probe_telemetry = wormhole_probe_telemetry,
 	.cleanup_hardware = wormhole_cleanup_hardware,
 	.cleanup_device = wormhole_cleanup,
-	.reboot = wormhole_cleanup_hardware,
 	.configure_tlb = wormhole_configure_tlb,
 	.describe_tlb = wormhole_describe_tlb,
 	.save_reset_state = wormhole_save_reset_state,

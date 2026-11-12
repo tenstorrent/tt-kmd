@@ -310,27 +310,27 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
 		tenstorrent_reset_reclaim_tlbs(tt_dev);
-		tenstorrent_reset_reclaim_iatus(tt_dev);
+		tenstorrent_forget_iatus(tt_dev);
 		ok = pcie_timer_interrupt(pdev);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_USER_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
 		tenstorrent_reset_reclaim_tlbs(tt_dev);
-		tenstorrent_reset_reclaim_iatus(tt_dev);
+		tenstorrent_forget_iatus(tt_dev);
 		ok = set_reset_marker(pdev);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
 		tenstorrent_reset_reclaim_tlbs(tt_dev);
-		tenstorrent_reset_reclaim_iatus(tt_dev);
+		tenstorrent_forget_iatus(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
 		tenstorrent_reset_reclaim_tlbs(tt_dev);
-		tenstorrent_reset_reclaim_iatus(tt_dev);
+		tenstorrent_forget_iatus(tt_dev);
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET) {
@@ -704,14 +704,16 @@ static bool power_state_is_idle(const struct tenstorrent_power_state *power_stat
 // An idle vote is not sent; it arms power_down_work, so a close followed by
 // an open within the grace period never reaches firmware.
 //
-// This is the only place power_down_work is armed.  Arming happens under
-// chardev_mutex and only while !detached, which lets tenstorrent_pci_remove
-// fence it, and every caller holds reset_rwsem shared, which lets the reset
-// ioctl fence it.
+// This is the only place power_down_work is armed.  Every caller holds
+// reset_rwsem shared, and arming happens only while !detached.  Both the reset
+// ioctl and tenstorrent_pci_remove cancel the work with reset_rwsem held for
+// write, so neither can have an arm slip in behind its cancel, and after
+// remove's cancel the work is never armed again.
 static int tenstorrent_update_power_state_locked(struct tenstorrent_device *tt_dev)
 {
 	struct tenstorrent_power_state power_state;
 
+	lockdep_assert_held(&tt_dev->reset_rwsem);
 	lockdep_assert_held(&tt_dev->chardev_mutex);
 
 	if (tt_dev->detached || tt_dev->needs_hw_init)
@@ -745,7 +747,8 @@ int tenstorrent_update_power_state(struct tenstorrent_device *tt_dev)
 
 // Delayed work: power down once the vote has stayed idle for the grace
 // period.  A vote for power cancels this, or, if it raced the cancel, has
-// already been sent, so only send if the vote is still idle.
+// already been sent, so only send if the vote is still idle.  This cannot run
+// on a detached device: see tenstorrent_update_power_state_locked.
 void tenstorrent_power_down_work_func(struct work_struct *work)
 {
 	struct tenstorrent_device *tt_dev = container_of(to_delayed_work(work),
@@ -755,7 +758,7 @@ void tenstorrent_power_down_work_func(struct work_struct *work)
 
 	mutex_lock(&tt_dev->chardev_mutex);
 
-	if (!tt_dev->detached && !tt_dev->needs_hw_init) {
+	if (!tt_dev->needs_hw_init) {
 		aggregate_power_state_locked(tt_dev, &power_state);
 		if (power_state_is_idle(&power_state))
 			tt_dev->dev_class->set_power_state(tt_dev, &power_state);
@@ -1063,46 +1066,78 @@ static struct tenstorrent_device *inode_to_tt_dev(struct inode *inode)
 // cases O_NONBLOCK turns the wait into -EAGAIN.  While an O_EXCL fd is held it
 // is the only fd on the list, so the holder's release is exactly the
 // list_empty transition that wakes both kinds of waiter.
+//
+// The wait itself holds no locks.  Admission is then decided and committed in
+// one step under reset_rwsem (shared) and chardev_mutex, so that an fd joins
+// open_fds_list only on a device that has not been removed, carrying the reset
+// generation that is current as it joins, and with its power vote applied
+// before a reset can intervene.  A removed device fails the open with -ENODEV,
+// including for opens that were already waiting.
 static int admit_chardev_open(struct tenstorrent_device *tt_dev, struct chardev_private *priv, unsigned int f_flags)
 {
 	bool want_excl = f_flags & O_EXCL;
 	bool nonblock = f_flags & O_NONBLOCK;
+	bool power_aware = f_flags & O_APPEND;
+	bool admissible;
 	int ret;
 
-	mutex_lock(&tt_dev->chardev_mutex);
+	for (;;) {
+		down_read(&tt_dev->reset_rwsem);
+		mutex_lock(&tt_dev->chardev_mutex);
 
-	if (want_excl) {
-		// Writer: wait until no other fd is open, then take exclusivity.
-		while (!list_empty(&tt_dev->open_fds_list)) {
-			mutex_unlock(&tt_dev->chardev_mutex);
-			if (nonblock)
-				return -EAGAIN;
+		if (tt_dev->detached) {
+			ret = -ENODEV;
+			break;
+		}
+
+		// Writer: no other fd may be open.  Reader: no O_EXCL fd may be held.
+		if (want_excl)
+			admissible = list_empty(&tt_dev->open_fds_list);
+		else
+			admissible = !tt_dev->chardev_excl_held;
+
+		if (admissible) {
+			if (want_excl)
+				WRITE_ONCE(tt_dev->chardev_excl_held, true);
+
+			priv->open_reset_gen = atomic_long_read(&tt_dev->reset_gen);
+			list_add(&priv->open_fd, &tt_dev->open_fds_list);
+
+			// A power-aware fd votes nothing until it asks, so only a
+			// legacy open changes the vote.
+			if (!power_aware) {
+				ret = tenstorrent_update_power_state_locked(tt_dev);
+				if (ret < 0)
+					dev_warn(&tt_dev->pdev->dev, "Failed to set initial power state: %d\n", ret);
+			}
+
+			ret = 0;
+			break;
+		}
+
+		mutex_unlock(&tt_dev->chardev_mutex);
+		up_read(&tt_dev->reset_rwsem);
+
+		if (nonblock)
+			return -EAGAIN;
+
+		// Writers are registered exclusively so a release wakes one of them;
+		// readers are not, so they all wake together when the holder releases.
+		if (want_excl)
 			ret = wait_event_interruptible_exclusive(tt_dev->chardev_excl_waitqueue,
-								 list_empty(&tt_dev->open_fds_list));
-			if (ret)
-				return ret;
-			mutex_lock(&tt_dev->chardev_mutex);
-		}
-		WRITE_ONCE(tt_dev->chardev_excl_held, true);
-	} else {
-		// Reader: wait until no O_EXCL fd is held.  Registered non-exclusively
-		// so all readers wake together when the holder releases.
-		while (tt_dev->chardev_excl_held) {
-			mutex_unlock(&tt_dev->chardev_mutex);
-			if (nonblock)
-				return -EAGAIN;
+								 list_empty(&tt_dev->open_fds_list) ||
+								 READ_ONCE(tt_dev->detached));
+		else
 			ret = wait_event_interruptible(tt_dev->chardev_excl_waitqueue,
-						       !READ_ONCE(tt_dev->chardev_excl_held));
-			if (ret)
-				return ret;
-			mutex_lock(&tt_dev->chardev_mutex);
-		}
+						       !READ_ONCE(tt_dev->chardev_excl_held) ||
+						       READ_ONCE(tt_dev->detached));
+		if (ret)
+			return ret;
 	}
 
-	list_add(&priv->open_fd, &tt_dev->open_fds_list);
-
 	mutex_unlock(&tt_dev->chardev_mutex);
-	return 0;
+	up_read(&tt_dev->reset_rwsem);
+	return ret;
 }
 
 static int tt_cdev_open(struct inode *inode, struct file *file)
@@ -1132,7 +1167,6 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	// long-lived reference, dropped in tt_cdev_release.
 	get_device(&tt_dev->dev);
 	private_data->device = tt_dev;
-	private_data->open_reset_gen = atomic_long_read(&tt_dev->reset_gen);
 
 	private_data->pid = get_pid(task_pid(current->group_leader));
 	get_task_comm(private_data->comm, current);
@@ -1153,31 +1187,18 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 		return ret;
 	}
 
-	// Hold reset_rwsem (shared) so the reset ioctl (which holds it exclusive)
-	// cannot interleave with the power update; see
-	// tenstorrent_update_power_state_locked.
-	down_read(&tt_dev->reset_rwsem);
-
-	// A power-aware fd votes nothing until it asks, so only a legacy open
-	// changes the vote.
-	if (!power_aware) {
-		ret = tenstorrent_update_power_state(tt_dev);
-		if (ret < 0)
-			dev_warn(&tt_dev->pdev->dev, "Failed to set initial power state: %d\n", ret);
-	}
-
-	up_read(&tt_dev->reset_rwsem);
-
 	file->private_data = private_data;
 
 	return 0;
 }
 
+// Perform the fd's registered NOC write, unless the device is gone or is
+// mid-reset.
 static void tt_cdev_release_noc_cleanup(struct chardev_private *priv)
 {
 	struct tenstorrent_device *tt_dev = priv->device;
 
-	if (tt_dev->detached || !priv->noc_cleanup.enabled)
+	if (tt_dev->detached || tt_dev->needs_hw_init || !priv->noc_cleanup.enabled)
 		return;
 
 	tt_dev->dev_class->noc_write32(tt_dev, priv->noc_cleanup.x, priv->noc_cleanup.y,

@@ -11,6 +11,7 @@
 #include <linux/reboot.h>
 #include <linux/refcount.h>
 #include <linux/rwsem.h>
+#include <linux/spinlock.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 
@@ -20,6 +21,7 @@
 #include "fwlog_kmd.h"
 
 #define MAX_TLB_KINDS 4
+#define TT_EVENT_RING_SIZE 256
 
 struct tenstorrent_device_class;
 struct chardev_private;
@@ -56,6 +58,16 @@ struct tenstorrent_device {
 
 	DECLARE_BITMAP(resource_lock, TENSTORRENT_RESOURCE_LOCK_COUNT);
 	wait_queue_head_t resource_lock_waitqueue;
+
+	// Device event records, oldest overwritten first.  The record with seq s
+	// is events[s % TT_EVENT_RING_SIZE] while s >= event_tail and
+	// s >= event_head - TT_EVENT_RING_SIZE.
+	spinlock_t event_lock;			// Guards events, event_head and event_tail
+	u64 event_head;				// seq of the next record
+	u64 event_tail;				// seq of the first record since the last reset
+	struct tenstorrent_event events[TT_EVENT_RING_SIZE];
+	wait_queue_head_t event_waitqueue;	// poll() waiters for new records
+	bool events_fw_attached;		// Firmware publishes events
 
 	struct device *hwmon_dev;
 	const struct tenstorrent_sysfs_attr *telemetry_sysfs;

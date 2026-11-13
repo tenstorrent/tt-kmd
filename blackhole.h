@@ -9,15 +9,28 @@
 #include <linux/workqueue.h>
 #include "device.h"
 
-// DMA writes from host memory to the device, served by HDMA read channel 0.
+// Most 2M windows DMA takes from the shared pool: one per DRAM bank.
+#define BLACKHOLE_DMA_MAX_WINDOWS 8
+
+// DMA writes from host memory to the device, served by HDMA read channel 0
+// running chains of descriptors from a linked list.
 struct blackhole_dma {
-	spinlock_t lock;	// Guards queue, window and the channel registers
-	struct list_head queue;	// Commands oldest first; the engine runs the head
-	int window;		// 2M TLB id the engine writes through while queue is not empty, or -1
-	struct mutex window_mutex; // Serializes taking and returning window, which may sleep
-	struct work_struct release_window; // Returns window to the pool once queue drains
-	unsigned long started;	// jiffies when the running transfer started
+	spinlock_t lock;	// Guards the fields below up to deadline, and the channel registers
+	struct list_head queue;	// Commands oldest first; the running chain covers a prefix
+	int list_window;	// 2M TLB id the engine fetches the list through, or -1
+	int windows[BLACKHOLE_DMA_MAX_WINDOWS]; // 2M TLB ids the engine writes through
+	unsigned int window_count;
+	u64 list_axi;		// Address of the list as the engine fetches it
+	u64 msi_addr;
+	u32 msi_data;
+	u32 element_prefetch;
+	unsigned long deadline;	// jiffies by which the running chain must stop
+
+	struct mutex window_mutex; // Serializes taking and returning windows, which may sleep
+	struct work_struct release_windows; // Returns the windows once the queue drains
 	struct delayed_work timeout;
+	void *list;		// Elements of the running chain, in host memory
+	dma_addr_t list_iova;
 };
 
 struct blackhole_device {

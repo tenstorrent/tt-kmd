@@ -51,7 +51,7 @@ class Ring
 public:
     Ring()
     {
-        int ret = io_uring_queue_init(4, &ring, 0);
+        int ret = io_uring_queue_init(8, &ring, 0);
         if (ret != 0)
             throw std::system_error(-ret, std::generic_category(), "io_uring_queue_init failed");
     }
@@ -183,27 +183,62 @@ void verify_buffer_landed(int fd, const PinnedBuffer &buffer, DramCore core, uin
     }
 }
 
-// Two descriptors copy the two halves of a buffer to DRAM in reverse order.
-void VerifyDescriptorsLand(int fd, Ring &ring, DramCore core, PinnedBuffer &buffer)
-{
-    constexpr uint32_t HALF = BUFFER_SIZE / 2;
+constexpr std::size_t CHUNKS = 16;
+constexpr uint32_t CHUNK_SIZE = BUFFER_SIZE / CHUNKS;
 
-    fill_random(buffer);
+// Descriptors that copy the buffer's chunks to DRAM in reverse order.
+std::vector<tenstorrent_dma_desc> reversed_chunks(const PinnedBuffer &buffer, DramCore core)
+{
+    std::vector<tenstorrent_dma_desc> descs;
+    for (std::size_t i = 0; i < CHUNKS; i++)
+        descs.push_back(make_desc(buffer.iova + (CHUNKS - 1 - i) * CHUNK_SIZE, core, DRAM_ADDR + i * CHUNK_SIZE, CHUNK_SIZE));
+    return descs;
+}
+
+void verify_reversed_chunks(int fd, const PinnedBuffer &buffer, DramCore core)
+{
     const auto *words = reinterpret_cast<const uint64_t *>(buffer.memory.get());
 
-    std::vector<tenstorrent_dma_desc> descs = {
-        make_desc(buffer.iova + HALF, core, DRAM_ADDR, HALF),
-        make_desc(buffer.iova, core, DRAM_ADDR + HALF, HALF),
-    };
-
-    if (ring.dma_write(fd, descs) != 0)
-        THROW_TEST_FAILURE("DMA_WRITE failed");
-
     for (std::size_t offset = 0; offset < BUFFER_SIZE; offset += sizeof(uint64_t)) {
-        std::size_t src_offset = (offset + HALF) % BUFFER_SIZE;
+        std::size_t chunk = offset / CHUNK_SIZE;
+        std::size_t src_offset = (CHUNKS - 1 - chunk) * CHUNK_SIZE + offset % CHUNK_SIZE;
         if (noc_read64(fd, core, DRAM_ADDR + offset) != words[src_offset / sizeof(uint64_t)])
             THROW_TEST_FAILURE("DMA_WRITE data mismatch");
     }
+}
+
+// One command whose descriptors run as one chain.
+void VerifyChainLands(int fd, Ring &ring, DramCore core, PinnedBuffer &buffer)
+{
+    fill_random(buffer);
+
+    if (ring.dma_write(fd, reversed_chunks(buffer, core)) != 0)
+        THROW_TEST_FAILURE("DMA_WRITE failed");
+
+    verify_reversed_chunks(fd, buffer, core);
+}
+
+// Commands submitted together, which the engine chains across.
+void VerifyQueuedCommandsLand(int fd, Ring &ring, DramCore core, PinnedBuffer &buffer)
+{
+    constexpr std::size_t COMMANDS = 4;
+    fill_random(buffer);
+
+    std::vector<tenstorrent_dma_desc> descs = reversed_chunks(buffer, core);
+    std::vector<std::vector<tenstorrent_dma_desc>> commands;
+    for (std::size_t i = 0; i < COMMANDS; i++)
+        commands.emplace_back(descs.begin() + i * CHUNKS / COMMANDS, descs.begin() + (i + 1) * CHUNKS / COMMANDS);
+
+    for (const auto &command : commands)
+        ring.queue(fd, command);
+    ring.submit();
+
+    for (int result : ring.wait()) {
+        if (result != 0)
+            THROW_TEST_FAILURE("DMA_WRITE failed");
+    }
+
+    verify_reversed_chunks(fd, buffer, core);
 }
 
 void VerifyDescriptorCrossingWindowLands(int fd, Ring &ring, DramCore core, PinnedBuffer &buffer)
@@ -286,7 +321,8 @@ void TestDmaWrite(const EnumeratedDevice &dev)
     // same address, which PIN_PAGES rejects while the fd holds the old pinning.
     PinnedBuffer buffer = pin_buffer(fd);
 
-    VerifyDescriptorsLand(fd, ring, core, buffer);
+    VerifyChainLands(fd, ring, core, buffer);
+    VerifyQueuedCommandsLand(fd, ring, core, buffer);
     VerifyDescriptorCrossingWindowLands(fd, ring, core, buffer);
     VerifyForeignSourceRejected(fd, ring, core, buffer);
     VerifyUnpinRejectedWhileInFlight(fd, ring, core, buffer);

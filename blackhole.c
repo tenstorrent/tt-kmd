@@ -704,8 +704,8 @@ bool fw_log_hw_release(void *hw_ctx)
 // The engine reaches 2M TLB window N at AXI address N * 2M.
 
 // The list lives in host memory, so the engine fetches it over PCIe; prefetching
-// hides that. Never more than the channel's prefetch queue holds (QOS.PF_DEPTH),
-// or the engine hangs.
+// hides that. QOS.PF_DEPTH resets to 1 and must be at least ELEM_PF, or the
+// engine hangs, so it is raised while the queue is busy.
 #define DMA_ELEMENT_PREFETCH	7
 #define DMA_LIST_ELEMENTS	TENSTORRENT_DMA_WRITE_MAX_DESCS
 // Prefetch may read up to 128 elements past the terminator.
@@ -797,7 +797,6 @@ static void blackhole_dma_setup(struct blackhole_device *bh)
 	u64 list_noc = bh->tt.dev_class->noc_pcie_offset | bh->dma.list_iova;
 	u32 addr_lo, addr_hi = 0;
 	u16 flags, data;
-	u32 pf_depth;
 	u32 pcie_x;
 
 	pci_read_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, &flags);
@@ -816,8 +815,10 @@ static void blackhole_dma_setup(struct blackhole_device *bh)
 	bh->dma.msi_addr = ((u64)addr_hi << 32) | addr_lo;
 	bh->dma.msi_data = data;
 
-	pf_depth = FIELD_GET(HDMA_QOS_PF_DEPTH, ioread32(bh->bar2_mapping + HDMA_RD_QOS));
-	bh->dma.element_prefetch = min_t(u32, DMA_ELEMENT_PREFETCH, pf_depth);
+	bh->dma.saved_qos = ioread32(bh->bar2_mapping + HDMA_RD_QOS);
+	if (FIELD_GET(HDMA_QOS_PF_DEPTH, bh->dma.saved_qos) < DMA_ELEMENT_PREFETCH)
+		dma_write_reg(bh, HDMA_RD_QOS, (bh->dma.saved_qos & ~HDMA_QOS_PF_DEPTH) |
+					       FIELD_PREP(HDMA_QOS_PF_DEPTH, DMA_ELEMENT_PREFETCH));
 
 	// The engine fetches the list from its own PCIe tile, which forwards
 	// (4 << 58) | IOVA to the host.
@@ -890,7 +891,7 @@ start:
 	// A stop or abort may have reset the channel, so program all of it.
 	dma_write_reg(bh, HDMA_RD_EN, 1);
 	dma_write_reg(bh, HDMA_RD_CONTROL1, HDMA_CONTROL1_LLEN);
-	dma_write_reg(bh, HDMA_RD_ELEM_PF, bh->dma.element_prefetch);
+	dma_write_reg(bh, HDMA_RD_ELEM_PF, DMA_ELEMENT_PREFETCH);
 	dma_write_reg64(bh, HDMA_RD_MSI_STOP, bh->dma.msi_addr);
 	dma_write_reg64(bh, HDMA_RD_MSI_WATERMARK, bh->dma.msi_addr);
 	dma_write_reg64(bh, HDMA_RD_MSI_ABORT, bh->dma.msi_addr);
@@ -952,10 +953,12 @@ static void blackhole_dma_chain_done(struct blackhole_device *bh, int result)
 			blackhole_dma_complete(command, result);
 	}
 
-	if (!list_empty(&bh->dma.queue))
+	if (!list_empty(&bh->dma.queue)) {
 		blackhole_dma_start_chain(bh);
-	else
+	} else {
+		dma_write_reg(bh, HDMA_RD_QOS, bh->dma.saved_qos);
 		schedule_work(&bh->dma.release_windows);
+	}
 }
 
 static void blackhole_dma_interrupt(struct blackhole_device *bh)
@@ -1218,8 +1221,10 @@ static void blackhole_quiesce_uring_cmds(struct tenstorrent_device *tt_dev)
 	unsigned long flags;
 
 	spin_lock_irqsave(&bh->dma.lock, flags);
-	if (!list_empty(&bh->dma.queue))
+	if (!list_empty(&bh->dma.queue)) {
 		dma_write_reg(bh, HDMA_RD_EN, 0);
+		dma_write_reg(bh, HDMA_RD_QOS, bh->dma.saved_qos);
+	}
 	while (!list_empty(&bh->dma.queue))
 		blackhole_dma_complete(list_first_entry(&bh->dma.queue, struct blackhole_dma_command, node),
 				       -ENODEV);

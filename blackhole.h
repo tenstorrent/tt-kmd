@@ -23,7 +23,7 @@ struct blackhole_dma {
 	u64 list_axi;		// Address of the list as the engine fetches it
 	u64 msi_addr;
 	u32 msi_data;
-	u32 element_prefetch;
+	u32 saved_qos;		// QOS before the queue went busy, restored when it drains
 	unsigned long deadline;	// jiffies by which the running chain must stop
 
 	struct mutex window_mutex; // Serializes taking and returning windows, which may sleep

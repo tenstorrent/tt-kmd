@@ -62,6 +62,9 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - run: |
+        sudo apt update
+        sudo apt install -y liburing-dev
+    - run: |
         make -C test -j $(nproc)
     - name: Run host-only unit tests
       run: |

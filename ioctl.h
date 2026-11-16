@@ -59,8 +59,14 @@ struct tenstorrent_get_device_info_out {
 	__u16 bus_dev_fn;	// [0:2] function, [3:7] device, [8:15] bus
 	__u16 max_dma_buf_size_log2;	// Since 1.0
 	__u16 pci_domain;		// Since 1.23
-	__u16 reserved;
+	__u16 flags;			// TENSTORRENT_DEVICE_INFO_*, since 2.13; 0 from older drivers
 };
+
+// tenstorrent_get_device_info_out.flags
+// Device DMA does not snoop CPU caches (e.g. SpacemiT K3 PCIe, with or without IOMMU translation).
+// Pinned cacheable user memory (PIN_PAGES, hugepages) is then unsafe for device<->host data without
+// explicit cache maintenance; ALLOCATE_DMA_BUF memory is mapped uncached and stays coherent.
+#define TENSTORRENT_DEVICE_INFO_DMA_NONCOHERENT 1
 
 struct tenstorrent_get_device_info {
 	struct tenstorrent_get_device_info_in in;
@@ -90,6 +96,10 @@ struct tenstorrent_query_mappings {
 
 // tenstorrent_allocate_dma_buf_in.flags
 #define TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA 2
+// With NOC_DMA: take the NOC window bottom-up (lowest free address, as PIN_PAGES does) instead of
+// top-down. Lets a DMA buffer stand in for pinned sysmem at the NOC address user space expects.
+// Since 2.13; older drivers ignore unknown flags and allocate top-down.
+#define TENSTORRENT_ALLOCATE_DMA_BUF_NOC_BOTTOM_UP 4
 
 struct tenstorrent_allocate_dma_buf_in {
 	__u32 requested_size;

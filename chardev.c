@@ -16,6 +16,7 @@
 #include <linux/version.h>
 #include <linux/debugfs.h>
 #include <linux/proc_fs.h>
+#include <linux/dma-map-ops.h>
 
 #include "chardev_private.h"
 #include "device.h"
@@ -152,6 +153,8 @@ static long ioctl_get_device_info(struct chardev_private *priv,
 	out.bus_dev_fn = PCI_DEVID(pdev->bus->number, pdev->devfn);
 	out.max_dma_buf_size_log2 = MAX_DMA_BUF_SIZE_LOG2;
 	out.pci_domain = pci_domain_nr(pdev->bus);
+	if (!dev_is_dma_coherent(&priv->device->pdev->dev))
+		out.flags |= TENSTORRENT_DEVICE_INFO_DMA_NONCOHERENT;
 
 	if (clear_user(&arg->out, in.output_size_bytes) != 0)
 		return -EFAULT;

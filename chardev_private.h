@@ -102,6 +102,8 @@ struct chardev_private {
 	struct chardev_msg arc_msg; // Per-fd ARC message; guarded by device arc_msg_mutex
 
 	long open_reset_gen; // Reset generation at open time
+
+	atomic_t dma_writes_inflight; // URING_CMD_DMA_WRITE commands not yet completed
 };
 
 struct chardev_private *get_tenstorrent_priv(struct file *f);

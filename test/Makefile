@@ -16,6 +16,14 @@ TEST_SOURCES := get_driver_info.cpp get_device_info.cpp query_mappings.cpp \
 	ioctl_overrun.cpp ioctl_zeroing.cpp tlbs.cpp dmabuf_export.cpp release.cpp \
 	mappings_debugfs.cpp procfs_pids.cpp excl.cpp smc_msg.cpp noc_io.cpp
 
+# dma_write.cpp needs IORING_OP_URING_CMD, which liburing has since 2.2.
+HAVE_LIBURING := $(shell pkg-config --atleast-version=2.2 liburing && echo 1)
+ifeq ($(HAVE_LIBURING),1)
+TEST_SOURCES += dma_write.cpp
+LIBS += -luring
+CPPFLAGS += -DHAVE_LIBURING
+endif
+
 CORE_SOURCES := enumeration.cpp util.cpp devfd.cpp main.cpp test_failure.cpp
 SOURCES := $(CORE_SOURCES) $(TEST_SOURCES)
 
@@ -40,7 +48,7 @@ $(BUILDDIR)/fwlog_parser.o: ../fwlog_parser.c fwlog_compat.h ../fwlog.h | $(BUIL
 all:: $(PROG) $(UNIT_PROG) $(ARC_MSG_PROG)
 
 $(PROG): $(OBJS)
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(LIBS) $^ -o $@
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(LIBS) -o $@
 
 $(UNIT_PROG): $(UNIT_OBJS)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ -o $@
@@ -49,7 +57,7 @@ $(ARC_MSG_PROG): arc_msg_test.c
 	$(CC) $(CFLAGS) $(LDFLAGS) -pthread $< -o $@
 
 $(BUILDDIR)/%.o: %.cpp | $(BUILDDIR)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILDDIR):
 	mkdir $(BUILDDIR)

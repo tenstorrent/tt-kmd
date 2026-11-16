@@ -458,6 +458,8 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	// Drain in-flight ioctls before BAR unmap.  detached was already
 	// set under chardev_mutex above.
 	down_write(&tt_dev->reset_rwsem);
+	if (tt_dev->dev_class->quiesce_uring_cmds)
+		tt_dev->dev_class->quiesce_uring_cmds(tt_dev);
 	tenstorrent_vma_zap(tt_dev);
 	tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
 	up_write(&tt_dev->reset_rwsem);
@@ -519,6 +521,9 @@ static int tenstorrent_suspend(struct device *dev) {
 
 	cancel_delayed_work_sync(&tt_dev->power_down_work);
 	tenstorrent_revoke_tlb_dmabufs(tt_dev);
+
+	if (tt_dev->dev_class->quiesce_uring_cmds)
+		tt_dev->dev_class->quiesce_uring_cmds(tt_dev);
 
 	// Device-class cleanup may need to drain work scheduled by its IRQ
 	// handler before firmware is suspended. free_irq() prevents a late MSI

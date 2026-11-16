@@ -31,6 +31,10 @@
 #define TENSTORRENT_IOCTL_SMC_MSG		_IO(TENSTORRENT_IOCTL_MAGIC, 17)
 #define TENSTORRENT_IOCTL_NOC_READ		_IO(TENSTORRENT_IOCTL_MAGIC, 18)
 #define TENSTORRENT_IOCTL_NOC_WRITE		_IO(TENSTORRENT_IOCTL_MAGIC, 19)
+#define TENSTORRENT_IOCTL_SET_DMA_WINDOWS	_IO(TENSTORRENT_IOCTL_MAGIC, 20)
+
+// io_uring command opcodes (io_uring_sqe.cmd_op), a separate space from ioctls.
+#define TENSTORRENT_URING_CMD_DMA_WRITE		_IO(TENSTORRENT_IOCTL_MAGIC, 0x80)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -544,6 +548,109 @@ struct tenstorrent_noc_io {
 	__u8 reserved0[2];
 	__u64 addr;
 	__u64 value;
+};
+
+/**
+ * TENSTORRENT_URING_CMD_DMA_WRITE - Copy host memory to NOC endpoints with the DMA engine
+ *
+ * An io_uring command, not an ioctl: submit an IORING_OP_URING_CMD SQE on a
+ * device fd (plain or registered) with cmd_op set to this value and struct
+ * tenstorrent_dma_write in the SQE's command area. Needs Linux 6.6 or newer, a
+ * device with MSI enabled, and Blackhole; otherwise the CQE result is
+ * -EOPNOTSUPP.
+ *
+ * Commands from all fds of a device run one at a time, in submission order.
+ * The engine writes through the device's DMA windows (see
+ * TENSTORRENT_IOCTL_SET_DMA_WINDOWS), one window per region a command targets.
+ * A region is an endpoint (@x, @y, @noc) and a range of its addresses that is
+ * one window in size and aligned to it. A descriptor must stay within one
+ * region and a command may target at most as many regions as there are
+ * windows; the driver rejects a command that does not fit rather than
+ * splitting it.
+ *
+ * The CQE result is 0 once the engine has issued every write of the command,
+ * or a negative errno, in which case any part of it may have run. -EINVAL
+ * means the command broke a rule above or below and nothing ran, -EBUSY that
+ * the default windows were not free, -EIO that the engine aborted, -ETIMEDOUT
+ * that the engine did not finish in time, and -ENODEV that the device was
+ * reset or removed.
+ *
+ * While any command of an fd is in flight, UNPIN_PAGES on it fails with
+ * -EBUSY, so the engine never reads memory that was released.
+ *
+ * @descs: User pointer to @count struct tenstorrent_dma_desc.
+ * @count: Number of descriptors, 1 to TENSTORRENT_DMA_WRITE_MAX_DESCS.
+ * @flags: Reserved for future use, must be 0.
+ */
+#define TENSTORRENT_DMA_WRITE_MAX_DESCS 1024
+
+struct tenstorrent_dma_write {
+	__u64 descs;
+	__u32 count;
+	__u32 flags;
+};
+
+/**
+ * struct tenstorrent_dma_desc - One copy of a DMA_WRITE command
+ *
+ * @src: Host IOVA to read, as returned by PIN_PAGES or ALLOCATE_DMA_BUF on the
+ *       same fd; [@src, @src + @size) must lie within one such buffer.
+ * @addr: NOC address to write; [@addr, @addr + @size) must not wrap around.
+ * @size: Bytes to copy, non-zero.
+ * @x: X coordinate of the NOC endpoint; must be in the range 0-63.
+ * @y: Y coordinate of the NOC endpoint; must be in the range 0-63.
+ * @noc: NOC ID to use; must be 0 or 1.
+ * @reserved0: Must be 0.
+ *
+ * @src, @addr and @size must be multiples of 4.
+ */
+struct tenstorrent_dma_desc {
+	__u64 src;
+	__u64 addr;
+	__u32 size;
+	__u16 x;
+	__u16 y;
+	__u8 noc;
+	__u8 reserved0[7];
+};
+
+/**
+ * TENSTORRENT_IOCTL_SET_DMA_WINDOWS - Choose the windows DMA_WRITE commands write through
+ *
+ * A performance hint: a caller that knows its traffic asks for the window
+ * size and count that let its commands stay whole. Without it the device uses
+ * TENSTORRENT_DMA_DEFAULT_WINDOW_COUNT windows of 2 MiB, taken while commands
+ * are queued.
+ *
+ * The set replaces the device's current one for every fd, and is held until
+ * this fd closes, the device resets, or any fd calls this again; a @count of 0
+ * returns to the default. Fails with -EBUSY while commands are queued or when
+ * no window of that size is free.
+ *
+ * @in.size: Size of each window in bytes, 2 MiB or 4 GiB.
+ * @in.count: Number of windows wanted.
+ * @in.flags: Reserved for future use, must be 0.
+ * @out.size: Size of each window now in use.
+ * @out.granted: Number of windows now in use, which is less than @in.count
+ *               when fewer were free or the driver holds fewer.
+ */
+#define TENSTORRENT_DMA_DEFAULT_WINDOW_COUNT 8
+
+struct tenstorrent_set_dma_windows_in {
+	__u64 size;
+	__u32 count;
+	__u32 flags;
+};
+
+struct tenstorrent_set_dma_windows_out {
+	__u64 size;
+	__u32 granted;
+	__u32 reserved;
+};
+
+struct tenstorrent_set_dma_windows {
+	struct tenstorrent_set_dma_windows_in in;
+	struct tenstorrent_set_dma_windows_out out;
 };
 
 #endif

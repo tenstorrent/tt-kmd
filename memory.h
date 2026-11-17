@@ -2,14 +2,25 @@
 /*
  * DMA buffers, pinned user pages and the outbound iATU (batch B2).
  *
- * B1 provides the hook signatures below as stubs; B2 fills in the state
- * structs and the implementations in memory.c without touching the core.
+ * Per-fd state is protected by tt_memory_fd_state.lock (a mutex), the
+ * device-wide iATU region table by tt_memory_dev_state.iatu_lock.
+ * Lock order: dev->open_lock -> fd memory lock -> iatu_lock.
+ * The fd memory lock is never held across pin_user_pages or a user copy, so
+ * debugfs (which holds dev->open_lock) never waits behind a slow pin.
+ * mmap and page faults of DMA buffers take it under mmap_lock (mmap_lock ->
+ * fd memory lock); nothing takes mmap_lock under the fd memory lock.
  */
 #ifndef TT_MEMORY_H
 #define TT_MEMORY_H
 
 #include <linux/types.h>
 #include <linux/compiler.h>
+#include <linux/list.h>
+#include <linux/mutex.h>
+#include <linux/bitmap.h>
+#include <linux/rbtree.h>
+
+#include "ioctl.h"
 
 struct tenstorrent_device;
 struct chardev_private;
@@ -20,12 +31,32 @@ struct seq_file;
  * (each DMA buffer owns a 4 GiB slot of the mmap offset space, see device.h). */
 #define TT_MAX_DMA_BUF_SIZE_LOG2 28
 
+/* Outbound iATU regions the driver manages (all the controller has). */
+#define TT_IATU_NUM_REGIONS	16
+
+struct tt_iatu_region {
+	bool usable;		/* disabled at probe: ours to use */
+	bool used;		/* currently mapping something */
+	u64 noc_offset;		/* offset inside NoC-to-host window 4 */
+	u64 size;		/* bytes covered (multiple of 4 KiB) */
+};
+
 /* Device-wide memory state (embedded in struct tenstorrent_device as ->memory). */
 struct tt_memory_dev_state {
+	struct mutex iatu_lock;
+	bool iatu_present;	/* BAR2 iATU block looks sane */
+	struct tt_iatu_region iatu[TT_IATU_NUM_REGIONS];
 };
+
+struct tt_dma_buf;
 
 /* Per-fd memory state (embedded in struct chardev_private as ->memory). */
 struct tt_memory_fd_state {
+	struct mutex lock;
+	/* Index reserved (allocation in progress or done). */
+	DECLARE_BITMAP(dma_buf_busy, TENSTORRENT_MAX_DMA_BUFS);
+	struct tt_dma_buf *dma_bufs[TENSTORRENT_MAX_DMA_BUFS];	/* installed buffers */
+	struct rb_root pins;		/* of struct tt_pin, keyed by (va, size) */
 };
 
 /* Probe/remove. device_init runs after the hardware is up and before the

@@ -5,7 +5,8 @@ ifneq ($(KERNELRELEASE),)
 
 obj-m := tenstorrent.o
 tenstorrent-y := module.o pcie.o chardev.o blackhole.o debugfs.o procfs.o \
-		 memory.o tlb.o noc.o smc.o power.o
+		 memory.o tlb.o noc.o smc.o power.o telemetry.o hwmon.o \
+		 fwlog.o fwlog_parser.o
 
 else
 

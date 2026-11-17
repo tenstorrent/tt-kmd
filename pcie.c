@@ -68,8 +68,10 @@ static void tt_devices_unpublish(struct tenstorrent_device *dev)
 
 static irqreturn_t tt_irq_handler(int irq, void *data)
 {
-	/* No interrupt source is used yet; the vector exists so MSI is enabled
-	 * and programmed. Later subsystems hook their handling in here. */
+	struct tenstorrent_device *dev = data;
+
+	/* Vector 0: firmware log batches (smc.c dispatches to fwlog.c). */
+	tt_smc_handle_irq(dev);
 	return IRQ_HANDLED;
 }
 

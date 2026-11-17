@@ -829,19 +829,32 @@ int tt_mmio_mmap(struct vm_area_struct *vma, struct tt_mmio_mapping *m)
 
 /* ---- BAR mmap ---- */
 
-/* Pages of BAR0 user mappings must not reach: the kernel's window and the
- * TLB config page (which would let userspace retarget the kernel window). */
+/* Pages of BAR0 user mappings must not reach: the TLB windows (user windows
+ * belong to the fd that allocated them and are mapped through tt_tlb_mmap();
+ * window 201 is the kernel's) and the TLB config page (which would let
+ * userspace retarget any window, the kernel's included). */
 static bool tt_bar0_page_allowed(struct tt_mmio_mapping *m, u64 off)
 {
 	struct tt_bar_mapping *bm = container_of(m, struct tt_bar_mapping, mmio);
 	u64 bar_off = bm->bar_offset + off;
-	u64 kwin = bh_tlb_window_bar_offset(BH_KERNEL_TLB_INDEX);
 
-	if (bar_off >= kwin && bar_off < kwin + BH_TLB_2M_SIZE)
+	if (bar_off < BH_TLB_2M_COUNT * BH_TLB_2M_SIZE)
 		return false;
 	if (bar_off >= BH_TLB_CONFIG_BAR0_OFFSET && bar_off < BH_TLB_CONFIG_BAR0_OFFSET + PAGE_SIZE)
 		return false;
 	return true;
+}
+
+/* BAR2: only the first page. 0x1000-0x2FFF are the PCIe controller's iATU
+ * registers (owned by the driver's outbound iATU allocator) and the rest
+ * reads as all ones, slowly. */
+#define TT_BAR2_USER_LIMIT	0x1000
+
+static bool tt_bar2_page_allowed(struct tt_mmio_mapping *m, u64 off)
+{
+	struct tt_bar_mapping *bm = container_of(m, struct tt_bar_mapping, mmio);
+
+	return bm->bar_offset + off < TT_BAR2_USER_LIMIT;
 }
 
 static void tt_bar_mapping_release(struct tt_mmio_mapping *m)
@@ -860,7 +873,8 @@ static const struct tt_mmio_ops tt_bar0_mmio_ops = {
 	.release = tt_bar_mapping_release,
 };
 
-static const struct tt_mmio_ops tt_bar_mmio_ops = {
+static const struct tt_mmio_ops tt_bar2_mmio_ops = {
+	.page_allowed = tt_bar2_page_allowed,
 	.release = tt_bar_mapping_release,
 };
 
@@ -880,7 +894,7 @@ static int tt_bar_mmap(struct chardev_private *priv, struct vm_area_struct *vma,
 		bar = 0, start = dev->bar0_start, len = dev->bar0_len, ops = &tt_bar0_mmio_ops;
 		break;
 	case TT_MMAP_BAR2_UC >> TT_MMAP_BAR_REGION_SHIFT:
-		bar = 2, start = dev->bar2_start, len = dev->bar2_len, ops = &tt_bar_mmio_ops;
+		bar = 2, start = dev->bar2_start, len = dev->bar2_len, ops = &tt_bar2_mmio_ops;
 		break;
 	default:
 		return -EINVAL;

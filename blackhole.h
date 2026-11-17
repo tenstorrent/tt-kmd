@@ -97,6 +97,12 @@ int tt_noc_read(struct tenstorrent_device *dev, u8 noc, u16 x, u16 y, u64 addr,
 		void *val, int width);
 int tt_noc_write(struct tenstorrent_device *dev, u8 noc, u16 x, u16 y, u64 addr,
 		 const void *val, int width);
+/* Same, for user-initiated accesses: waiting for the window is interruptible
+ * (-ERESTARTSYS on a signal, nothing accessed). */
+int tt_noc_read_interruptible(struct tenstorrent_device *dev, u8 noc, u16 x, u16 y,
+			      u64 addr, void *val, int width);
+int tt_noc_write_interruptible(struct tenstorrent_device *dev, u8 noc, u16 x, u16 y,
+			       u64 addr, const void *val, int width);
 
 static inline int tt_noc_read32(struct tenstorrent_device *dev, u8 noc, u16 x, u16 y,
 				u64 addr, u32 *val)

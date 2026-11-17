@@ -180,8 +180,18 @@ static int noc_check_access(u8 noc, u16 x, u16 y, u64 addr, int width)
 	return noc_check_target(noc, x, y);
 }
 
-int tt_noc_read(struct tenstorrent_device *dev, u8 noc, u16 x, u16 y, u64 addr,
-		void *val, int width)
+/* Take the kernel window; @intr: give up with -ERESTARTSYS on a signal. */
+static int bh_kernel_tlb_lock(struct tenstorrent_device *dev, bool intr)
+{
+	if (!intr) {
+		mutex_lock(&dev->kernel_tlb_mutex);
+		return 0;
+	}
+	return mutex_lock_interruptible(&dev->kernel_tlb_mutex) ? -ERESTARTSYS : 0;
+}
+
+static int __tt_noc_read(struct tenstorrent_device *dev, u8 noc, u16 x, u16 y, u64 addr,
+			 void *val, int width, bool intr)
 {
 	void __iomem *p;
 	int ret;
@@ -190,7 +200,9 @@ int tt_noc_read(struct tenstorrent_device *dev, u8 noc, u16 x, u16 y, u64 addr,
 	if (ret)
 		return ret;
 
-	mutex_lock(&dev->kernel_tlb_mutex);
+	ret = bh_kernel_tlb_lock(dev, intr);
+	if (ret)
+		return ret;
 	if (dev->mmio_gone) {
 		ret = -ENODEV;
 		goto out;
@@ -216,8 +228,8 @@ out:
 	return ret;
 }
 
-int tt_noc_write(struct tenstorrent_device *dev, u8 noc, u16 x, u16 y, u64 addr,
-		 const void *val, int width)
+static int __tt_noc_write(struct tenstorrent_device *dev, u8 noc, u16 x, u16 y, u64 addr,
+			  const void *val, int width, bool intr)
 {
 	void __iomem *p;
 	int ret;
@@ -226,7 +238,9 @@ int tt_noc_write(struct tenstorrent_device *dev, u8 noc, u16 x, u16 y, u64 addr,
 	if (ret)
 		return ret;
 
-	mutex_lock(&dev->kernel_tlb_mutex);
+	ret = bh_kernel_tlb_lock(dev, intr);
+	if (ret)
+		return ret;
 	if (dev->mmio_gone) {
 		ret = -ENODEV;
 		goto out;
@@ -250,6 +264,30 @@ int tt_noc_write(struct tenstorrent_device *dev, u8 noc, u16 x, u16 y, u64 addr,
 out:
 	mutex_unlock(&dev->kernel_tlb_mutex);
 	return ret;
+}
+
+int tt_noc_read(struct tenstorrent_device *dev, u8 noc, u16 x, u16 y, u64 addr,
+		void *val, int width)
+{
+	return __tt_noc_read(dev, noc, x, y, addr, val, width, false);
+}
+
+int tt_noc_write(struct tenstorrent_device *dev, u8 noc, u16 x, u16 y, u64 addr,
+		 const void *val, int width)
+{
+	return __tt_noc_write(dev, noc, x, y, addr, val, width, false);
+}
+
+int tt_noc_read_interruptible(struct tenstorrent_device *dev, u8 noc, u16 x, u16 y,
+			      u64 addr, void *val, int width)
+{
+	return __tt_noc_read(dev, noc, x, y, addr, val, width, true);
+}
+
+int tt_noc_write_interruptible(struct tenstorrent_device *dev, u8 noc, u16 x, u16 y,
+			       u64 addr, const void *val, int width)
+{
+	return __tt_noc_write(dev, noc, x, y, addr, val, width, true);
 }
 
 static int noc_check_block(u8 noc, u16 x, u16 y, u64 addr, size_t len)

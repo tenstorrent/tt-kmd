@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * User TLB windows: ALLOCATE/FREE/CONFIGURE_TLB, TLB mmap, EXPORT_TLB_DMABUF
- * (batch B3). B1 provides stubs; see memory.h for the hook conventions.
+ * (batch B3). See memory.h for the hook conventions.
  *
  * Window geometry and the config register encoder live in blackhole.h
  * (bh_tlb_window_*(), bh_tlb_configure()); window BH_KERNEL_TLB_INDEX is
@@ -12,16 +12,53 @@
 
 #include <linux/types.h>
 #include <linux/compiler.h>
+#include <linux/list.h>
+#include <linux/mutex.h>
+
+#include "ioctl.h"
 
 struct tenstorrent_device;
 struct chardev_private;
 struct vm_area_struct;
 struct seq_file;
+struct tt_tlb_window;
 
+/*
+ * Window lifetime
+ * ---------------
+ * ALLOCATE_TLB creates a struct tt_tlb_window, puts it in
+ * dev->tlb.windows[id] (a non-NULL slot means "out of the pool") and resets
+ * the window's hardware config to all zeros. The window is held by up to
+ * three kinds of users:
+ *  - its owner fd (w->owner, cleared by FREE_TLB or fd release);
+ *  - user mappings (w->map_count, one per tt_mmio_mapping object, i.e. per
+ *    original mmap; VMA splits/dups/mremaps share it). FREE_TLB fails with
+ *    -EBUSY while non-zero, and the fd cannot be released while a VMA
+ *    exists (VMAs hold the file), so a mapping implies a live owner;
+ *  - dma-buf exports (w->export_count). FREE_TLB and fd close succeed but the
+ *    window stays out of the pool, unowned and so not reconfigurable, until
+ *    the last export is released. Every export holds a device reference.
+ * The slot is cleared and the window freed when all three are gone.
+ *
+ * PCI remove revokes live exports in tt_tlb_device_fini() (see there).
+ *
+ * Locking: dev->tlb.lock (mutex) protects the slots, all window fields, the
+ * per-fd window lists and the export list. It is taken from vm_ops->close
+ * (mmap_lock held), so it must never be held across user copies. Lock order:
+ * mmap_lock -> dev->tlb.lock, dev->open_lock -> dev->tlb.lock. dev->tlb.lock
+ * and the exports' dma_resv locks are never nested: the dma-buf callbacks
+ * that run with the reservation held (map/unmap/pin/unpin) never take
+ * dev->tlb.lock, and device_fini takes the reservations after dropping it.
+ */
 struct tt_tlb_dev_state {
+	struct mutex lock;
+	struct tt_tlb_window *windows[TENSTORRENT_MAX_INBOUND_TLBS];
+	struct list_head exports;	/* of struct tt_tlb_export */
+	unsigned int num_exports;
 };
 
 struct tt_tlb_fd_state {
+	struct list_head windows;	/* owned windows, under dev->tlb.lock */
 };
 
 int tt_tlb_device_init(struct tenstorrent_device *dev);
@@ -36,11 +73,10 @@ void tt_tlb_fd_release(struct chardev_private *priv);
 
 /*
  * PCI remove, for every fd still open, after dev->detached is set and with
- * dev->open_lock held: release everything that uses the device (DMA
- * mappings, iATU regions, exports' device side); the PCI device is gone once
- * remove returns. May run concurrently with this fd's release hook: both
- * take the subsystem's per-fd lock; release afterwards only frees software
- * state (and must not call the DMA API once detached).
+ * dev->open_lock held. TLB windows hold no DMA mappings, so this does
+ * nothing: user mappings were already zapped by the core, the windows are
+ * freed (software only) by the fd's release hook, and exports, which may
+ * outlive their owner fd, are revoked in tt_tlb_device_fini().
  */
 void tt_tlb_fd_detach(struct chardev_private *priv);
 

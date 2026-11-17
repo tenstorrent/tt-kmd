@@ -101,6 +101,9 @@ struct chardev_private {
 
 	struct chardev_msg arc_msg; // Per-fd ARC message; guarded by device arc_msg_mutex
 
+	struct mutex event_mutex;	// Serializes READ_EVENTS on this fd
+	u64 event_cursor;		// seq of the next event record to read; guarded by device event_lock
+
 	long open_reset_gen; // Reset generation at open time
 };
 

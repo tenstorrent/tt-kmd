@@ -43,6 +43,7 @@ enum tt_telemetry_tags {
     TELEMETRY_ASIC_ID = 61,
     TELEMETRY_AICLK_LIMIT_MAX = 63,
     TELEMETRY_TDP_LIMIT_MAX = 64,
+    TELEMETRY_EVENT_RING_ADDR = 86,
 };
 
 struct tenstorrent_sysfs_attr {

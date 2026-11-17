@@ -159,6 +159,8 @@ jobs:
       - build-debian
       - build-rpm
     runs-on: ubuntu-latest
+    # Publish gate: runs only from main, after a release reviewer approves (OSPO, ITSEC-295).
+    environment: release
     permissions:
       contents: write
       packages: write
@@ -188,6 +190,8 @@ jobs:
       - build-rpm
       - tagrelease
     runs-on: ubuntu-latest
+    # Publish gate: runs only from main, after a release reviewer approves (OSPO, ITSEC-295).
+    environment: release
     permissions:
       contents: write
       packages: write

@@ -570,7 +570,8 @@ long ioctl_allocate_dma_buf(struct chardev_private *priv,
 		goto out;
 	}
 
-	if (in.flags & TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA) {
+	// NOC_BOTTOM_UP implies NOC_DMA, as PIN_PAGES_NOC_TOP_DOWN does for PIN_PAGES.
+	if (in.flags & (TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA | TENSTORRENT_ALLOCATE_DMA_BUF_NOC_BOTTOM_UP)) {
 		bool top_down = !(in.flags & TENSTORRENT_ALLOCATE_DMA_BUF_NOC_BOTTOM_UP);
 		ret = setup_noc_dma(priv, top_down, in.requested_size, dma_handle, &out.noc_address);
 		if (ret < 0) {

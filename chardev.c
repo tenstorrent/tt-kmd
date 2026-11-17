@@ -16,7 +16,12 @@
 #include <linux/version.h>
 #include <linux/debugfs.h>
 #include <linux/proc_fs.h>
+// dev_is_dma_coherent() moved from dma-noncoherent.h to dma-map-ops.h in 5.10.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
 #include <linux/dma-map-ops.h>
+#else
+#include <linux/dma-noncoherent.h>
+#endif
 
 #include "chardev_private.h"
 #include "device.h"

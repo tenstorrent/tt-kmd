@@ -96,9 +96,10 @@ struct tenstorrent_query_mappings {
 
 // tenstorrent_allocate_dma_buf_in.flags
 #define TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA 2
-// With NOC_DMA: take the NOC window bottom-up (lowest free address, as PIN_PAGES does) instead of
-// top-down. Lets a DMA buffer stand in for pinned sysmem at the NOC address user space expects.
-// Since 2.13; older drivers ignore unknown flags and allocate top-down.
+// Map for NOC DMA taking the NOC window bottom-up (lowest free address, as PIN_PAGES does) instead
+// of top-down. Implies NOC_DMA. Lets a DMA buffer stand in for pinned sysmem at the NOC address
+// user space expects. Since 2.13; older drivers ignore unknown flags, so pass NOC_DMA as well to
+// get a (top-down) NOC mapping from them.
 #define TENSTORRENT_ALLOCATE_DMA_BUF_NOC_BOTTOM_UP 4
 
 struct tenstorrent_allocate_dma_buf_in {
@@ -114,7 +115,7 @@ struct tenstorrent_allocate_dma_buf_out {
 	__u64 mapping_offset;
 	__u32 size;
 	__u32 reserved0;
-	__u64 noc_address;	// valid if TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA is set
+	__u64 noc_address;	// valid if NOC_DMA or NOC_BOTTOM_UP is set
 	__u64 reserved1;
 };
 

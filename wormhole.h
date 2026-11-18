@@ -15,12 +15,7 @@ struct wormhole_device {
 	u8 __iomem *bar4_mapping;
 
 	u8 saved_mps;
-
-	struct delayed_work fw_ready_work;
-	int telemetry_retries;
-
-	bool pcie_perf_group_registered;
-	bool telemetry_group_registered;
+	bool mps_saved;
 };
 
 #define tt_dev_to_wh_dev(ttdev) \

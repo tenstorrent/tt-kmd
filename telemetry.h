@@ -53,6 +53,7 @@ struct tenstorrent_sysfs_attr {
 struct tenstorrent_device;
 int tt_telemetry_read32(struct tenstorrent_device *tt_dev, u16 tag_id, u32 *value);
 int tt_telemetry_probe(struct tenstorrent_device *tt_dev);
+int tt_telemetry_init(struct tenstorrent_device *tt_dev);
 void tt_telemetry_cleanup(struct tenstorrent_device *tt_dev);
 u64 telem_cache_lookup(const struct tenstorrent_device *tt_dev, u16 tag_id);
 int telem_cache_entry_cmp(const void *a, const void *b);

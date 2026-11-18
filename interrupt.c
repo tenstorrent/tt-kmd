@@ -22,8 +22,20 @@ static irqreturn_t irq_handler(int irq, void *device)
 
 bool tenstorrent_enable_interrupts(struct tenstorrent_device *tt_dev)
 {
-	if (pci_alloc_irq_vectors(tt_dev->pdev, 1, 1, PCI_IRQ_ALL_TYPES) <= 0)
+	unsigned int max_vectors = 1;
+	int vectors;
+
+	if (tt_dev->dev_class->prepare_msi_vectors)
+		max_vectors = tt_dev->dev_class->prepare_msi_vectors(tt_dev);
+
+	// The PCI core falls back to fewer vectors (one MSI without interrupt
+	// remapping on x86) or to INTx.
+	vectors = pci_alloc_irq_vectors(tt_dev->pdev, 1, max_vectors, PCI_IRQ_ALL_TYPES);
+	if (vectors <= 0)
 		goto out_pci_alloc_irq_vectors_failed;
+
+	if (vectors < max_vectors)
+		dev_dbg(&tt_dev->pdev->dev, "Allocated %d of %u interrupt vectors\n", vectors, max_vectors);
 
 	if (request_irq(pci_irq_vector(tt_dev->pdev, 0), irq_handler,
 			IRQF_SHARED, TENSTORRENT, tt_dev) != 0)

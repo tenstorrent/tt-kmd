@@ -28,6 +28,7 @@ extern unsigned char auto_reset_timeout;
 extern bool power_policy;
 extern uint idle_power_down_grace_ms;
 extern bool fw_logging;
+extern uint max_msi_vectors;
 extern uint fw_log_level;
 
 extern struct tenstorrent_device_class wormhole_class;

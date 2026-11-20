@@ -85,6 +85,21 @@
 #define FW_LOG_SUBCMD_SETUP   0x1
 #define FW_LOG_SUBCMD_RELEASE 0x2
 
+// TELEMETRY_FW_CAPABILITIES_0: firmware leaves HDMA channel 0 to the host, and
+// advertises a second MSI vector for its completions.
+#define FW_CAPABILITY_HDMA_CH0_HOST_OWNED BIT(3)
+
+// MSI vector 0 is firmware's; vector 1 carries HDMA completions. Firmware
+// sends any MSI whose vector the host did not enable on vector 0, so with one
+// vector the HDMA completions arrive there.
+#define BH_MSI_VECTORS 2
+#define HDMA_MSI_VECTOR 1
+
+// HDMA read channel 0, relative to the start of BAR2.
+#define HDMA_RD_INT_STATUS 0x184
+#define HDMA_INT_STOP BIT(0)
+#define HDMA_INT_ABORT BIT(2)
+
 #define IATU_BASE 0x1000	// Relative to the start of BAR2
 #define IATU_OUTBOUND 0
 #define IATU_OUTBOUND_REGIONS 16
@@ -660,8 +675,36 @@ bool fw_log_hw_release(void *hw_ctx)
 	return arc_msg_send_sync(&bh->tt, &msg) == 0;
 }
 
-static void blackhole_interrupt(struct tenstorrent_device *tt_dev)
+// HDMA completion. A stub until the driver drives the engine.
+static void blackhole_hdma_interrupt(struct blackhole_device *bh)
 {
+}
+
+// Whether HDMA read channel 0 has a stop or abort latched. Only needed when
+// HDMA completions share vector 0 with firmware.
+static bool blackhole_hdma_pending(struct blackhole_device *bh)
+{
+	u32 status = ioread32(bh->bar2_mapping + HDMA_RD_INT_STATUS);
+
+	// All-ones: the device is not answering, e.g. during a reset.
+	return status != U32_MAX && (status & (HDMA_INT_STOP | HDMA_INT_ABORT));
+}
+
+static void blackhole_interrupt(struct tenstorrent_device *tt_dev, unsigned int vector)
+{
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
+
+	if (vector == HDMA_MSI_VECTOR) {
+		blackhole_hdma_interrupt(bh);
+		return;
+	}
+
+	// Without a vector of its own, an HDMA completion arrives here.
+	// hdma_supported is set only after init_device has mapped BAR2.
+	if (READ_ONCE(tt_dev->hdma_supported) && tt_dev->interrupt_vectors <= HDMA_MSI_VECTOR &&
+	    blackhole_hdma_pending(bh))
+		blackhole_hdma_interrupt(bh);
+
 	fw_log_interrupt(&tt_dev->fw_log);
 }
 
@@ -774,6 +817,42 @@ static int blackhole_check_fw_ready(struct tenstorrent_device *tt_dev)
 	return -EAGAIN;
 }
 
+// Read TELEMETRY_FW_CAPABILITIES_0. Firmware that predates the tag has none.
+static bool blackhole_read_fw_capabilities(struct blackhole_device *bh, u32 *caps)
+{
+	struct telem_cache_entry entry = {
+		.tag_id = TELEMETRY_FW_CAPABILITIES_0,
+		.address = TELEM_ADDR_INVALID,
+	};
+
+	if (blackhole_populate_telemetry_cache(&bh->tt, &entry, 1) != 0 ||
+	    entry.address == TELEM_ADDR_INVALID)
+		return false;
+
+	return csm_read32(bh, entry.address, caps) == 0;
+}
+
+// KMD-owned HDMA needs firmware that leaves HDMA channel 0 alone, and MSI so
+// that its completions reach the driver.
+static bool blackhole_check_hdma_support(struct blackhole_device *bh)
+{
+	struct device *dev = &bh->tt.pdev->dev;
+	u32 caps;
+
+	if (!blackhole_read_fw_capabilities(bh, &caps) ||
+	    !(caps & FW_CAPABILITY_HDMA_CH0_HOST_OWNED)) {
+		dev_info(dev, "DMA unsupported: firmware does not leave HDMA channel 0 to the host\n");
+		return false;
+	}
+
+	if (!bh->tt.interrupt_enabled || !bh->tt.pdev->msi_enabled) {
+		dev_info(dev, "DMA unsupported: MSI is not enabled\n");
+		return false;
+	}
+
+	return true;
+}
+
 static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
@@ -782,8 +861,13 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 
 	pcie_set_readrq(pdev, MAX_MRRS);
 
+	// Firmware may have changed across a reset, so check again each time.
+	WRITE_ONCE(tt_dev->hdma_supported, false);
+
 	if (!tt_dev->fw_ready)
 		return true;
+
+	WRITE_ONCE(tt_dev->hdma_supported, blackhole_check_hdma_support(bh));
 
 	msg.header = ARC_MSG_TYPE_ASIC_STATE0;
 	if (arc_msg_send_sync(&bh->tt, &msg) != 0)
@@ -961,6 +1045,7 @@ struct tenstorrent_device_class blackhole_class = {
 	.configure_outbound_atu = blackhole_configure_outbound_atu,
 	.noc_write32 = blackhole_noc_write32,
 	.interrupt = blackhole_interrupt,
+	.max_msi_vectors = BH_MSI_VECTORS,
 	.noc_read = blackhole_noc_read,
 	.noc_write = blackhole_noc_write,
 	.csm_read32 = blackhole_csm_read32,

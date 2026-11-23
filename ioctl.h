@@ -67,9 +67,6 @@ struct tenstorrent_get_device_info_out {
 // Pinned cacheable user memory (PIN_PAGES, hugepages) is then unsafe for device<->host data without
 // explicit cache maintenance; ALLOCATE_DMA_BUF memory is mapped uncached and stays coherent.
 #define TENSTORRENT_DEVICE_INFO_DMA_NONCOHERENT 1
-// The driver can own the device's DMA engine (Blackhole HDMA channel 0): firmware leaves the
-// channel to the host and MSI is enabled. Rechecked after reset. Since 2.13.
-#define TENSTORRENT_DEVICE_INFO_HDMA 2
 
 struct tenstorrent_get_device_info {
 	struct tenstorrent_get_device_info_in in;

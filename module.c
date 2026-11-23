@@ -54,10 +54,6 @@ bool power_policy = true;
 module_param(power_policy, bool, 0444);
 MODULE_PARM_DESC(power_policy, "Enable power policy: low power at probe, re-aggregate on close (default=on).");
 
-uint max_msi_vectors = 0;
-module_param(max_msi_vectors, uint, 0444);
-MODULE_PARM_DESC(max_msi_vectors, "Limit on MSI vectors per device, 0 for the device default (default=0).");
-
 bool fw_logging = true;
 module_param(fw_logging, bool, 0444);
 MODULE_PARM_DESC(fw_logging, "Forward Blackhole firmware log messages to the kernel log (default=on).");

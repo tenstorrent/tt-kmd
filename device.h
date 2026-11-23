@@ -55,9 +55,6 @@ struct tenstorrent_device {
 	bool interrupt_enabled;
 	unsigned int interrupt_vectors;	// Allocated while interrupt_enabled
 	unsigned int irq_base;		// IRQ of vector 0; MSI vectors are consecutive
-	// Firmware leaves HDMA channel 0 to the driver and MSI is enabled.
-	// Set by init_hardware, so it is rechecked at probe, after reset and on resume.
-	bool hdma_supported;
 
 	struct mutex chardev_mutex;
 	bool chardev_excl_held;	// An O_EXCL fd is currently open
@@ -148,8 +145,7 @@ struct tenstorrent_device_class {
 	// Optional MSI handler invoked from the driver's IRQ handler with the vector
 	// that fired. May be NULL for devices with no interrupt handling.
 	void (*interrupt)(struct tenstorrent_device *ttdev, unsigned int vector);
-	// Most MSI vectors to ask for; 0 means one, with INTx as a fallback.
-	// Fewer may be granted, so the interrupt handler must cope with one.
+	// Most interrupt vectors to ask for; 0 means one. Fewer may be granted.
 	unsigned int max_msi_vectors;
 	// Reset-safe scalar NOC transfers. width is one of 1, 2, 4, 8.
 	// Return 0 on success or a negative errno.

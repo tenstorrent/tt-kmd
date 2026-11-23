@@ -161,8 +161,6 @@ static long ioctl_get_device_info(struct chardev_private *priv,
 	out.pci_domain = pci_domain_nr(pdev->bus);
 	if (!dev_is_dma_coherent(&priv->device->pdev->dev))
 		out.flags |= TENSTORRENT_DEVICE_INFO_DMA_NONCOHERENT;
-	if (READ_ONCE(priv->device->hdma_supported))
-		out.flags |= TENSTORRENT_DEVICE_INFO_HDMA;
 
 	if (clear_user(&arg->out, in.output_size_bytes) != 0)
 		return -EFAULT;
@@ -421,7 +419,6 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		ok = set_reset_marker(pdev);
 		priv->device->needs_hw_init = true;
 		priv->device->fw_ready = false;
-		WRITE_ONCE(priv->device->hdma_supported, false);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
@@ -430,7 +427,6 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 		priv->device->fw_ready = false;
-		WRITE_ONCE(priv->device->hdma_supported, false);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
 		bump_reset_gen(priv);
 		tenstorrent_vma_zap(tt_dev);
@@ -439,7 +435,6 @@ static long ioctl_reset_device(struct chardev_private *priv,
 		ok = priv->device->dev_class->reset(priv->device, in.flags);
 		priv->device->needs_hw_init = true;
 		priv->device->fw_ready = false;
-		WRITE_ONCE(priv->device->hdma_supported, false);
 	} else if (in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET ||
 		   in.flags == TENSTORRENT_RESET_DEVICE_POST_RESET_POLL) {
 		int r;

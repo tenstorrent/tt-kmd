@@ -1111,6 +1111,14 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			ret = ioctl_noc_write(priv, (struct tenstorrent_noc_io __user *)arg);
 			break;
 
+		case TENSTORRENT_IOCTL_IMPORT_DMABUF:
+			ret = ioctl_import_dmabuf(priv, (struct tenstorrent_import_dmabuf __user *)arg);
+			break;
+
+		case TENSTORRENT_IOCTL_RELEASE_DMABUF_IMPORT:
+			ret = ioctl_release_dmabuf_import(priv, (struct tenstorrent_release_dmabuf_import __user *)arg);
+			break;
+
 		default:
 			ret = -EINVAL;
 			break;
@@ -1261,6 +1269,7 @@ static int tt_cdev_open(struct inode *inode, struct file *file)
 	hash_init(private_data->dmabufs);
 	INIT_LIST_HEAD(&private_data->pinnings);
 	INIT_LIST_HEAD(&private_data->peer_mappings);
+	INIT_LIST_HEAD(&private_data->dmabuf_imports);
 	INIT_LIST_HEAD(&private_data->vma_list);
 	INIT_LIST_HEAD(&private_data->arc_msg.queue_node);
 	mutex_init(&private_data->vma_lock);

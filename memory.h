@@ -54,6 +54,10 @@ long ioctl_configure_tlb(struct chardev_private *priv,
 			struct tenstorrent_configure_tlb __user *arg);
 long ioctl_export_tlb_dmabuf(struct chardev_private *priv,
 			struct tenstorrent_export_tlb_dmabuf __user *arg);
+long ioctl_import_dmabuf(struct chardev_private *priv,
+			struct tenstorrent_import_dmabuf __user *arg);
+long ioctl_release_dmabuf_import(struct chardev_private *priv,
+			struct tenstorrent_release_dmabuf_import __user *arg);
 
 int tenstorrent_mmap(struct chardev_private *priv, struct vm_area_struct *vma);
 void tenstorrent_memory_cleanup(struct chardev_private *priv);

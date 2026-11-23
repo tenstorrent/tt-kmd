@@ -31,6 +31,8 @@
 #define TENSTORRENT_IOCTL_SMC_MSG		_IO(TENSTORRENT_IOCTL_MAGIC, 17)
 #define TENSTORRENT_IOCTL_NOC_READ		_IO(TENSTORRENT_IOCTL_MAGIC, 18)
 #define TENSTORRENT_IOCTL_NOC_WRITE		_IO(TENSTORRENT_IOCTL_MAGIC, 19)
+#define TENSTORRENT_IOCTL_IMPORT_DMABUF		_IO(TENSTORRENT_IOCTL_MAGIC, 20)
+#define TENSTORRENT_IOCTL_RELEASE_DMABUF_IMPORT	_IO(TENSTORRENT_IOCTL_MAGIC, 21)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -483,6 +485,58 @@ struct tenstorrent_export_tlb_dmabuf {
 	__s32 fd;
 	__u64 offset;
 	__u64 size;
+};
+
+/**
+ * TENSTORRENT_IOCTL_IMPORT_DMABUF - map a peer's dma-buf for this device's DMA
+ *
+ * Attaches to a dma-buf as a peer-to-peer importer and maps it into this
+ * device's DMA domain, so DMA issued by this device (e.g. NOC writes leaving
+ * through its PCIe tile) reaches the buffer at @dma_address. The typical
+ * buffer is a TLB window another Tenstorrent device exported with
+ * TENSTORRENT_IOCTL_EXPORT_TLB_DMABUF, which lets one chip write into
+ * another's memory directly.
+ *
+ * The import holds its own reference on the dma-buf, so the caller may close
+ * @dmabuf_fd right away. For a TLB export that reference also keeps the window
+ * allocated, so it cannot be handed to another client while this device can
+ * still reach it. The mapping lasts until TENSTORRENT_IOCTL_RELEASE_DMABUF_IMPORT
+ * or until this fd is closed.
+ *
+ * The buffer must map to one contiguous range, since the caller gets a single
+ * address. Importing a buffer this device exported itself is refused.
+ *
+ * @argsz: Must be sizeof(struct tenstorrent_import_dmabuf).
+ * @flags: Reserved for future use, must be 0.
+ * @dmabuf_fd: The dma-buf to import.
+ * @import_id: OUT: handle for TENSTORRENT_IOCTL_RELEASE_DMABUF_IMPORT.
+ * @dma_address: OUT: the address at which this device reaches the buffer.
+ * @size: OUT: the buffer's size in bytes.
+ */
+struct tenstorrent_import_dmabuf {
+	__u32 argsz;
+	__u32 flags;
+	__s32 dmabuf_fd;
+	__u32 import_id;
+	__u64 dma_address;
+	__u64 size;
+};
+
+/**
+ * TENSTORRENT_IOCTL_RELEASE_DMABUF_IMPORT - undo TENSTORRENT_IOCTL_IMPORT_DMABUF
+ *
+ * Unmaps the buffer from this device's DMA domain and drops the import's
+ * reference on it. Stop this device's DMA into the buffer first.
+ *
+ * @argsz: Must be sizeof(struct tenstorrent_release_dmabuf_import).
+ * @flags: Reserved for future use, must be 0.
+ * @import_id: The handle TENSTORRENT_IOCTL_IMPORT_DMABUF returned on this fd.
+ */
+struct tenstorrent_release_dmabuf_import {
+	__u32 argsz;
+	__u32 flags;
+	__u32 import_id;
+	__u32 reserved;
 };
 
 /**

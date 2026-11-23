@@ -76,6 +76,8 @@ struct chardev_private {
 	DECLARE_HASHTABLE(dmabufs, DMABUF_HASHTABLE_BITS);	// keyed on by dmabuf.index, chained on struct dmabuf.hash_chain
 	struct list_head pinnings;	// struct pinned_page_range.list
 	struct list_head peer_mappings; // struct peer_resource_mapping.list
+	struct list_head dmabuf_imports; // struct tt_dmabuf_import.list, guarded by mutex
+	u32 next_dmabuf_import_id;	// guarded by mutex
 
 	struct list_head vma_list;	// struct tenstorrent_mmap_vma.list
 	struct mutex vma_lock;		// Protects vma_list

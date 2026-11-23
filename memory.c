@@ -1481,6 +1481,186 @@ bool tenstorrent_has_tlb_dmabuf_exports(struct tenstorrent_device *tt_dev)
 	return any;
 }
 
+// A peer's dma-buf mapped into this device's DMA domain (IMPORT_DMABUF).
+struct tt_dmabuf_import {
+	struct list_head list;		// node in chardev_private.dmabuf_imports
+	u32 id;
+	struct dma_buf *dmabuf;
+	struct dma_buf_attachment *attach;
+	struct sg_table *sgt;
+};
+
+// The import pins its mapping, so there is never anything to move. A TLB
+// export is revoked only on device removal, since RESET_DEVICE is refused
+// while one is live.
+static void tt_dmabuf_import_move_notify(struct dma_buf_attachment *attach)
+{
+}
+
+static const struct dma_buf_attach_ops tt_dmabuf_import_ops = {
+	.allow_peer2peer = true,
+	.move_notify = tt_dmabuf_import_move_notify,
+};
+
+static void tt_dmabuf_import_release(struct tt_dmabuf_import *import)
+{
+	dma_resv_lock(import->dmabuf->resv, NULL);
+	dma_buf_unmap_attachment(import->attach, import->sgt, DMA_BIDIRECTIONAL);
+	dma_buf_unpin(import->attach);
+	dma_resv_unlock(import->dmabuf->resv);
+
+	dma_buf_detach(import->dmabuf, import->attach);
+	dma_buf_put(import->dmabuf);
+	kfree(import);
+}
+
+static bool tt_dmabuf_is_own_export(struct chardev_private *priv, struct dma_buf *dmabuf)
+{
+	return dmabuf->ops == &tt_tlb_dmabuf_ops &&
+	       ((struct tt_tlb_dmabuf *)dmabuf->priv)->tt_dev == priv->device;
+}
+
+long ioctl_import_dmabuf(struct chardev_private *priv, struct tenstorrent_import_dmabuf __user *arg)
+{
+	struct tenstorrent_import_dmabuf in = {0};
+	struct tt_dmabuf_import *import;
+	struct scatterlist *sg;
+	dma_addr_t next_address;
+	long ret;
+	int i;
+
+	if (copy_from_user(&in, arg, sizeof(in)))
+		return -EFAULT;
+
+	if (in.argsz != sizeof(in))
+		return -EINVAL;
+
+	if (in.flags != 0)
+		return -EINVAL;
+
+	import = kzalloc(sizeof(*import), GFP_KERNEL);
+	if (!import)
+		return -ENOMEM;
+
+	import->dmabuf = dma_buf_get(in.dmabuf_fd);
+	if (IS_ERR(import->dmabuf)) {
+		ret = PTR_ERR(import->dmabuf);
+		goto err_free;
+	}
+
+	// Reaching this device's own window through its own PCIe tile is not
+	// peer-to-peer; MAP_PEER_BAR refuses the same.
+	if (tt_dmabuf_is_own_export(priv, import->dmabuf)) {
+		ret = -EINVAL;
+		goto err_put;
+	}
+
+	import->attach = dma_buf_dynamic_attach(import->dmabuf, &priv->device->pdev->dev,
+						&tt_dmabuf_import_ops, import);
+	if (IS_ERR(import->attach)) {
+		ret = PTR_ERR(import->attach);
+		goto err_put;
+	}
+
+	dma_resv_lock(import->dmabuf->resv, NULL);
+	ret = dma_buf_pin(import->attach);
+	if (ret) {
+		dma_resv_unlock(import->dmabuf->resv);
+		goto err_detach;
+	}
+	import->sgt = dma_buf_map_attachment(import->attach, DMA_BIDIRECTIONAL);
+	if (IS_ERR(import->sgt)) {
+		ret = PTR_ERR(import->sgt);
+		dma_buf_unpin(import->attach);
+		dma_resv_unlock(import->dmabuf->resv);
+		goto err_detach;
+	}
+	dma_resv_unlock(import->dmabuf->resv);
+
+	// The caller gets one address for the whole buffer.
+	next_address = sg_dma_address(import->sgt->sgl);
+	for_each_sgtable_dma_sg(import->sgt, sg, i) {
+		if (sg_dma_address(sg) != next_address) {
+			tt_dmabuf_import_release(import);
+			return -EINVAL;
+		}
+		next_address += sg_dma_len(sg);
+	}
+
+	in.dma_address = sg_dma_address(import->sgt->sgl);
+	in.size = import->dmabuf->size;
+
+	mutex_lock(&priv->mutex);
+	import->id = priv->next_dmabuf_import_id++;
+	list_add(&import->list, &priv->dmabuf_imports);
+	mutex_unlock(&priv->mutex);
+	in.import_id = import->id;
+
+	if (copy_to_user(arg, &in, sizeof(in))) {
+		mutex_lock(&priv->mutex);
+		list_del(&import->list);
+		mutex_unlock(&priv->mutex);
+		tt_dmabuf_import_release(import);
+		return -EFAULT;
+	}
+
+	return 0;
+
+err_detach:
+	dma_buf_detach(import->dmabuf, import->attach);
+err_put:
+	dma_buf_put(import->dmabuf);
+err_free:
+	kfree(import);
+	return ret;
+}
+
+long ioctl_release_dmabuf_import(struct chardev_private *priv,
+				 struct tenstorrent_release_dmabuf_import __user *arg)
+{
+	struct tenstorrent_release_dmabuf_import in = {0};
+	struct tt_dmabuf_import *import, *found = NULL;
+
+	if (copy_from_user(&in, arg, sizeof(in)))
+		return -EFAULT;
+
+	if (in.argsz != sizeof(in))
+		return -EINVAL;
+
+	if (in.flags != 0)
+		return -EINVAL;
+
+	mutex_lock(&priv->mutex);
+	list_for_each_entry(import, &priv->dmabuf_imports, list) {
+		if (import->id == in.import_id) {
+			found = import;
+			list_del(&import->list);
+			break;
+		}
+	}
+	mutex_unlock(&priv->mutex);
+
+	if (!found)
+		return -EINVAL;
+
+	tt_dmabuf_import_release(found);
+	return 0;
+}
+
+// Releases outside priv->mutex: unmapping takes the dma-buf's reservation lock.
+static void tenstorrent_release_dmabuf_imports(struct chardev_private *priv)
+{
+	struct tt_dmabuf_import *import, *tmp;
+	LIST_HEAD(imports);
+
+	mutex_lock(&priv->mutex);
+	list_splice_init(&priv->dmabuf_imports, &imports);
+	mutex_unlock(&priv->mutex);
+
+	list_for_each_entry_safe(import, tmp, &imports, list)
+		tt_dmabuf_import_release(import);
+}
+
 #else /* LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0) */
 
 long ioctl_export_tlb_dmabuf(struct chardev_private *priv, struct tenstorrent_export_tlb_dmabuf __user *arg)
@@ -1495,6 +1675,21 @@ void tenstorrent_revoke_tlb_dmabufs(struct tenstorrent_device *tt_dev)
 bool tenstorrent_has_tlb_dmabuf_exports(struct tenstorrent_device *tt_dev)
 {
 	return false;
+}
+
+long ioctl_import_dmabuf(struct chardev_private *priv, struct tenstorrent_import_dmabuf __user *arg)
+{
+	return -EOPNOTSUPP;
+}
+
+long ioctl_release_dmabuf_import(struct chardev_private *priv,
+				 struct tenstorrent_release_dmabuf_import __user *arg)
+{
+	return -EOPNOTSUPP;
+}
+
+static void tenstorrent_release_dmabuf_imports(struct chardev_private *priv)
+{
 }
 
 #endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0) */
@@ -1828,6 +2023,8 @@ void tenstorrent_memory_cleanup(struct chardev_private *priv)
 	struct dmabuf *dmabuf;
 	unsigned int i;
 	struct peer_resource_mapping *peer_mapping, *tmp_peer_mapping;
+
+	tenstorrent_release_dmabuf_imports(priv);
 
 	mutex_lock(&priv->mutex);
 

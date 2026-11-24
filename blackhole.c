@@ -85,11 +85,6 @@
 #define FW_LOG_SUBCMD_SETUP   0x1
 #define FW_LOG_SUBCMD_RELEASE 0x2
 
-// Firmware that leaves HDMA channel 1 to the host advertises 2 MSI vectors:
-// vector 0 for its own MSIs, vector 1 for HDMA completions.
-#define BH_MSI_VECTORS 2
-#define BH_HDMA_MSI_VECTOR 1
-
 #define IATU_BASE 0x1000	// Relative to the start of BAR2
 #define IATU_OUTBOUND 0
 #define IATU_OUTBOUND_REGIONS 16
@@ -179,8 +174,11 @@ struct TLB_4G_REG {
 };
 static_assert(sizeof(struct TLB_4G_REG) == TLB_REG_SIZE, "TLB_4G_REG size mismatch");
 
-static int blackhole_configure_tlb_2M(struct blackhole_device *bh, int tlb,
-				      struct tenstorrent_noc_tlb_config *config)
+// The DMA windows are 2M windows.
+static_assert(TENSTORRENT_DMA_WINDOW_SIZE == TLB_2M_WINDOW_SIZE);
+
+int blackhole_configure_tlb_2M(struct blackhole_device *bh, int tlb,
+			       struct tenstorrent_noc_tlb_config *config)
 {
 	u8 __iomem *regs = bh->tlb_regs + (tlb * TLB_REG_SIZE);
 	struct TLB_2M_REG reg = { 0 };
@@ -361,7 +359,7 @@ static int blackhole_csm_write32(struct tenstorrent_device *tt_dev, u64 addr, u3
 }
 
 // BH has two PCIE instances, the function reads NOC ID to find out which one is active
-static bool blackhole_detect_pcie_noc_x(struct blackhole_device *bh, u32 *noc_x) {
+bool blackhole_detect_pcie_noc_x(struct blackhole_device *bh, u32 *noc_x) {
 	*noc_x = ioread32(bh->noc2axi_cfg + NOC_ID_OFFSET) & 0x3F;
 	return (*noc_x == 2 || *noc_x == 11);
 }
@@ -600,6 +598,26 @@ static int blackhole_populate_telemetry_cache(struct tenstorrent_device *tt_dev,
 	return 0;
 }
 
+// Read TAG_FW_ACTIVE_CONFIG_0 straight from the telemetry table, as it is not
+// in the telemetry cache.
+int blackhole_read_fw_active_config(struct blackhole_device *bh, u32 *value)
+{
+	struct telem_cache_entry entry = {
+		.tag_id = TELEMETRY_FW_ACTIVE_CONFIG_0,
+		.address = TELEM_ADDR_INVALID,
+	};
+	int r;
+
+	r = blackhole_populate_telemetry_cache(&bh->tt, &entry, 1);
+	if (r)
+		return r;
+
+	if (entry.address == TELEM_ADDR_INVALID)
+		return -ENODATA;
+
+	return csm_read32(bh, entry.address, value);
+}
+
 static int blackhole_arc_msg_locate_queue(struct tenstorrent_device *tt_dev, u32 *queue_base, u32 *num_entries)
 {
 	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
@@ -667,11 +685,15 @@ bool fw_log_hw_release(void *hw_ctx)
 
 static void blackhole_interrupt(struct tenstorrent_device *tt_dev, unsigned int vector)
 {
-	// Vector 1 is for HDMA completions; nothing programs the engine yet.
-	if (vector == BH_HDMA_MSI_VECTOR)
-		return;
+	struct blackhole_device *bh = tt_dev_to_bh_dev(tt_dev);
 
-	fw_log_interrupt(&tt_dev->fw_log);
+	// DMA completions come on vector 1, or share vector 0 with firmware
+	// when the device got only one vector.
+	if (vector == bh->dma.vector)
+		bh_dma_interrupt(bh);
+
+	if (vector == 0)
+		fw_log_interrupt(&tt_dev->fw_log);
 }
 
 static bool blackhole_reset(struct tenstorrent_device *tt_dev, u32 reset_flag)
@@ -812,6 +834,10 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 
 	// Best-effort: start firmware log forwarding. Also re-runs on resume.
 	fw_log_setup(&tt_dev->fw_log);
+
+	// DMA comes back after a reset or resume once firmware says channel 0
+	// is ours again.
+	bh_dma_enable(bh);
 
 	return true;
 }
@@ -977,6 +1003,8 @@ struct tenstorrent_device_class blackhole_class = {
 	.noc_write32 = blackhole_noc_write32,
 	.interrupt = blackhole_interrupt,
 	.max_msi_vectors = BH_MSI_VECTORS,
+	.dma_write = bh_dma_write,
+	.dma_quiesce = bh_dma_quiesce,
 	.noc_read = blackhole_noc_read,
 	.noc_write = blackhole_noc_write,
 	.csm_read32 = blackhole_csm_read32,

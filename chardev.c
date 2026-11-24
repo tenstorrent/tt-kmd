@@ -32,6 +32,7 @@
 #include "memory.h"
 #include "module.h"
 #include "tlb.h"
+#include "uring_compat.h"
 
 #define TT_POWER_FLAG_ALL 0x7FFF
 
@@ -43,6 +44,9 @@ static long tt_cdev_ioctl(struct file *, unsigned int, unsigned long);
 static int tt_cdev_mmap(struct file *, struct vm_area_struct *);
 static int tt_cdev_open(struct inode *, struct file *);
 static int tt_cdev_release(struct inode *, struct file *);
+#if TT_HAVE_URING_CMD
+static int tt_cdev_uring_cmd(struct io_uring_cmd *cmd, unsigned int issue_flags);
+#endif
 
 static struct file_operations chardev_fops = {
 	.owner = THIS_MODULE,
@@ -50,6 +54,9 @@ static struct file_operations chardev_fops = {
 	.mmap = tt_cdev_mmap,
 	.open = tt_cdev_open,
 	.release = tt_cdev_release,
+#if TT_HAVE_URING_CMD
+	.uring_cmd = tt_cdev_uring_cmd,
+#endif
 };
 
 int init_char_driver(unsigned int max_devices)
@@ -377,6 +384,10 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	// EXPORT_TLB_DMABUF rationale in ioctl.h. RESTORE_STATE and the POST_RESET
 	// flags are the re-init halves of a reset sequence, not destructive, so
 	// they are left alone.
+	//
+	// A destructive reset ends the driver's own DMA: stop the engine while
+	// the chip still answers and fail what is queued with -ENODEV. DMA comes
+	// back when init_hardware finds firmware ready for it again.
 	switch (in.flags) {
 	case TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK:
 	case TENSTORRENT_RESET_DEVICE_CONFIG_WRITE:
@@ -385,6 +396,8 @@ static long ioctl_reset_device(struct chardev_private *priv,
 	case TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET:
 		if (tenstorrent_has_tlb_dmabuf_exports(tt_dev))
 			return -EBUSY;
+		if (tt_dev->dev_class->dma_quiesce)
+			tt_dev->dev_class->dma_quiesce(tt_dev, !tt_dev->needs_hw_init);
 		break;
 	default:
 		break;
@@ -1124,6 +1137,45 @@ out:
 
 	return ret;
 }
+
+#if TT_HAVE_URING_CMD
+// io_uring commands follow the ioctl rules: the fd must be current, and the
+// device not removed or mid-reset.
+static int tt_cdev_uring_cmd(struct io_uring_cmd *cmd, unsigned int issue_flags)
+{
+	struct chardev_private *priv = cmd->file->private_data;
+	struct tenstorrent_device *tt_dev = priv->device;
+	const struct tenstorrent_dma_write *payload;
+	struct tenstorrent_dma_write args;
+	int ret;
+
+	if (cmd->cmd_op != TENSTORRENT_URING_CMD_DMA_WRITE)
+		return -EINVAL;
+
+	// The SQE may still be writable by user space; read it once.
+	payload = tt_uring_cmd_payload(cmd, struct tenstorrent_dma_write);
+	args.descs = READ_ONCE(payload->descs);
+	args.count = READ_ONCE(payload->count);
+	args.flags = READ_ONCE(payload->flags);
+
+	// A reset can hold reset_rwsem for a long time. Don't block the
+	// submitting task on it: io_uring retries from a worker, which may block.
+	if (issue_flags & IO_URING_F_NONBLOCK) {
+		if (!down_read_trylock(&tt_dev->reset_rwsem))
+			return -EAGAIN;
+	} else {
+		down_read(&tt_dev->reset_rwsem);
+	}
+
+	ret = tt_cdev_ioctl_check(priv, cmd->cmd_op);
+	if (ret == 0)
+		ret = tt_dev->dev_class->dma_write ? tt_dev->dev_class->dma_write(priv, cmd, &args)
+						   : -EOPNOTSUPP;
+
+	up_read(&tt_dev->reset_rwsem);
+	return ret;
+}
+#endif
 
 static int tt_cdev_mmap(struct file *file, struct vm_area_struct *vma)
 {

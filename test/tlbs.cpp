@@ -457,7 +457,8 @@ void VerifyManyWindowsBlackhole(const EnumeratedDevice &dev)
     DevFd dev_fd(dev.path);
     int fd = dev_fd.get();
 
-    for (size_t i = 0; i < 200; ++i) {
+    // Every 2M window user space can get: 191 readers and the writer below.
+    for (size_t i = 0; i < 191; ++i) {
         windows.push_back(std::make_unique<TlbWindow2M>(fd, x, y, addr));
     }
 

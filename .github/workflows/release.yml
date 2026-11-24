@@ -3,13 +3,15 @@ run-name: Create Release (${{ github.sha }})
 
 # How a release works (see VERSION_UPDATE.md for the maintainer steps):
 #
-#   1. A pull request to main changes the file RELEASE to the version to
-#      release, and sets module.h, dkms.conf and AKMBUILD to the next
-#      development version (X.Y.Z-pre).
-#   2. The merge starts this workflow. It makes a release commit that sets the
-#      three files to the release version. The parent of that commit is the
-#      merged commit on main. The release commit is not pushed to a branch.
-#   3. The packages are built from the same source as the release commit.
+#   1. A pull request to main holds two commits (tools/release makes them).
+#      The release commit sets RELEASE, module.h, dkms.conf and AKMBUILD to the
+#      version to release. The development commit sets the three version files
+#      to the next development version (X.Y.Z-pre).
+#   2. The pull request is merged with a merge commit or a rebase, not a
+#      squash. Both commits are then in the history of main, and main holds
+#      the development version.
+#   3. The merge starts this workflow. It finds the release commit in the
+#      history of main and builds the packages from it.
 #   4. Only after both builds pass, the tag ttkmd-<version> is pushed on the
 #      release commit, and the GitHub release is made as a draft, filled,
 #      checked, and then published.
@@ -23,7 +25,8 @@ on:
       - main
     paths:
       - RELEASE
-  # Use this to run a failed release again. It reads RELEASE from main.
+  # Use this to run a failed release again. It reads RELEASE from main and
+  # finds the same release commit, also if main has new commits.
   workflow_dispatch:
 
 # One release at a time. Do not cancel a release that is in progress.
@@ -34,7 +37,7 @@ concurrency:
 permissions: {}
 
 jobs:
-  # Read and check the version. Make the release commit to learn its hash.
+  # Read and check the version. Find the release commit.
   version:
     name: Read and check the version
     runs-on: ubuntu-latest
@@ -60,6 +63,8 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ github.sha }}
+          # The full history: the release commit is found with git log.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Read RELEASE
@@ -109,7 +114,7 @@ jobs:
             fi
           done
           if [[ "${module_version}" == "${VERSION}" ]]; then
-            echo "::error::main holds the release version ${VERSION}. main must hold the next development version (X.Y.Z-pre). Use tools/set-version."
+            echo "::error::main holds the release version ${VERSION}. main must hold the next development version (X.Y.Z-pre). Make the release pull request with tools/release."
             exit 1
           fi
           if [[ "${module_version}" != *-pre ]]; then
@@ -117,15 +122,22 @@ jobs:
             exit 1
           fi
 
-      - name: Make the release commit
+      - name: Find the release commit
         id: commit
         env:
           VERSION: ${{ steps.read.outputs.version }}
         run: |
-          release_sha="$(.github/scripts/release-commit.sh "${VERSION}")"
+          # No release commit is not an error here. The next job decides: it
+          # is correct if the release is already published (for example when
+          # RELEASE was only corrected), and an error if it is not.
+          if release_sha="$(.github/scripts/find-release-commit.sh "${VERSION}")"; then
+            echo "Release commit: ${release_sha}"
+            git show --stat --format=fuller "${release_sha}"
+          else
+            release_sha=""
+            echo "::warning::No commit on main holds the release version ${VERSION}."
+          fi
           echo "release_sha=${release_sha}" >> "${GITHUB_OUTPUT}"
-          echo "Release commit: ${release_sha}"
-          git show --stat --format=fuller "${release_sha}"
 
       - name: Look for the tag
         id: tag
@@ -183,13 +195,16 @@ jobs:
           fi
           echo "Release ${TAG}: ${release}"
           echo "Tag ${TAG}: ${TAG_SHA:-does not exist}"
-          echo "Release commit of this run: ${RELEASE_SHA}"
+          echo "Release commit of this run: ${RELEASE_SHA:-not found}"
 
           if [[ "${release}" == "published" ]]; then
             msg="Release ${TAG} is already published. There is nothing to do."
             echo "::notice::${msg}"
             echo "${msg}" >> "${GITHUB_STEP_SUMMARY}"
             action=skip
+          elif [[ -z "${RELEASE_SHA}" ]]; then
+            echo "::error::Release ${TAG} is not published, and no commit on main holds its version in RELEASE, module.h, dkms.conf and AKMBUILD. Was the release pull request squash-merged? Revert that commit on main, then run tools/release again and do not squash."
+            exit 1
           elif [[ -z "${TAG_SHA}" || "${TAG_SHA}" == "${RELEASE_SHA}" ]]; then
             # A new release, or a second run of a release that did not finish.
             action=release
@@ -214,8 +229,7 @@ jobs:
       contents: read
     uses: ./.github/workflows/build-debian.yml
     with:
-      ref: ${{ github.sha }}
-      version: ${{ needs.version.outputs.version }}
+      ref: ${{ needs.version.outputs.release_sha }}
 
   build-rpm:
     needs:
@@ -226,8 +240,7 @@ jobs:
       contents: read
     uses: ./.github/workflows/build-rpm.yml
     with:
-      ref: ${{ github.sha }}
-      version: ${{ needs.version.outputs.version }}
+      ref: ${{ needs.version.outputs.release_sha }}
 
   # Push the tag, then make, fill, check and publish the release.
   release:
@@ -251,19 +264,24 @@ jobs:
       PRERELEASE: ${{ needs.version.outputs.prerelease }}
       RELEASE_SHA: ${{ needs.version.outputs.release_sha }}
     steps:
-      - name: Checkout the commit on main
+      - name: Checkout the release commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.version.outputs.release_sha }}
 
-      - name: Make the release commit again
+      - name: Check the release commit
         run: |
-          sha="$(.github/scripts/release-commit.sh "${VERSION}")"
+          sha="$(git rev-parse HEAD)"
           if [[ "${sha}" != "${RELEASE_SHA}" ]]; then
-            echo "::error::The release commit is ${sha}, but the first job made ${RELEASE_SHA}."
+            echo "::error::The checkout is ${sha}, but the release commit is ${RELEASE_SHA}."
             exit 1
           fi
-          echo "Release commit: ${sha}"
+          version="$(./tools/current-version)"
+          if [[ "${version}" != "${VERSION}" ]]; then
+            echo "::error::The release commit holds version ${version}, not ${VERSION}."
+            exit 1
+          fi
+          echo "Release commit: ${sha} (version ${version})"
 
       - name: Download the packages
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0

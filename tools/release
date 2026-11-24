@@ -1,0 +1,155 @@
+#!/bin/bash
+
+# SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
+# SPDX-License-Identifier: GPL-2.0-only
+
+# Open the pull request that starts a release.
+#
+# Usage: tools/release [--dry-run] [--next <dev-version>] <version>
+#   <version>         the version to release, for example 2.13.0 or 2.13.0-rc1
+#   --next <version>  the development version main holds afterwards.
+#                     Default: X.Y.(Z+1)-pre, for example 2.13.1-pre.
+#   --dry-run         show the change, but do not push or open a pull request
+#
+# The pull request holds two commits:
+#
+#   1. the release commit: RELEASE, module.h, dkms.conf and AKMBUILD hold
+#      <version>. The workflow puts the tag ttkmd-<version> on this commit.
+#   2. the development commit: module.h, dkms.conf and AKMBUILD hold the
+#      development version, so main never reports a release version.
+#
+# Merging it starts the Create Release workflow (see VERSION_UPDATE.md).
+# Merge it with a merge commit or a rebase. Do NOT squash: a squash removes
+# the release commit, and the workflow then stops without a release.
+#
+# The work happens in a temporary worktree of origin/main. Your checkout, your
+# current branch and any uncommitted changes are not touched.
+#
+# RELEASE_BASE_REF overrides origin/main as the starting point (for testing).
+
+set -euo pipefail
+
+usage() {
+    sed -n -E '/^# Usage:/,/^$/ s/^# ?//p' "${BASH_SOURCE[0]}" >&2
+    exit 2
+}
+
+die() {
+    echo "Error: $*" >&2
+    exit 1
+}
+
+DRY_RUN=false
+NEXT=""
+VERSION=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run) DRY_RUN=true ;;
+        --next)
+            [[ $# -ge 2 ]] || usage
+            NEXT="$2"
+            shift
+            ;;
+        -h|--help) usage ;;
+        -*) usage ;;
+        *)
+            [[ -z "${VERSION}" ]] || usage
+            VERSION="$1"
+            ;;
+    esac
+    shift
+done
+[[ -n "${VERSION}" ]] || usage
+
+NUM='(0|[1-9][0-9]*)'
+ID='[0-9A-Za-z-]+'
+VERSION_RE="^${NUM}\.${NUM}\.${NUM}(-${ID}(\.${ID})*)?\$"
+
+[[ "${VERSION}" =~ ${VERSION_RE} ]] ||
+    die "'${VERSION}' is not a valid version (expected X.Y.Z or X.Y.Z-suffix)"
+[[ "${VERSION}" != *-pre ]] ||
+    die "'${VERSION}' is a development version; it cannot be released"
+
+if [[ -z "${NEXT}" ]]; then
+    NEXT="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))-pre"
+fi
+[[ "${NEXT}" =~ ${VERSION_RE} && "${NEXT}" == *-pre ]] ||
+    die "'${NEXT}' is not a valid development version (expected X.Y.Z-pre)"
+
+BASE_REF="${RELEASE_BASE_REF:-origin/main}"
+TAG="ttkmd-${VERSION}"
+BRANCH="release/${VERSION}"
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "${ROOT}"
+
+if [[ "${DRY_RUN}" == false ]]; then
+    command -v gh > /dev/null || die "the GitHub CLI (gh) is required"
+fi
+
+git fetch --quiet origin main
+
+if [[ -n "$(git ls-remote origin "refs/tags/${TAG}")" ]]; then
+    die "tag ${TAG} already exists. A tag is never moved; choose a new version."
+fi
+if [[ -n "$(git ls-remote origin "refs/heads/${BRANCH}")" ]]; then
+    die "branch ${BRANCH} already exists on origin. Merge or delete it first."
+fi
+
+# Check this before the cleanup trap is set: the trap deletes ${BRANCH}, and it
+# must not delete a branch that this run did not make.
+if git show-ref --verify --quiet "refs/heads/${BRANCH}"; then
+    die "local branch ${BRANCH} already exists. Delete or rename it first."
+fi
+
+BASE_SHA="$(git rev-parse --verify --quiet "${BASE_REF}^{commit}")" ||
+    die "${BASE_REF} is not a commit"
+
+WORKTREE="$(mktemp -d)"
+cleanup() {
+    git -C "${ROOT}" worktree remove --force "${WORKTREE}" 2> /dev/null || rm -rf "${WORKTREE}"
+    git -C "${ROOT}" worktree prune
+    git -C "${ROOT}" branch --quiet -D "${BRANCH}" 2> /dev/null || true
+}
+trap cleanup EXIT
+
+git worktree add --quiet -b "${BRANCH}" "${WORKTREE}" "${BASE_SHA}"
+cd "${WORKTREE}"
+
+[[ -x tools/set-version && -f RELEASE ]] ||
+    die "${BASE_REF} has no tools/set-version or RELEASE file"
+[[ "$(tr -d '[:space:]' < RELEASE)" != "${VERSION}" ]] ||
+    die "RELEASE on ${BASE_REF} already holds ${VERSION}"
+
+echo "${VERSION}" > RELEASE
+./tools/set-version "${VERSION}" > /dev/null
+git add RELEASE module.h dkms.conf AKMBUILD
+git commit --quiet -m "TTKMD v${VERSION}" \
+    -m "The release commit of ${VERSION}. The release workflow puts the tag ${TAG} on this commit."
+
+./tools/set-version "${NEXT}" > /dev/null
+git add module.h dkms.conf AKMBUILD
+git commit --quiet -m "Bump version to ${NEXT} for development"
+
+echo "Release ${VERSION}; main will hold ${NEXT}:"
+echo
+git log --reverse --format='=== %s' --patch --unified=0 "${BASE_SHA}..HEAD"
+echo
+
+if [[ "${DRY_RUN}" == true ]]; then
+    echo "Dry run: nothing was pushed."
+    exit 0
+fi
+
+git push --quiet origin "${BRANCH}"
+gh pr create --base main --head "${BRANCH}" \
+    --title "Release ${VERSION}" \
+    --body "Merging this starts the Create Release workflow for \`${VERSION}\`. \`main\` holds \`${NEXT}\` afterwards.
+
+**Do not squash.** Use \"Create a merge commit\" or \"Rebase and merge\". The first commit is the release commit that gets the tag \`${TAG}\`; a squash removes it and the workflow stops without a release.
+
+Made by \`tools/release ${VERSION}\`."
+
+echo
+echo "Merge the pull request above to start the release. Do NOT squash it."

@@ -14,7 +14,8 @@ ARC_MSG_PROG := arc_msg_test
 TEST_SOURCES := get_driver_info.cpp get_device_info.cpp query_mappings.cpp \
 	dma_buf.cpp pin_pages.cpp config_space.cpp lock.cpp hwmon.cpp map_peer_bar.cpp \
 	ioctl_overrun.cpp ioctl_zeroing.cpp tlbs.cpp dmabuf_export.cpp release.cpp \
-	mappings_debugfs.cpp procfs_pids.cpp excl.cpp smc_msg.cpp noc_io.cpp
+	mappings_debugfs.cpp procfs_pids.cpp excl.cpp smc_msg.cpp noc_io.cpp \
+	dma_write.cpp
 
 CORE_SOURCES := enumeration.cpp util.cpp devfd.cpp main.cpp test_failure.cpp
 SOURCES := $(CORE_SOURCES) $(TEST_SOURCES)
@@ -26,6 +27,16 @@ UNIT_OBJS := $(BUILDDIR)/fwlog_test.o $(BUILDDIR)/fwlog_parser.o
 OPT_FLAGS := -O2
 CXXFLAGS := -std=c++17 -Wall -Wno-narrowing $(OPT_FLAGS)
 CFLAGS := -Wall -Wextra $(OPT_FLAGS)
+
+# The DMA_WRITE tests need liburing 2.2 or newer, found through pkg-config
+# (point PKG_CONFIG_PATH at another build if need be). Without it they are
+# skipped.
+ifeq ($(shell pkg-config --atleast-version=2.2 liburing 2>/dev/null && echo y),y)
+$(BUILDDIR)/dma_write.o: CXXFLAGS += -DHAVE_LIBURING $(shell pkg-config --cflags liburing)
+LIBS += $(shell pkg-config --libs liburing)
+else
+$(info liburing 2.2 or newer not found; ttkmd_test will skip the DMA_WRITE tests)
+endif
 
 # fwlog_test.cpp includes the driver's fwlog.h directly from the parent directory.
 $(BUILDDIR)/fwlog_test.o: CXXFLAGS += -I..
@@ -40,7 +51,7 @@ $(BUILDDIR)/fwlog_parser.o: ../fwlog_parser.c fwlog_compat.h ../fwlog.h | $(BUIL
 all:: $(PROG) $(UNIT_PROG) $(ARC_MSG_PROG)
 
 $(PROG): $(OBJS)
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(LIBS) $^ -o $@
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(LIBS) -o $@
 
 $(UNIT_PROG): $(UNIT_OBJS)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ -o $@

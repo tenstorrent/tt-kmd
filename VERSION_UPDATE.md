@@ -31,6 +31,16 @@ was started, for example `2.13.0` or `2.13.0-rc1`.
 
 ## How to make a release
 
+Run the helper. It opens the pull request described below; merge it to start
+the release:
+
+```bash
+tools/release 2.13.0            # main holds 2.13.1-pre afterwards
+tools/release --dry-run 2.13.0  # only show the change
+```
+
+It does these steps for you:
+
 1. Make a branch from `main`.
 2. Write the version to release in `RELEASE`:
 

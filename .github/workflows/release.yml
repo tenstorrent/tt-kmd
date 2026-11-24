@@ -1,305 +1,369 @@
 name: Create Release
-run-name: Create Release
+run-name: Create Release (${{ github.sha }})
+
+# How a release works (see VERSION_UPDATE.md for the maintainer steps):
+#
+#   1. A pull request to main changes the file RELEASE to the version to
+#      release, and sets module.h, dkms.conf and AKMBUILD to the next
+#      development version (X.Y.Z-pre).
+#   2. The merge starts this workflow. It makes a release commit that sets the
+#      three files to the release version. The parent of that commit is the
+#      merged commit on main. The release commit is not pushed to a branch.
+#   3. The packages are built from the same source as the release commit.
+#   4. Only after both builds pass, the tag ttkmd-<version> is pushed on the
+#      release commit, and the GitHub release is made as a draft, filled,
+#      checked, and then published.
+#
+# This workflow does not push to a branch. It does not move or delete a tag.
+# It does not change a release after it is published.
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - RELEASE
+  # Use this to run a failed release again. It reads RELEASE from main.
   workflow_dispatch:
-    inputs:
-      version_string:
-        description: 'The exact version to release (e.g., 2.4.0 or 2.4.0-rc1)'
-        required: true
-        type: string
 
-env:
-  project_name: tt-kmd
-  EMAIL: releases@tenstorrent.com
-  NAME: Tenstorrent Releases
+# One release at a time. Do not cancel a release that is in progress.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions: {}
 
 jobs:
-  # Create a temporary branch for version updates and changelog generation
-  # This ensures all changes are atomic and can be merged back after builds complete
-  create-temp-branch:
+  # Read and check the version. Make the release commit to learn its hash.
+  version:
+    name: Read and check the version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      tag: ${{ steps.read.outputs.tag }}
+      prerelease: ${{ steps.read.outputs.prerelease }}
+      release_sha: ${{ steps.commit.outputs.release_sha }}
+      tag_sha: ${{ steps.tag.outputs.tag_sha }}
+    steps:
+      - name: Allow only main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [[ "${REF}" != "refs/heads/main" ]]; then
+            echo "::error::A release runs only from main (this run is on ${REF})."
+            exit 1
+          fi
+
+      - name: Checkout the commit on main
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Read RELEASE
+        id: read
+        run: |
+          if [[ ! -f RELEASE ]]; then
+            echo "::error file=RELEASE::The file RELEASE does not exist."
+            exit 1
+          fi
+          version="$(tr -d '[:space:]' < RELEASE)"
+
+          num='(0|[1-9][0-9]*)'
+          id='[0-9A-Za-z-]+'
+          if [[ ! "${version}" =~ ^${num}\.${num}\.${num}(-${id}(\.${id})*)?$ ]]; then
+            echo "::error file=RELEASE::RELEASE must hold one version, X.Y.Z or X.Y.Z-suffix (for example 2.13.0 or 2.13.0-rc1)."
+            exit 1
+          fi
+
+          if [[ -n "${BASH_REMATCH[4]}" ]]; then
+            prerelease=true
+          else
+            prerelease=false
+          fi
+
+          {
+            echo "version=${version}"
+            echo "tag=ttkmd-${version}"
+            echo "prerelease=${prerelease}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Version to release: ${version} (prerelease: ${prerelease})"
+
+      - name: Check the development version on main
+        env:
+          VERSION: ${{ steps.read.outputs.version }}
+        run: |
+          module_version="$(./tools/current-version)"
+          dkms_version="$(sed -n -E 's/^PACKAGE_VERSION="([^"]*)"$/\1/p' dkms.conf)"
+          akm_version="$(sed -n -E 's/^modver=(.*)$/\1/p' AKMBUILD)"
+          echo "module.h: ${module_version}"
+          echo "dkms.conf: ${dkms_version}"
+          echo "AKMBUILD: ${akm_version}"
+
+          for other in "${dkms_version}" "${akm_version}"; do
+            if [[ "${other}" != "${module_version}" ]]; then
+              echo "::error::module.h, dkms.conf and AKMBUILD on main do not hold the same version."
+              exit 1
+            fi
+          done
+          if [[ "${module_version}" == "${VERSION}" ]]; then
+            echo "::error::main holds the release version ${VERSION}. main must hold the next development version (X.Y.Z-pre). Use tools/set-version."
+            exit 1
+          fi
+          if [[ "${module_version}" != *-pre ]]; then
+            echo "::error::main holds version ${module_version}. main must hold a development version that ends with -pre."
+            exit 1
+          fi
+
+      - name: Make the release commit
+        id: commit
+        env:
+          VERSION: ${{ steps.read.outputs.version }}
+        run: |
+          release_sha="$(.github/scripts/release-commit.sh "${VERSION}")"
+          echo "release_sha=${release_sha}" >> "${GITHUB_OUTPUT}"
+          echo "Release commit: ${release_sha}"
+          git show --stat --format=fuller "${release_sha}"
+
+      - name: Look for the tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.read.outputs.tag }}
+        run: |
+          # The checkout keeps no credentials, so give the read token here.
+          # A private repository refuses a read without it.
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          # The line with ^{} gives the commit of an annotated tag.
+          refs="$(git ls-remote "${remote}" "refs/tags/${TAG}" "refs/tags/${TAG}^{}")"
+          tag_sha="$(awk '$2 ~ /\^\{\}$/ { print $1 }' <<< "${refs}")"
+          if [[ -z "${tag_sha}" ]]; then
+            tag_sha="$(awk '{ print $1 }' <<< "${refs}" | head -n 1)"
+          fi
+          echo "tag_sha=${tag_sha}" >> "${GITHUB_OUTPUT}"
+          echo "Tag ${TAG}: ${tag_sha:-does not exist}"
+
+  # Decide if there is work to do.
+  #
+  # This job needs "contents: write" for one reason: a token with read access
+  # cannot see a draft release. The job runs no code from the repository and
+  # writes nothing.
+  state:
+    name: Check the tag and the release
+    needs: version
     runs-on: ubuntu-latest
     permissions:
       contents: write
     outputs:
-      temp_branch_ref: ${{ steps.temp_branch_ref.outputs.temp_branch_ref }}
+      action: ${{ steps.decide.outputs.action }}
     steps:
-      - name: Checkout the repo
-        uses: actions/checkout@v4
-        with:
-          fetch-tags: true
-          fetch-depth: 0
-      - name: Figure out branch name
-        id: temp_branch_ref
+      - name: Decide
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+          TAG_SHA: ${{ needs.version.outputs.tag_sha }}
+          RELEASE_SHA: ${{ needs.version.outputs.release_sha }}
         run: |
-          export temp_branch_ref="temp_branch_ref=rc-temp-$( git rev-parse --short HEAD )-$( date +%Y.%m.%d-%H.%M.%S )"
-          echo "${temp_branch_ref}"
-          echo "${temp_branch_ref}" >> "$GITHUB_OUTPUT"
-      - name: Create the branch
-        run: git checkout -b "${{ steps.temp_branch_ref.outputs.temp_branch_ref }}"
-      - name: Push the branch to work from
-        run: git push --set-upstream origin ${{ steps.temp_branch_ref.outputs.temp_branch_ref }}
-
-  versionchange:
-    needs:
-      - create-temp-branch
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: write
-    outputs:
-      git_hash: ${{ steps.new-git-hash.outputs.git_hash }}
-      package_name: ${{ steps.packagever.outputs.package_name }}
-      package_version_new: ${{ inputs.version_string }}
-      version_major: ${{ steps.version.outputs.major }}
-      version_minor: ${{ steps.version.outputs.minor }}
-      version_patch: ${{ steps.version.outputs.patch }}
-      version_prerelease: ${{ steps.version.outputs.prerelease }}
-      version_build: ${{ steps.version.outputs.build }}
-      version_full: ${{ steps.version.outputs.full }}
-      number_of_commits_since_tag: ${{ steps.num-commits-since-tag.outputs.num_commits_since_tag }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-tags: true
-          fetch-depth: 0
-          ref: ${{ needs.create-temp-branch.outputs.temp_branch_ref }}
-      - name: Configure Git
-        run: |
-          git config --global user.email "${EMAIL}"
-          git config --global user.name "${NAME}"
-      - name: Read current package name
-        id: packagever
-        run: |
-          # Read package name from dkms.conf
-          export package_name="$( grep '^PACKAGE_NAME=' dkms.conf | cut -d'=' -f2 | tr -d '"' )"
-          echo "package_name=${package_name}"
-          echo "package_name=${package_name}" >> "$GITHUB_OUTPUT"
-      - name: Parse user-provided version string
-        id: version
-        uses: release-kit/semver@v2
-        with:
-          string: ${{ inputs.version_string }}
-      - name: Find number of commits since last tag
-        id: num-commits-since-tag
-        run: |
-          export num_commits_since="$( git rev-list $(git describe --tags --abbrev=0)..HEAD --count )"
-          echo "num_commits_since_tag=${num_commits_since}"
-          echo "num_commits_since_tag=${num_commits_since}" >> "$GITHUB_OUTPUT"
-      - name: Update all version files
-        run: |
-          VERSION="${{ inputs.version_string }}"
-          MAJOR="${{ steps.version.outputs.major }}"
-          MINOR="${{ steps.version.outputs.minor }}"
-          PATCH="${{ steps.version.outputs.patch }}"
-          PRERELEASE="${{ steps.version.outputs.prerelease }}"
-          
-          echo "Setting version to: ${VERSION} (major=${MAJOR}, minor=${MINOR}, patch=${PATCH}, prerelease=${PRERELEASE})"
-          
-          # Update dkms.conf
-          sed -i "s/PACKAGE_VERSION=\".*\"/PACKAGE_VERSION=\"${VERSION}\"/" dkms.conf
-          
-          # Update AKMBUILD
-          sed -i "s/modver=.*/modver=${VERSION}/" AKMBUILD
-          
-          # Update module.h with version components
-          sed -i \
-            -e "s/#define TENSTORRENT_DRIVER_VERSION_MAJOR [0-9]\{1,\}/#define TENSTORRENT_DRIVER_VERSION_MAJOR ${MAJOR}/g" \
-            -e "s/#define TENSTORRENT_DRIVER_VERSION_MINOR [0-9]\{1,\}/#define TENSTORRENT_DRIVER_VERSION_MINOR ${MINOR}/g" \
-            -e "s/#define TENSTORRENT_DRIVER_VERSION_PATCH [0-9]\{1,\}/#define TENSTORRENT_DRIVER_VERSION_PATCH ${PATCH}/g" \
-            module.h
-          
-          # Update module.h suffix for prerelease versions (e.g., -rc1)
-          if [[ -n "${PRERELEASE}" ]]; then
-            sed -i -e "s/#define TENSTORRENT_DRIVER_VERSION_SUFFIX \".*\"/#define TENSTORRENT_DRIVER_VERSION_SUFFIX \"-${PRERELEASE}\"/g" module.h
+          if is_draft="$(gh release view "${TAG}" --json isDraft --jq .isDraft 2> gh-error.txt)"; then
+            if [[ "${is_draft}" == "true" ]]; then
+              release=draft
+            else
+              release=published
+            fi
+          elif grep -q -i "release not found" gh-error.txt; then
+            release=none
           else
-            sed -i -e 's/#define TENSTORRENT_DRIVER_VERSION_SUFFIX ".*"/#define TENSTORRENT_DRIVER_VERSION_SUFFIX ""/g' module.h
+            cat gh-error.txt >&2
+            echo "::error::Could not read the state of release ${TAG}."
+            exit 1
           fi
-          
-          echo "Version files updated successfully"
-      - name: Commit all version changes
-        run: |
-          git add \
-            module.h \
-            dkms.conf \
-            AKMBUILD
-          git commit -m "TTKMD v${{ inputs.version_string }}"
-          git push
-      - name: Find New Git Hash
-        id: new-git-hash
-        run: |
-          export git_hash_env="git_hash=$( git log --format="%H" -n 1 )"
-          echo "${git_hash_env}"
-          echo "${git_hash_env}" >> "$GITHUB_OUTPUT"
+          echo "Release ${TAG}: ${release}"
+          echo "Tag ${TAG}: ${TAG_SHA:-does not exist}"
+          echo "Release commit of this run: ${RELEASE_SHA}"
 
-  # Build Debian/Ubuntu package
+          if [[ "${release}" == "published" ]]; then
+            msg="Release ${TAG} is already published. There is nothing to do."
+            echo "::notice::${msg}"
+            echo "${msg}" >> "${GITHUB_STEP_SUMMARY}"
+            action=skip
+          elif [[ -z "${TAG_SHA}" || "${TAG_SHA}" == "${RELEASE_SHA}" ]]; then
+            # A new release, or a second run of a release that did not finish.
+            action=release
+          elif [[ "${release}" == "draft" ]]; then
+            msg="Tag ${TAG} exists on commit ${TAG_SHA} with a draft release. Another run made them. This workflow does not touch them. Publish or delete that draft by hand."
+            echo "::warning::${msg}"
+            echo "${msg}" >> "${GITHUB_STEP_SUMMARY}"
+            action=skip
+          else
+            echo "::error::Tag ${TAG} exists on commit ${TAG_SHA}, but this run would release commit ${RELEASE_SHA}. A tag is never moved. Put a new version in RELEASE."
+            exit 1
+          fi
+          echo "action=${action}" >> "${GITHUB_OUTPUT}"
+
+  # Build the packages before the tag exists. A tag cannot be deleted.
   build-debian:
     needs:
-      - create-temp-branch
-      - versionchange
+      - version
+      - state
+    if: needs.state.outputs.action == 'release'
+    permissions:
+      contents: read
     uses: ./.github/workflows/build-debian.yml
     with:
-      ref: ${{ needs.create-temp-branch.outputs.temp_branch_ref }}
-    secrets: inherit
+      ref: ${{ github.sha }}
+      version: ${{ needs.version.outputs.version }}
 
-  # Build RPM package
   build-rpm:
     needs:
-      - create-temp-branch
-      - versionchange
+      - version
+      - state
+    if: needs.state.outputs.action == 'release'
+    permissions:
+      contents: read
     uses: ./.github/workflows/build-rpm.yml
     with:
-      ref: ${{ needs.create-temp-branch.outputs.temp_branch_ref }}
-    secrets: inherit
+      ref: ${{ github.sha }}
+      version: ${{ needs.version.outputs.version }}
 
-  # Create and push the git tag for this release
-  tagrelease:
-    name: Tag the Release
+  # Push the tag, then make, fill, check and publish the release.
+  release:
+    name: Tag and publish
     needs:
-      - versionchange
+      - version
+      - state
       - build-debian
       - build-rpm
+    if: needs.state.outputs.action == 'release'
     runs-on: ubuntu-latest
     # Publish gate: runs only from main, after a release reviewer approves (OSPO, ITSEC-295).
     environment: release
     permissions:
       contents: write
-      packages: write
-      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.tag }}
+      PRERELEASE: ${{ needs.version.outputs.prerelease }}
+      RELEASE_SHA: ${{ needs.version.outputs.release_sha }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout the commit on main
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: ${{ needs.versionchange.outputs.git_hash }}
-          fetch-tags: true
-          fetch-depth: 0
-      - name: Configure Git
-        run: |
-          git config --global user.email "${EMAIL}"
-          git config --global user.name "${NAME}"
-      - name: Create and push tag
-        run: |
-          git tag -a ttkmd-${{ needs.versionchange.outputs.package_version_new }} -m "ttkmd-${{ needs.versionchange.outputs.package_version_new }}"
-          git push --tags
+          ref: ${{ github.sha }}
 
-  # Create draft GitHub release with build artifacts
-  generate-release:
-    name: Create GitHub Release
-    needs:
-      - create-temp-branch
-      - versionchange
-      - build-debian
-      - build-rpm
-      - tagrelease
-    runs-on: ubuntu-latest
-    # Publish gate: runs only from main, after a release reviewer approves (OSPO, ITSEC-295).
-    environment: release
-    permissions:
-      contents: write
-      packages: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
+      - name: Make the release commit again
+        run: |
+          sha="$(.github/scripts/release-commit.sh "${VERSION}")"
+          if [[ "${sha}" != "${RELEASE_SHA}" ]]; then
+            echo "::error::The release commit is ${sha}, but the first job made ${RELEASE_SHA}."
+            exit 1
+          fi
+          echo "Release commit: ${sha}"
+
+      - name: Download the packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          ref: ${{ needs.versionchange.outputs.git_hash }}
-          fetch-tags: true
-          fetch-depth: 0
+          pattern: tenstorrent-dkms*
+          path: dist
+          merge-multiple: true
 
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
+      - name: Check the packages
+        id: packages
+        run: |
+          # The packages use ~ where the version uses - (2.13.0~rc1).
+          pkg_version="${VERSION//-/\~}"
+          deb="dist/tenstorrent-dkms_${pkg_version}_all.deb"
+          rpm="dist/tenstorrent-dkms-${pkg_version}-1.noarch.rpm"
+          ls -l dist
+          for f in "${deb}" "${rpm}"; do
+            if [[ ! -s "${f}" ]]; then
+              echo "::error::The package ${f} is missing or empty."
+              exit 1
+            fi
+          done
+          {
+            echo "deb=${deb}"
+            echo "rpm=${rpm}"
+          } >> "${GITHUB_OUTPUT}"
 
-      - name: Find the deb & rpm files
+      - name: Push the tag
         run: |
-          find ${GITHUB_WORKSPACE} -type f \( -iname \*.deb -o -iname \*.rpm \) -exec ls -lah {} \;
+          refs="$(git ls-remote origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}")"
+          tag_sha="$(awk '$2 ~ /\^\{\}$/ { print $1 }' <<< "${refs}")"
+          if [[ -z "${tag_sha}" ]]; then
+            tag_sha="$(awk '{ print $1 }' <<< "${refs}" | head -n 1)"
+          fi
 
-      - name: Create GitHub Release
-        id: create_release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ttkmd-${{ needs.versionchange.outputs.package_version_new }}
-          files: |
-            ${{ github.workspace }}/tenstorrent-dkms*/*.deb
-            ${{ github.workspace }}/tenstorrent-dkms*/*.rpm
-          body: ""
-          draft: true
-          prerelease: false
+          if [[ "${tag_sha}" == "${RELEASE_SHA}" ]]; then
+            echo "Tag ${TAG} is already on ${RELEASE_SHA}."
+            exit 0
+          fi
+          if [[ -n "${tag_sha}" ]]; then
+            echo "::error::Tag ${TAG} exists on commit ${tag_sha}, not on ${RELEASE_SHA}. A tag is never moved."
+            exit 1
+          fi
 
-  # Bump version for next development cycle
-  bump-version-for-dev:
-    name: Bump version for development
-    needs:
-      - create-temp-branch
-      - versionchange
-      - generate-release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.create-temp-branch.outputs.temp_branch_ref }}
-          fetch-tags: true
-          fetch-depth: 0
-      - name: Configure Git
-        run: |
-          git config --global user.email "${EMAIL}"
-          git config --global user.name "${NAME}"
-      - name: Increment PATCH version and set -pre suffix
-        run: |
-          MAJOR="${{ needs.versionchange.outputs.version_major }}"
-          MINOR="${{ needs.versionchange.outputs.version_minor }}"
-          PATCH="${{ needs.versionchange.outputs.version_patch }}"
-          
-          # Increment patch version
-          NEXT_PATCH=$((PATCH + 1))
-          NEXT_VERSION="${MAJOR}.${MINOR}.${NEXT_PATCH}-pre"
-          
-          echo "Bumping version to: ${NEXT_VERSION} for development"
-          
-          # Update dkms.conf
-          sed -i "s/PACKAGE_VERSION=\".*\"/PACKAGE_VERSION=\"${NEXT_VERSION}\"/" dkms.conf
-          
-          # Update AKMBUILD
-          sed -i "s/modver=.*/modver=${NEXT_VERSION}/" AKMBUILD
-          
-          # Update module.h with version components
-          sed -i \
-            -e "s/#define TENSTORRENT_DRIVER_VERSION_MAJOR [0-9]\{1,\}/#define TENSTORRENT_DRIVER_VERSION_MAJOR ${MAJOR}/g" \
-            -e "s/#define TENSTORRENT_DRIVER_VERSION_MINOR [0-9]\{1,\}/#define TENSTORRENT_DRIVER_VERSION_MINOR ${MINOR}/g" \
-            -e "s/#define TENSTORRENT_DRIVER_VERSION_PATCH [0-9]\{1,\}/#define TENSTORRENT_DRIVER_VERSION_PATCH ${NEXT_PATCH}/g" \
-            -e 's/#define TENSTORRENT_DRIVER_VERSION_SUFFIX ".*"/#define TENSTORRENT_DRIVER_VERSION_SUFFIX "-pre"/g' \
-            module.h
-          
-          echo "Version files updated to ${NEXT_VERSION}"
-      - name: Commit version bump
-        run: |
-          MAJOR="${{ needs.versionchange.outputs.version_major }}"
-          MINOR="${{ needs.versionchange.outputs.version_minor }}"
-          PATCH="${{ needs.versionchange.outputs.version_patch }}"
-          NEXT_PATCH=$((PATCH + 1))
-          
-          git add module.h dkms.conf AKMBUILD
-          git commit -m "Bump version to ${MAJOR}.${MINOR}.${NEXT_PATCH}-pre for development"
-          git push
+          date="$(git show -s --format=%cI "${RELEASE_SHA}")"
+          GIT_COMMITTER_NAME="Tenstorrent Releases" \
+          GIT_COMMITTER_EMAIL="releases@tenstorrent.com" \
+          GIT_COMMITTER_DATE="${date}" \
+            git tag -a -m "${TAG}" "${TAG}" "${RELEASE_SHA}"
+          # No --force. The push fails if the tag appeared in the meantime.
+          git push origin "refs/tags/${TAG}"
 
-  # Merge the temporary branch back to main and clean up
-  mergeback:
-    needs:
-      - create-temp-branch
-      - generate-release
-      - bump-version-for-dev
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-tags: true
-          fetch-depth: 0
-      - name: Merge temp branch back to main
+      - name: Make the draft release
         run: |
-          git log -3 --oneline
-          git merge --ff-only origin/${{ needs.create-temp-branch.outputs.temp_branch_ref }}
-          git log -3 --oneline
-          git push
-          git push origin --delete ${{ needs.create-temp-branch.outputs.temp_branch_ref }}
+          if is_draft="$(gh release view "${TAG}" --json isDraft --jq .isDraft 2> gh-error.txt)"; then
+            if [[ "${is_draft}" != "true" ]]; then
+              echo "::error::Release ${TAG} is already published. A published release is not changed."
+              exit 1
+            fi
+            echo "A draft release for ${TAG} exists. This run continues with it."
+          elif grep -q -i "release not found" gh-error.txt; then
+            args=(--draft --verify-tag --title "${TAG}" --notes "")
+            if [[ "${PRERELEASE}" == "true" ]]; then
+              args+=(--prerelease)
+            fi
+            gh release create "${TAG}" "${args[@]}"
+          else
+            cat gh-error.txt >&2
+            echo "::error::Could not read the state of release ${TAG}."
+            exit 1
+          fi
+
+      - name: Upload the packages to the draft
+        env:
+          DEB: ${{ steps.packages.outputs.deb }}
+          RPM: ${{ steps.packages.outputs.rpm }}
+        run: gh release upload "${TAG}" "${DEB}" "${RPM}" --clobber
+
+      - name: Check the files on the draft
+        env:
+          DEB: ${{ steps.packages.outputs.deb }}
+          RPM: ${{ steps.packages.outputs.rpm }}
+        run: |
+          # GitHub can change a file name (~ becomes .), so compare the
+          # contents: the draft must hold these two packages and no other file.
+          gh release download "${TAG}" --dir attached
+          ls -l attached
+          want="$(sha256sum "${DEB}" "${RPM}" | awk '{ print $1 }' | sort)"
+          got="$(sha256sum attached/* | awk '{ print $1 }' | sort)"
+          if [[ "${want}" != "${got}" ]]; then
+            echo "::error::The files on the draft release are not the two packages of this run. The release is not published."
+            exit 1
+          fi
+          if ! ls attached/*.deb > /dev/null || ! ls attached/*.rpm > /dev/null; then
+            echo "::error::The draft release does not hold one .deb and one .rpm. The release is not published."
+            exit 1
+          fi
+
+      # Last step. Nothing changes the release after this.
+      - name: Publish the release
+        run: |
+          gh release edit "${TAG}" --draft=false
+          echo "Published ${TAG} from commit ${RELEASE_SHA}." >> "${GITHUB_STEP_SUMMARY}"

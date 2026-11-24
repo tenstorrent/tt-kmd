@@ -1,0 +1,86 @@
+#!/bin/bash
+
+# SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
+# SPDX-License-Identifier: GPL-2.0-only
+
+# Set the driver version in module.h, dkms.conf and AKMBUILD.
+#
+# Usage: tools/set-version <version>
+#   <version> is MAJOR.MINOR.PATCH with an optional suffix,
+#   for example 2.13.0, 2.13.0-rc1 or 2.13.1-pre.
+#
+# The release workflow and the package builds use this script, so that
+# all of them make the same change to the same three files.
+
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+    echo "Usage: $0 <version>   (for example 2.13.0, 2.13.0-rc1, 2.13.1-pre)" >&2
+    exit 2
+fi
+
+VERSION="$1"
+
+NUM='(0|[1-9][0-9]*)'
+ID='[0-9A-Za-z-]+'
+if [[ ! "${VERSION}" =~ ^${NUM}\.${NUM}\.${NUM}(-${ID}(\.${ID})*)?$ ]]; then
+    echo "Error: '${VERSION}' is not a valid version (expected X.Y.Z or X.Y.Z-suffix)" >&2
+    exit 1
+fi
+
+MAJOR="${BASH_REMATCH[1]}"
+MINOR="${BASH_REMATCH[2]}"
+PATCH="${BASH_REMATCH[3]}"
+SUFFIX="${BASH_REMATCH[4]}"   # empty, or for example "-rc1"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Run one sed expression list on a file. Fail if the file is missing.
+# (No "sed -i": its syntax is different on GNU and BSD.)
+edit() {
+    local file="$1"
+    shift
+    local tmp
+    if [[ ! -f "${file}" ]]; then
+        echo "Error: ${file} not found" >&2
+        exit 1
+    fi
+    tmp="$(mktemp "${file}.XXXXXX")"
+    sed -E "$@" "${file}" > "${tmp}"
+    cat "${tmp}" > "${file}"   # keep the mode of the original file
+    rm -f "${tmp}"
+}
+
+# Fail if a file does not contain the given line exactly once.
+expect() {
+    local file="$1" line="$2" count
+    count="$(grep -c -x -F -- "${line}" "${file}" || true)"
+    if [[ "${count}" != "1" ]]; then
+        echo "Error: expected one line '${line}' in ${file}, found ${count}" >&2
+        exit 1
+    fi
+}
+
+P='#define TENSTORRENT_DRIVER_VERSION'
+
+edit "${PROJECT_ROOT}/module.h" \
+    -e "s/^(${P}_MAJOR) [0-9]+\$/\\1 ${MAJOR}/" \
+    -e "s/^(${P}_MINOR) [0-9]+\$/\\1 ${MINOR}/" \
+    -e "s/^(${P}_PATCH) [0-9]+\$/\\1 ${PATCH}/" \
+    -e "s/^(${P}_SUFFIX) \"[^\"]*\"\$/\\1 \"${SUFFIX}\"/"
+
+edit "${PROJECT_ROOT}/dkms.conf" \
+    -e "s/^PACKAGE_VERSION=\"[^\"]*\"\$/PACKAGE_VERSION=\"${VERSION}\"/"
+
+edit "${PROJECT_ROOT}/AKMBUILD" \
+    -e "s/^modver=.*\$/modver=${VERSION}/"
+
+expect "${PROJECT_ROOT}/module.h" "${P}_MAJOR ${MAJOR}"
+expect "${PROJECT_ROOT}/module.h" "${P}_MINOR ${MINOR}"
+expect "${PROJECT_ROOT}/module.h" "${P}_PATCH ${PATCH}"
+expect "${PROJECT_ROOT}/module.h" "${P}_SUFFIX \"${SUFFIX}\""
+expect "${PROJECT_ROOT}/dkms.conf" "PACKAGE_VERSION=\"${VERSION}\""
+expect "${PROJECT_ROOT}/AKMBUILD" "modver=${VERSION}"
+
+echo "Version set to ${VERSION} in module.h, dkms.conf and AKMBUILD"

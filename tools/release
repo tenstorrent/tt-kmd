@@ -90,6 +90,12 @@ if [[ -n "$(git ls-remote origin "refs/heads/${BRANCH}")" ]]; then
     die "branch ${BRANCH} already exists on origin. Merge or delete it first."
 fi
 
+# Check this before the cleanup trap is set: the trap deletes ${BRANCH}, and it
+# must not delete a branch that this run did not make.
+if git show-ref --verify --quiet "refs/heads/${BRANCH}"; then
+    die "local branch ${BRANCH} already exists. Delete or rename it first."
+fi
+
 WORKTREE="$(mktemp -d)"
 cleanup() {
     git -C "${ROOT}" worktree remove --force "${WORKTREE}" 2> /dev/null || rm -rf "${WORKTREE}"

@@ -44,8 +44,6 @@ struct bh_hdma_lli {
 #define LLI_CB	BIT(0)	// Cycle bit: the engine runs an element only if it matches its CCS
 #define LLI_TCB	BIT(1)	// Link element: toggle the cycle state
 #define LLI_LLP	BIT(2)	// Link element
-#define LLI_LIE	BIT(3)	// Local interrupt when this element is done
-#define LLI_RIE	BIT(4)	// Remote interrupt (MSI) when this element is done
 
 // Room for a full request plus the element that ends the chain. A coherent
 // buffer is aligned to its size when that is a power of two, so the list never
@@ -64,11 +62,12 @@ static_assert(BH_DMA_LIST_SIZE <= TENSTORRENT_DMA_WINDOW_SIZE);
 #define HDMA_RDCH0		0x100
 #define HDMA_EN			0x00
 #define HDMA_DOORBELL		0x04
-#define HDMA_PREFETCH		0x08
+#define HDMA_ELEM_PF		0x08
 #define HDMA_LLP_LOW		0x10
 #define HDMA_LLP_HIGH		0x14
 #define HDMA_CYCLE_SYNC		0x18
 #define HDMA_CONTROL1		0x34
+#define HDMA_QOS		0x3C
 #define HDMA_CH_STAT		0x80
 #define HDMA_INT_STAT		0x84
 #define HDMA_INT_SETUP		0x88
@@ -90,11 +89,19 @@ static_assert(BH_DMA_LIST_SIZE <= TENSTORRENT_DMA_WINDOW_SIZE);
 #define HDMA_INT_STOP		BIT(0)
 #define HDMA_INT_ABORT		BIT(2)
 #define HDMA_INT_ALL		(HDMA_INT_STOP | BIT(1) | HDMA_INT_ABORT)
+// Bits 0-2 mask the local interrupt pin, which isn't ours. Stop and abort
+// must also be enabled locally (LSIE, LAIE) for INT_STAT to latch them.
+#define HDMA_INT_SETUP_MASK_LOCAL	GENMASK(2, 0)
 #define HDMA_INT_SETUP_RSIE	BIT(3)	// MSI on stop
+#define HDMA_INT_SETUP_LSIE	BIT(4)
 #define HDMA_INT_SETUP_RAIE	BIT(5)	// MSI on abort
+#define HDMA_INT_SETUP_LAIE	BIT(6)
+#define HDMA_INT_SETUP_VALUE	(HDMA_INT_SETUP_MASK_LOCAL | HDMA_INT_SETUP_RSIE | HDMA_INT_SETUP_LSIE | \
+				 HDMA_INT_SETUP_RAIE | HDMA_INT_SETUP_LAIE)
 
 // The read channels share 16 prefetch slots, taken in channel order. Channel
 // 0 takes 7 and keeps them; firmware runs channel 1 at 7 or less.
+#define HDMA_QOS_PF_DEPTH	GENMASK(25, 16)
 #define HDMA_PF_DEPTH		7
 
 // How long a channel reset waits for a stopped chain to drain.
@@ -171,9 +178,13 @@ static u32 hdma_read(struct blackhole_device *bh, u32 reg)
 // reset.
 static void hdma_setup_channel(struct blackhole_device *bh)
 {
+	u32 qos = hdma_read(bh, HDMA_QOS);
+
 	hdma_write(bh, HDMA_EN, HDMA_EN_ENABLE);
-	hdma_write(bh, HDMA_PREFETCH, HDMA_PF_DEPTH);
-	hdma_write(bh, HDMA_INT_SETUP, HDMA_INT_SETUP_RSIE | HDMA_INT_SETUP_RAIE);
+	hdma_write(bh, HDMA_QOS, (qos & ~HDMA_QOS_PF_DEPTH) | FIELD_PREP(HDMA_QOS_PF_DEPTH, HDMA_PF_DEPTH));
+	// No list element prefetch: with it the engine stalls on short lists.
+	hdma_write(bh, HDMA_ELEM_PF, 0);
+	hdma_write(bh, HDMA_INT_SETUP, HDMA_INT_SETUP_VALUE);
 	hdma_write(bh, HDMA_CONTROL1, HDMA_CONTROL1_LLEN);
 }
 
@@ -285,9 +296,8 @@ static void dma_start_locked(struct blackhole_device *bh)
 
 	memcpy(list, req->lli, req->count * sizeof(*list));
 
-	// The last element raises the MSI. The link element after it has a
-	// cycle bit that doesn't match, so the engine stops there.
-	list[req->count - 1].control |= cpu_to_le32(LLI_LIE | LLI_RIE);
+	// The link element after the last one has a cycle bit that doesn't
+	// match, so the engine stops there and raises the stop MSI.
 	link = &list[req->count];
 	link->control = cpu_to_le32(LLI_LLP | LLI_TCB);
 	link->size = 0;

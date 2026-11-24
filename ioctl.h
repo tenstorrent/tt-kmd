@@ -573,4 +573,88 @@ struct tenstorrent_noc_io {
 	__u64 value;
 };
 
+/**
+ * TENSTORRENT_URING_CMD_DMA_WRITE - Host-to-device DMA (Blackhole)
+ *
+ * An io_uring command, not an ioctl: submit an IORING_OP_URING_CMD SQE on a
+ * device fd with cmd_op set to TENSTORRENT_URING_CMD_DMA_WRITE and a
+ * struct tenstorrent_dma_write in the SQE's command area. A plain 64-byte SQE
+ * has room for it. Needs Linux 6.6 or newer.
+ *
+ * The driver owns HDMA read channel 0 and runs one FIFO per chip, shared by
+ * every fd and run strictly in submission order. Each SQE becomes one engine
+ * chain with one element per descriptor. The driver never splits, merges or
+ * reorders descriptors: a request it can't run as given is rejected.
+ *
+ * Each SQE gets one CQE. res is 0 once the engine has issued every write in
+ * the chain, which is the same guarantee user-space DMA gave. Otherwise res is:
+ *
+ * - -EINVAL: flags or a reserved field is not zero; count is outside
+ *   1..TENSTORRENT_DMA_MAX_DESCS; a descriptor crosses a
+ *   TENSTORRENT_DMA_WINDOW_SIZE boundary on the device; the descriptors touch
+ *   more than TENSTORRENT_DMA_WINDOWS regions; or a source is not inside one
+ *   of the calling fd's PIN_PAGES ranges or ALLOCATE_DMA_BUF buffers.
+ * - -EFAULT: the descriptor array can't be read.
+ * - -EOPNOTSUPP: DMA can't run on this chip, because the kernel is older than
+ *   6.6, the device is not a Blackhole, or its firmware does not leave HDMA
+ *   channel 0 to the host.
+ * - -ENODEV: the fd is stale (the device was reset or removed), or a reset or
+ *   removal failed this request while it was queued or running.
+ * - -ETIMEDOUT or -EIO: the chain timed out (after 2 s plus 1 ms per MiB) or
+ *   the engine aborted it. The driver resets the channel and carries on with
+ *   the next request. If the channel won't stop, DMA stays off until the
+ *   device is reset, and the fd keeps the request counted as in flight.
+ *
+ * A region is a NOC endpoint (x, y, noc) plus a 2 MiB-aligned device address
+ * range. The driver holds TENSTORRENT_DMA_WINDOWS windows of
+ * TENSTORRENT_DMA_WINDOW_SIZE for DMA and binds one to each region a request
+ * touches. Destinations are not otherwise checked, as with TLB windows, so
+ * the source check keeps the engine from reading memory the fd doesn't own;
+ * it doesn't isolate fds from each other's device writes.
+ *
+ * The descriptor array must stay valid until the CQE. A pinned range can't be
+ * unpinned while the fd that pinned it has DMA queued or running: UNPIN_PAGES
+ * fails with -EBUSY. Closing the fd lets queued requests finish, as io_uring
+ * holds the file until they complete.
+ */
+#define TENSTORRENT_URING_CMD_DMA_WRITE	_IO(TENSTORRENT_IOCTL_MAGIC, 32)
+
+#define TENSTORRENT_DMA_WINDOWS		8
+#define TENSTORRENT_DMA_WINDOW_SIZE	(1U << 21)
+#define TENSTORRENT_DMA_MAX_DESCS	1024
+
+/**
+ * struct tenstorrent_dma_desc - one contiguous host-to-device copy
+ * @src: Source IOVA (or physical address without an IOMMU), as PIN_PAGES or
+ *       ALLOCATE_DMA_BUF returned it, plus an offset.
+ * @addr: Destination address at the NOC endpoint.
+ * @size: Bytes to copy. [addr, addr + size) must not cross a
+ *        TENSTORRENT_DMA_WINDOW_SIZE boundary.
+ * @x: Destination X coordinate.
+ * @y: Destination Y coordinate.
+ * @noc: NOC to use.
+ * @reserved: Must be 0.
+ */
+struct tenstorrent_dma_desc {
+	__u64 src;
+	__u64 addr;
+	__u32 size;
+	__u16 x;
+	__u16 y;
+	__u8 noc;
+	__u8 reserved[7];
+};
+
+/**
+ * struct tenstorrent_dma_write - TENSTORRENT_URING_CMD_DMA_WRITE payload
+ * @descs: User pointer to an array of struct tenstorrent_dma_desc.
+ * @count: Number of descriptors, 1..TENSTORRENT_DMA_MAX_DESCS.
+ * @flags: Must be 0.
+ */
+struct tenstorrent_dma_write {
+	__u64 descs;
+	__u32 count;
+	__u32 flags;
+};
+
 #endif

@@ -6,6 +6,7 @@
 
 #include <linux/types.h>
 #include "device.h"
+#include "blackhole_dma.h"
 
 struct blackhole_device {
 	struct tenstorrent_device tt;
@@ -18,6 +19,8 @@ struct blackhole_device {
 
 	u8 saved_mps;
 	bool mps_saved;
+
+	struct bh_dma dma;
 };
 
 #define tt_dev_to_bh_dev(ttdev) \

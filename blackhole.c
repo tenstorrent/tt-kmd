@@ -744,6 +744,10 @@ static bool blackhole_init(struct tenstorrent_device *tt_dev)
 	set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs);
 	mutex_init(&bh->kernel_tlb_mutex);
 
+	// DMA takes the 2M windows just below it, leaving the strided windows
+	// at the bottom in the pool.
+	bh_dma_init(bh, KERNEL_TLB_INDEX - BH_DMA_TLB_COUNT);
+
 	// Initialize once and reserve the device-lifetime DMA buffer. The MSI
 	// handler may schedule work after the firmware handshake, which happens
 	// later in blackhole_init_hardware().
@@ -842,6 +846,8 @@ static void blackhole_cleanup(struct tenstorrent_device *tt_dev)
 	// access) so the buffer is always released even on an unreachable
 	// device. Firmware was asked to stop in blackhole_cleanup_hardware.
 	fw_log_free(&tt_dev->fw_log);
+
+	bh_dma_cleanup(bh);
 
 	if (bh->tlb_regs)
 		pci_iounmap(tt_dev->pdev, bh->tlb_regs);

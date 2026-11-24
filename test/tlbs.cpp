@@ -291,7 +291,8 @@ void VerifyBadConfRejectedWormhole(const EnumeratedDevice &dev)
 }
 
 // Blackhole has 202x 2M and up to 8x 4G windows. On an unused device, all 2M
-// windows except the last should be available for allocation. The number of 4G
+// windows except the last 10 should be available for allocation: the kernel
+// keeps the last for itself and the 9 below it for DMA. The number of 4G
 // windows depends on BAR4 size.
 void VerifyTlbQuantitiesBlackhole(const EnumeratedDevice &dev)
 {
@@ -299,7 +300,7 @@ void VerifyTlbQuantitiesBlackhole(const EnumeratedDevice &dev)
     std::vector<uint32_t> ids;
     size_t num_4g_windows = blackhole_get_num_4g_windows(dev);
 
-    for (size_t i = 0; i < 201; ++i) {
+    for (size_t i = 0; i < 192; ++i) {
         struct tenstorrent_allocate_tlb tlb{};
         tlb.in.size = TWO_MEG;
 
@@ -309,7 +310,7 @@ void VerifyTlbQuantitiesBlackhole(const EnumeratedDevice &dev)
         ids.push_back(tlb.out.id);
     }
 
-    // The last 2M window should be off-limits to userspace.
+    // The last 10 2M windows should be off-limits to userspace.
     {
         struct tenstorrent_allocate_tlb tlb{};
         tlb.in.size = TWO_MEG;

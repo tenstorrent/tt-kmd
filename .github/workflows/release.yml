@@ -130,10 +130,14 @@ jobs:
       - name: Look for the tag
         id: tag
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.read.outputs.tag }}
         run: |
+          # The checkout keeps no credentials, so give the read token here.
+          # A private repository refuses a read without it.
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           # The line with ^{} gives the commit of an annotated tag.
-          refs="$(git ls-remote origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}")"
+          refs="$(git ls-remote "${remote}" "refs/tags/${TAG}" "refs/tags/${TAG}^{}")"
           tag_sha="$(awk '$2 ~ /\^\{\}$/ { print $1 }' <<< "${refs}")"
           if [[ -z "${tag_sha}" ]]; then
             tag_sha="$(awk '{ print $1 }' <<< "${refs}" | head -n 1)"

@@ -127,13 +127,17 @@ jobs:
         env:
           VERSION: ${{ steps.read.outputs.version }}
         run: |
-          if ! release_sha="$(.github/scripts/find-release-commit.sh "${VERSION}")"; then
-            echo "::error::No commit on main holds the release version ${VERSION}. Was the release pull request squash-merged? Make a new one with tools/release."
-            exit 1
+          # No release commit is not an error here. The next job decides: it
+          # is correct if the release is already published (for example when
+          # RELEASE was only corrected), and an error if it is not.
+          if release_sha="$(.github/scripts/find-release-commit.sh "${VERSION}")"; then
+            echo "Release commit: ${release_sha}"
+            git show --stat --format=fuller "${release_sha}"
+          else
+            release_sha=""
+            echo "::warning::No commit on main holds the release version ${VERSION}."
           fi
           echo "release_sha=${release_sha}" >> "${GITHUB_OUTPUT}"
-          echo "Release commit: ${release_sha}"
-          git show --stat --format=fuller "${release_sha}"
 
       - name: Look for the tag
         id: tag
@@ -191,13 +195,16 @@ jobs:
           fi
           echo "Release ${TAG}: ${release}"
           echo "Tag ${TAG}: ${TAG_SHA:-does not exist}"
-          echo "Release commit of this run: ${RELEASE_SHA}"
+          echo "Release commit of this run: ${RELEASE_SHA:-not found}"
 
           if [[ "${release}" == "published" ]]; then
             msg="Release ${TAG} is already published. There is nothing to do."
             echo "::notice::${msg}"
             echo "${msg}" >> "${GITHUB_STEP_SUMMARY}"
             action=skip
+          elif [[ -z "${RELEASE_SHA}" ]]; then
+            echo "::error::Release ${TAG} is not published, and no commit on main holds its version in RELEASE, module.h, dkms.conf and AKMBUILD. Was the release pull request squash-merged? Make a new one with tools/release."
+            exit 1
           elif [[ -z "${TAG_SHA}" || "${TAG_SHA}" == "${RELEASE_SHA}" ]]; then
             # A new release, or a second run of a release that did not finish.
             action=release

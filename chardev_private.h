@@ -101,6 +101,10 @@ struct chardev_private {
 
 	struct chardev_msg arc_msg; // Per-fd ARC message; guarded by device arc_msg_mutex
 
+	// DMA requests from this fd that are queued or running. Raised under
+	// mutex, with their sources checked; UNPIN_PAGES refuses while non-zero.
+	atomic_t dma_inflight;
+
 	long open_reset_gen; // Reset generation at open time
 };
 

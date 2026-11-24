@@ -6,3 +6,4 @@ modprobe.d-tenstorrent.conf
 .cache
 *.deb
 *.rpm
+RELEASE

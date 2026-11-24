@@ -9,6 +9,11 @@ on:
         default: ${{ github.ref }}
         required: true
         type: string
+      version:
+        description: 'Set the version files to this version before the build (used by the release workflow). Empty: build the source as it is.'
+        default: ''
+        required: false
+        type: string
 
 jobs:
   build-deb:
@@ -21,6 +26,12 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-tags: true
           fetch-depth: 0
+
+      - name: Set release version
+        if: inputs.version != ''
+        env:
+          VERSION: ${{ inputs.version }}
+        run: ./tools/set-version "${VERSION}"
 
       - name: Install minimal dependencies
         run: |

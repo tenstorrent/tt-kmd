@@ -17,7 +17,8 @@
 # dkms.conf and AKMBUILD, and prints its hash on stdout.
 #
 # The check fails if the pull request was squash-merged, because then no
-# commit holds the release version. Nothing is tagged in that case.
+# commit holds the release version. Nothing is tagged in that case. To
+# recover, revert the squashed commit on main and run tools/release again.
 #
 # Needs the full history (not a shallow clone).
 
@@ -66,8 +67,9 @@ for found in "${release_file}" "${module_version}" "${dkms_version}" "${akm_vers
         {
             echo "Error: commit ${sha} does not hold version ${VERSION} in RELEASE, module.h, dkms.conf and AKMBUILD."
             echo "The release commit must hold the release version in all four files."
-            echo "A squash merge of the release pull request causes this. Make a new"
-            echo "release pull request with tools/release and do not squash it."
+            echo "A squash merge of the release pull request causes this. To recover:"
+            echo "revert that commit on main, then run tools/release again and do not"
+            echo "squash the new pull request."
         } >&2
         exit 1
     fi

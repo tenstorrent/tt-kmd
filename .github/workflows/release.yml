@@ -203,7 +203,7 @@ jobs:
             echo "${msg}" >> "${GITHUB_STEP_SUMMARY}"
             action=skip
           elif [[ -z "${RELEASE_SHA}" ]]; then
-            echo "::error::Release ${TAG} is not published, and no commit on main holds its version in RELEASE, module.h, dkms.conf and AKMBUILD. Was the release pull request squash-merged? Make a new one with tools/release."
+            echo "::error::Release ${TAG} is not published, and no commit on main holds its version in RELEASE, module.h, dkms.conf and AKMBUILD. Was the release pull request squash-merged? Revert that commit on main, then run tools/release again and do not squash."
             exit 1
           elif [[ -z "${TAG_SHA}" || "${TAG_SHA}" == "${RELEASE_SHA}" ]]; then
             # A new release, or a second run of a release that did not finish.

@@ -55,8 +55,13 @@ was started, for example `2.13.0` or `2.13.0-rc1`.
 
 2. Merge the pull request with **Create a merge commit** or **Rebase and
    merge**. **Do not squash.** A squash removes the release commit. The
-   workflow then stops before it makes a tag, and a new release pull request
-   is necessary.
+   workflow then stops before it makes a tag. To recover:
+
+   1. Revert the squashed commit on `main` with a pull request. (Its merge
+      starts the workflow for the release before; that run ends with success
+      and does nothing.)
+   2. Delete the branch `release/<version>` on GitHub if it still exists.
+   3. Run `tools/release <version>` again and merge without a squash.
 
 The merge starts the **Create Release** workflow. It needs no other step,
 except the approval of the `release` environment if one is required. The

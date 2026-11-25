@@ -315,7 +315,14 @@ struct tenstorrent_noc_tlb_config {
 	__u8 ordering;
 	__u8 linked;
 	__u8 static_vc;
-	__u8 reserved0[3];
+	// Per-window transaction attributes. Only Keraunos carries these today; an
+	// architecture whose windows have nowhere to put them ignores them, the
+	// same way Wormhole ignores static_vc.
+	//
+	// @noncacheable: 1 drives AxCACHE to 0 instead of 0xF, marking accesses
+	//                through the window non-cacheable.
+	__u8 noncacheable;
+	__u8 reserved0[2];
 	__u32 reserved1[2];
 };
 

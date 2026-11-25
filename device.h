@@ -53,6 +53,8 @@ struct tenstorrent_device {
 	unsigned int ordinal;
 	bool dma_capable;
 	bool interrupt_enabled;
+	unsigned int interrupt_vectors;	// Allocated while interrupt_enabled
+	unsigned int irq_base;		// IRQ of vector 0; MSI vectors are consecutive
 
 	struct mutex chardev_mutex;
 	bool chardev_excl_held;	// An O_EXCL fd is currently open
@@ -140,9 +142,11 @@ struct tenstorrent_device_class {
 	int (*configure_outbound_atu)(struct tenstorrent_device *ttdev, u32 region, u64 base, u64 limit, u64 target);
 	void (*noc_write32)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, u32 data, int noc);
 
-	// Optional MSI handler invoked from the driver's IRQ handler. May be NULL for devices
-	// with no interrupt handling.
-	void (*interrupt)(struct tenstorrent_device *ttdev);
+	// Optional MSI handler invoked from the driver's IRQ handler with the vector
+	// that fired. May be NULL for devices with no interrupt handling.
+	void (*interrupt)(struct tenstorrent_device *ttdev, unsigned int vector);
+	// Most interrupt vectors to ask for; 0 means one. Fewer may be granted.
+	unsigned int max_msi_vectors;
 	// Reset-safe scalar NOC transfers. width is one of 1, 2, 4, 8.
 	// Return 0 on success or a negative errno.
 	int (*noc_read)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, void *value, u32 width, int noc);

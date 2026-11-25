@@ -85,6 +85,11 @@
 #define FW_LOG_SUBCMD_SETUP   0x1
 #define FW_LOG_SUBCMD_RELEASE 0x2
 
+// Firmware that leaves HDMA channel 1 to the host advertises 2 MSI vectors:
+// vector 0 for its own MSIs, vector 1 for HDMA completions.
+#define BH_MSI_VECTORS 2
+#define BH_HDMA_MSI_VECTOR 1
+
 #define IATU_BASE 0x1000	// Relative to the start of BAR2
 #define IATU_OUTBOUND 0
 #define IATU_OUTBOUND_REGIONS 16
@@ -660,8 +665,12 @@ bool fw_log_hw_release(void *hw_ctx)
 	return arc_msg_send_sync(&bh->tt, &msg) == 0;
 }
 
-static void blackhole_interrupt(struct tenstorrent_device *tt_dev)
+static void blackhole_interrupt(struct tenstorrent_device *tt_dev, unsigned int vector)
 {
+	// Vector 1 is for HDMA completions; nothing programs the engine yet.
+	if (vector == BH_HDMA_MSI_VECTOR)
+		return;
+
 	fw_log_interrupt(&tt_dev->fw_log);
 }
 
@@ -961,6 +970,7 @@ struct tenstorrent_device_class blackhole_class = {
 	.configure_outbound_atu = blackhole_configure_outbound_atu,
 	.noc_write32 = blackhole_noc_write32,
 	.interrupt = blackhole_interrupt,
+	.max_msi_vectors = BH_MSI_VECTORS,
 	.noc_read = blackhole_noc_read,
 	.noc_write = blackhole_noc_write,
 	.csm_read32 = blackhole_csm_read32,

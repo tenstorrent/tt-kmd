@@ -3,7 +3,6 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/bitfield.h>
 #include <linux/bitmap.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
@@ -53,7 +52,9 @@
 // attr_p0..p7: a 256-bit user-bit field, eight 32-bit words. The inbound APP
 // path passes attr[4:0] on as the AXI cache and user bits of the access:
 // attr[4] drives AxCACHE to 0x0 rather than 0xF, and attr[3:0] is the AxQOS
-// id. The rest of the field is carried by the entry and ignored here.
+// id. Only attr[4] is exposed; the QoS id is left 0 until something above
+// the driver needs it and its meaning is confirmed. The rest of the field is
+// carried by the entry and ignored here.
 //
 // tt_pcie's inbound_tlbapp names these no_cacheable and qosid, and ttsim's
 // Keraunos model reads them the same way. An earlier reading of the field as
@@ -62,7 +63,6 @@
 #define TLB_CFG_ATTR_OFFSET	0x20
 #define TLB_CFG_ATTR_WORDS	8
 #define TLB_ATTR_NONCACHEABLE	BIT(4)
-#define TLB_ATTR_QOS_ID		GENMASK(3, 0)
 #define TLB_CFG_VALID		0x1
 
 // BAR2 offset of the config qword for AppIn0 entry, reached via SysIn0[2].
@@ -344,8 +344,7 @@ static int keraunos_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
 	// register has no room for -- userspace is what knows which of them a given
 	// architecture can honour.
 
-	if (config->noncacheable > 1 || config->qos_id > TLB_ATTR_QOS_ID ||
-	    config->reserved0)
+	if (config->noncacheable > 1 || config->reserved0[0] || config->reserved0[1])
 		return -EINVAL;
 
 	// Not possible to program a 16MB window that doesn't start on a 16MB
@@ -362,8 +361,7 @@ static int keraunos_configure_tlb(struct tenstorrent_device *tt_dev, int tlb,
 	if (!kd->bar2)
 		return -ENODEV;
 
-	attr = (config->noncacheable ? TLB_ATTR_NONCACHEABLE : 0) |
-	       FIELD_PREP(TLB_ATTR_QOS_ID, config->qos_id);
+	attr = config->noncacheable ? TLB_ATTR_NONCACHEABLE : 0;
 
 	// The owning fd holds this entry exclusively (tt_dev->tlbs) and is the
 	// only thing accessing its BAR0 window, so unlike the kernel's shared

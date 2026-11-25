@@ -85,7 +85,7 @@
 #define FW_LOG_SUBCMD_SETUP   0x1
 #define FW_LOG_SUBCMD_RELEASE 0x2
 
-// Firmware that leaves HDMA channel 0 to the host advertises 2 MSI vectors:
+// Firmware that leaves HDMA channel 1 to the host advertises 2 MSI vectors:
 // vector 0 for its own MSIs, vector 1 for HDMA completions.
 #define BH_MSI_VECTORS 2
 #define BH_HDMA_MSI_VECTOR 1

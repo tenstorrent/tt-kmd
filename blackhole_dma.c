@@ -32,9 +32,7 @@
 #include "chardev_private.h"
 #include "uring_compat.h"
 
-// One element of the engine's linked list (DesignWare HDMA v0 layout). The
-// element that ends a chain is a link element: control, a reserved word, then
-// the next list address where a data element has sar.
+// One element of the engine's linked list (DesignWare HDMA v0 layout).
 struct bh_hdma_lli {
 	__le32 control;
 	__le32 size;
@@ -43,8 +41,6 @@ struct bh_hdma_lli {
 } __packed;
 
 #define LLI_CB	BIT(0)	// Cycle bit: the engine runs an element only if it matches its CCS
-#define LLI_TCB	BIT(1)	// Link element: toggle the cycle state
-#define LLI_LLP	BIT(2)	// Link element
 
 // Room for a full request plus the element that ends the chain. A coherent
 // buffer is aligned to its size when that is a power of two, so the list never
@@ -183,6 +179,9 @@ static u32 hdma_read(struct blackhole_device *bh, u32 reg)
 static void hdma_setup_channel(struct blackhole_device *bh)
 {
 	hdma_write(bh, HDMA_EN, HDMA_EN_ENABLE);
+	// List elements the engine reads ahead. More than channel 0's PF_DEPTH
+	// overruns the channel's prefetch entries and hangs it.
+	hdma_write(bh, HDMA_ELEM_PF, bh->dma.pf_depth);
 	hdma_write(bh, HDMA_INT_SETUP, HDMA_INT_SETUP_VALUE);
 	hdma_write(bh, HDMA_CONTROL1, HDMA_CONTROL1_LLEN);
 }
@@ -281,7 +280,6 @@ static void dma_start_locked(struct blackhole_device *bh)
 	struct bh_dma *dma = &bh->dma;
 	struct bh_dma_request *req;
 	struct bh_hdma_lli *list = dma->list;
-	struct bh_hdma_lli *link;
 	struct msi_msg msg;
 	unsigned int timeout_ms;
 	u32 data;
@@ -305,13 +303,9 @@ static void dma_start_locked(struct blackhole_device *bh)
 
 	memcpy(list, req->lli, req->count * sizeof(*list));
 
-	// The link element after the last one has a cycle bit that doesn't
-	// match, so the engine stops there and raises the stop MSI.
-	link = &list[req->count];
-	link->control = cpu_to_le32(LLI_LLP | LLI_TCB);
-	link->size = 0;
-	link->sar = cpu_to_le64(dma->list_axi);
-	link->dar = 0;
+	// The element after the last one has a cycle bit that doesn't match, so
+	// the engine stops there and raises the stop MSI.
+	memset(&list[req->count], 0, sizeof(*list));
 
 	// The MSI's address and data can change with its affinity, so take
 	// them fresh. Multi-message MSI puts the vector in the low data bits.
@@ -327,11 +321,6 @@ static void dma_start_locked(struct blackhole_device *bh)
 	hdma_write(bh, HDMA_LLP_LOW, lower_32_bits(dma->list_axi));
 	hdma_write(bh, HDMA_LLP_HIGH, upper_32_bits(dma->list_axi));
 	hdma_write(bh, HDMA_CYCLE_SYNC, HDMA_CYCLE_SYNC_CCS | HDMA_CYCLE_SYNC_CB);
-	// List elements the engine reads ahead. More than channel 0's PF_DEPTH
-	// overruns the channel's prefetch entries and hangs it. Set per chain:
-	// following a link element reloads this register from the link's
-	// control word, and the link that ends each chain carries 0 there.
-	hdma_write(bh, HDMA_ELEM_PF, dma->pf_depth);
 
 	// The list must be in memory before the doorbell.
 	dma_wmb();

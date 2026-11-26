@@ -835,7 +835,7 @@ static bool blackhole_init_hardware(struct tenstorrent_device *tt_dev)
 	// Best-effort: start firmware log forwarding. Also re-runs on resume.
 	fw_log_setup(&tt_dev->fw_log);
 
-	// DMA comes back after a reset or resume once firmware says channel 0
+	// DMA comes back after a reset or resume once firmware says channel 1
 	// is ours again.
 	bh_dma_enable(bh);
 

@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
 // SPDX-License-Identifier: GPL-2.0-only
 
-// Host-to-device DMA on Blackhole's HDMA read channel 0.
+// Host-to-device DMA on Blackhole's HDMA read channel 1. Firmware keeps
+// channel 0 for its own DMA messages.
 //
 // The engine runs in linked-list mode. Its list lives in host memory that the
 // driver allocates, and the engine reads it through a 2M TLB window pointed at
@@ -58,8 +59,8 @@ static_assert(BH_DMA_LIST_SIZE <= TENSTORRENT_DMA_WINDOW_SIZE);
 // Engine (AXI) address of 2M window i.
 #define TLB_2M_AXI_ADDR(i) ((u64)(i) * TENSTORRENT_DMA_WINDOW_SIZE)
 
-// HDMA read channel 0 registers, in BAR2.
-#define HDMA_RDCH0		0x100
+// HDMA read channel 1 registers, in BAR2.
+#define HDMA_RDCH1		0x300
 #define HDMA_EN			0x00
 #define HDMA_DOORBELL		0x04
 #define HDMA_ELEM_PF		0x08
@@ -67,7 +68,6 @@ static_assert(BH_DMA_LIST_SIZE <= TENSTORRENT_DMA_WINDOW_SIZE);
 #define HDMA_LLP_HIGH		0x14
 #define HDMA_CYCLE_SYNC		0x18
 #define HDMA_CONTROL1		0x34
-#define HDMA_QOS		0x3C
 #define HDMA_CH_STAT		0x80
 #define HDMA_INT_STAT		0x84
 #define HDMA_INT_SETUP		0x88
@@ -99,10 +99,13 @@ static_assert(BH_DMA_LIST_SIZE <= TENSTORRENT_DMA_WINDOW_SIZE);
 #define HDMA_INT_SETUP_VALUE	(HDMA_INT_SETUP_MASK_LOCAL | HDMA_INT_SETUP_RSIE | HDMA_INT_SETUP_LSIE | \
 				 HDMA_INT_SETUP_RAIE | HDMA_INT_SETUP_LAIE)
 
-// The read channels share 16 prefetch slots, taken in channel order. Channel
-// 0 takes 7 and keeps them; firmware runs channel 1 at 7 or less.
+// Read channel 0's PF_DEPTH, which firmware sets, is the prefetch depth of
+// every read channel: channel i owns PF_DEPTH + 1 of the engine's 16 prefetch
+// entries, starting at entry i * (PF_DEPTH + 1). The driver only reads it.
+#define HDMA_RDCH0_QOS		0x13C
 #define HDMA_QOS_PF_DEPTH	GENMASK(25, 16)
-#define HDMA_PF_DEPTH		7
+#define HDMA_PF_ENTRIES		16
+#define HDMA_CHANNEL		1
 
 // How long a channel reset waits for a stopped chain to drain.
 #define HDMA_STOP_TIMEOUT_US	100
@@ -110,8 +113,9 @@ static_assert(BH_DMA_LIST_SIZE <= TENSTORRENT_DMA_WINDOW_SIZE);
 // Timeout for one chain: 2 s plus 1 ms per MiB.
 #define DMA_TIMEOUT_BASE_MS	2000
 
-// TAG_FW_ACTIVE_CONFIG_0 bit: firmware leaves HDMA channel 0 to the host.
-#define FW_ACTIVE_CONFIG_0_HDMA_CH0_HOST_OWNED BIT(3)
+// TAG_FW_ACTIVE_CONFIG_0 bit: firmware uses only HDMA channel 0, keeps its
+// PF_DEPTH fixed, and leaves channel 1 to the host.
+#define FW_ACTIVE_CONFIG_0_HDMA_HOST_CHANNEL_1 BIT(3)
 
 struct bh_dma_request {
 	struct list_head node;		// In bh_dma.queue
@@ -161,7 +165,7 @@ void bh_dma_init(struct blackhole_device *bh, unsigned int first_tlb)
 
 static void __iomem *hdma_reg(struct blackhole_device *bh, u32 reg)
 {
-	return bh->bar2_mapping + HDMA_RDCH0 + reg;
+	return bh->bar2_mapping + HDMA_RDCH1 + reg;
 }
 
 static void hdma_write(struct blackhole_device *bh, u32 reg, u32 value)
@@ -178,12 +182,7 @@ static u32 hdma_read(struct blackhole_device *bh, u32 reg)
 // reset.
 static void hdma_setup_channel(struct blackhole_device *bh)
 {
-	u32 qos = hdma_read(bh, HDMA_QOS);
-
 	hdma_write(bh, HDMA_EN, HDMA_EN_ENABLE);
-	hdma_write(bh, HDMA_QOS, (qos & ~HDMA_QOS_PF_DEPTH) | FIELD_PREP(HDMA_QOS_PF_DEPTH, HDMA_PF_DEPTH));
-	// No list element prefetch: with it the engine stalls on short lists.
-	hdma_write(bh, HDMA_ELEM_PF, 0);
 	hdma_write(bh, HDMA_INT_SETUP, HDMA_INT_SETUP_VALUE);
 	hdma_write(bh, HDMA_CONTROL1, HDMA_CONTROL1_LLEN);
 }
@@ -214,7 +213,7 @@ static bool hdma_reset_channel(struct blackhole_device *bh)
 }
 
 // Run when firmware is ready, from init_hardware: at probe, after a reset
-// and at resume. DMA stays off unless firmware has left channel 0 to us.
+// and at resume. DMA stays off unless firmware has left channel 1 to us.
 void bh_dma_enable(struct blackhole_device *bh)
 {
 	struct tenstorrent_device *tt_dev = &bh->tt;
@@ -222,6 +221,7 @@ void bh_dma_enable(struct blackhole_device *bh)
 	struct tenstorrent_noc_tlb_config config = { 0 };
 	struct device *dev = &tt_dev->pdev->dev;
 	u32 active_config;
+	u32 pf_depth;
 	u32 pcie_x;
 
 	if (!dma->list)
@@ -232,8 +232,17 @@ void bh_dma_enable(struct blackhole_device *bh)
 	bh_dma_quiesce(tt_dev, true);
 
 	if (blackhole_read_fw_active_config(bh, &active_config) != 0 ||
-	    !(active_config & FW_ACTIVE_CONFIG_0_HDMA_CH0_HOST_OWNED))
+	    !(active_config & FW_ACTIVE_CONFIG_0_HDMA_HOST_CHANNEL_1))
 		return;
+
+	// Channel 1 has prefetch entries only if two channels' worth fit.
+	pf_depth = FIELD_GET(HDMA_QOS_PF_DEPTH, ioread32(bh->bar2_mapping + HDMA_RDCH0_QOS));
+	if ((HDMA_CHANNEL + 1) * (pf_depth + 1) > HDMA_PF_ENTRIES) {
+		dev_info(dev, "HDMA PF_DEPTH %u leaves channel %u no prefetch entries; DMA is unavailable\n",
+			 pf_depth, HDMA_CHANNEL);
+		return;
+	}
+	dma->pf_depth = pf_depth;
 
 	// The engine signals completion with an MSI it writes itself.
 	if (!tt_dev->interrupt_enabled || !tt_dev->pdev->msi_enabled) {
@@ -318,6 +327,11 @@ static void dma_start_locked(struct blackhole_device *bh)
 	hdma_write(bh, HDMA_LLP_LOW, lower_32_bits(dma->list_axi));
 	hdma_write(bh, HDMA_LLP_HIGH, upper_32_bits(dma->list_axi));
 	hdma_write(bh, HDMA_CYCLE_SYNC, HDMA_CYCLE_SYNC_CCS | HDMA_CYCLE_SYNC_CB);
+	// List elements the engine reads ahead. More than channel 0's PF_DEPTH
+	// overruns the channel's prefetch entries and hangs it. Set per chain:
+	// following a link element reloads this register from the link's
+	// control word, and the link that ends each chain carries 0 there.
+	hdma_write(bh, HDMA_ELEM_PF, dma->pf_depth);
 
 	// The list must be in memory before the doorbell.
 	dma_wmb();

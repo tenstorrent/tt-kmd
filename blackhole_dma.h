@@ -17,7 +17,7 @@ struct io_uring_cmd;
 struct tenstorrent_device;
 struct bh_dma_request;
 
-// Host-to-device DMA on HDMA read channel 0 (TENSTORRENT_URING_CMD_DMA_WRITE).
+// Host-to-device DMA on HDMA read channel 1 (TENSTORRENT_URING_CMD_DMA_WRITE).
 struct bh_dma {
 	// Fixed at probe and held while the driver is bound.
 	unsigned int data_tlb[TENSTORRENT_DMA_WINDOWS];	// 2M windows bound to a request's regions
@@ -25,10 +25,11 @@ struct bh_dma {
 	void *list;			// Engine linked list, coherent; NULL if allocation failed
 	dma_addr_t list_iova;
 
-	// Set up by bh_dma_enable() once firmware has left channel 0 to the
+	// Set up by bh_dma_enable() once firmware has left channel 1 to the
 	// host, while init_hardware runs.
 	u64 list_axi;			// Engine address of the list
 	unsigned int vector;		// MSI vector the engine signals completion on
+	u32 pf_depth;			// Read channel 0's PF_DEPTH: the most a chain may prefetch
 
 	// lock guards everything below. enabled is set only by bh_dma_enable()
 	// (init_hardware) and cleared by bh_dma_quiesce() or a channel that won't

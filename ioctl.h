@@ -581,7 +581,7 @@ struct tenstorrent_noc_io {
  * struct tenstorrent_dma_write in the SQE's command area. A plain 64-byte SQE
  * has room for it. Needs Linux 6.6 or newer.
  *
- * The driver owns HDMA read channel 0 and runs one FIFO per chip, shared by
+ * The driver owns HDMA read channel 1 and runs one FIFO per chip, shared by
  * every fd and run strictly in submission order. Each SQE becomes one engine
  * chain with one element per descriptor. The driver never splits, merges or
  * reorders descriptors: a request it can't run as given is rejected.
@@ -597,7 +597,7 @@ struct tenstorrent_noc_io {
  * - -EFAULT: the descriptor array can't be read.
  * - -EOPNOTSUPP: DMA can't run on this chip, because the kernel is older than
  *   6.6, the device is not a Blackhole, or its firmware does not leave HDMA
- *   channel 0 to the host.
+ *   channel 1 to the host.
  * - -ENODEV: the fd is stale (the device was reset or removed), or a reset or
  *   removal failed this request while it was queued or running.
  * - -ETIMEDOUT or -EIO: the chain timed out (after 2 s plus 1 ms per MiB) or

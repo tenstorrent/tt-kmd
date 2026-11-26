@@ -30,6 +30,7 @@
 #include "blackhole.h"
 #include "blackhole_dma.h"
 #include "chardev_private.h"
+#include "memory.h"
 #include "uring_compat.h"
 
 // One element of the engine's linked list (DesignWare HDMA v0 layout).
@@ -116,6 +117,7 @@ static_assert(BH_DMA_LIST_SIZE <= TENSTORRENT_DMA_WINDOW_SIZE);
 struct bh_dma_request {
 	struct list_head node;		// In bh_dma.queue
 	struct io_uring_cmd *cmd;
+	struct chardev_private *priv;	// Submitter; io_uring holds its file until the CQE
 	int result;			// CQE res, set when the request ends
 	u64 bytes;
 	u32 count;
@@ -342,11 +344,21 @@ static void dma_complete_cmd(struct io_uring_cmd *cmd, unsigned int issue_flags)
 
 TT_URING_CMD_TASK_WORK(dma_complete_task_work, dma_complete_cmd)
 
-// End a request that is off the queue. Safe from any context.
-static void dma_end_request(struct bh_dma_request *req, int result)
+// Post the CQE of a request that is off the queue, leaving it counted as in
+// flight. Safe from any context.
+static void dma_post_cqe(struct bh_dma_request *req, int result)
 {
 	req->result = result;
 	io_uring_cmd_complete_in_task(req->cmd, dma_complete_task_work);
+}
+
+// End a request that is off the queue. Safe from any context.
+static void dma_end_request(struct bh_dma_request *req, int result)
+{
+	// The engine is done with the sources: the fd may unpin them once
+	// it sees the CQE.
+	atomic_dec(&req->priv->dma_inflight);
+	dma_post_cqe(req, result);
 }
 
 // End the active request and start the next.
@@ -381,9 +393,11 @@ static void dma_abort_active_locked(struct blackhole_device *bh, int result)
 	dev_err(&bh->tt.pdev->dev, "DMA channel won't stop; DMA is off until the device is reset\n");
 	dma->enabled = false;
 
+	// The engine may still be reading this request's sources, so the fd
+	// can't unpin anything until it is closed or the device reset.
 	req = dma->active;
 	dma->active = NULL;
-	dma_end_request(req, result);
+	dma_post_cqe(req, result);
 
 	list_for_each_entry_safe(req, tmp, &dma->queue, node) {
 		list_del(&req->node);
@@ -560,6 +574,7 @@ int bh_dma_write(struct chardev_private *priv, struct io_uring_cmd *cmd,
 	struct tenstorrent_dma_desc *descs;
 	struct bh_dma_request *req;
 	unsigned long flags;
+	u32 i;
 	int ret;
 
 	BUILD_BUG_ON(sizeof(req) > sizeof(cmd->pdu));
@@ -575,6 +590,7 @@ int bh_dma_write(struct chardev_private *priv, struct io_uring_cmd *cmd,
 		return -ENOMEM;
 
 	req->cmd = cmd;
+	req->priv = priv;
 	req->count = args->count;
 
 	// Everything is checked and run from this copy.
@@ -593,6 +609,22 @@ int bh_dma_write(struct chardev_private *priv, struct io_uring_cmd *cmd,
 	if (ret)
 		goto err_free_descs;
 
+	// The engine may read only the fd's own pinned or allocated memory.
+	// Check it and count the request under the mutex UNPIN_PAGES takes,
+	// so nothing the request reads can be unpinned before it ends.
+	mutex_lock(&priv->mutex);
+
+	for (i = 0; i < req->count; i++) {
+		if (!tenstorrent_is_dma_source(priv, descs[i].src, descs[i].size)) {
+			mutex_unlock(&priv->mutex);
+			ret = -EINVAL;
+			goto err_free_descs;
+		}
+	}
+
+	atomic_inc(&priv->dma_inflight);
+	mutex_unlock(&priv->mutex);
+
 	kvfree(descs);
 
 	*(struct bh_dma_request **)cmd->pdu = req;
@@ -601,6 +633,7 @@ int bh_dma_write(struct chardev_private *priv, struct io_uring_cmd *cmd,
 
 	if (!dma->enabled) {
 		spin_unlock_irqrestore(&dma->lock, flags);
+		atomic_dec(&priv->dma_inflight);
 		ret = -EOPNOTSUPP;
 		goto err_free_req;
 	}

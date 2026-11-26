@@ -19,6 +19,7 @@
 #include <linux/dma-buf.h>
 #include <linux/module.h>
 #include <linux/dma-resv.h>
+#include <linux/overflow.h>
 
 #include "chardev_private.h"
 #include "device.h"
@@ -925,6 +926,14 @@ long ioctl_unpin_pages(struct chardev_private *priv,
 
 	mutex_lock(&priv->mutex);
 
+	// The fd's DMA may be reading any of its pinnings. Submission checks
+	// sources and counts the request under priv->mutex, so this can't
+	// miss one.
+	if (atomic_read(&priv->dma_inflight) != 0) {
+		mutex_unlock(&priv->mutex);
+		return -EBUSY;
+	}
+
 	list_for_each_entry_safe(pinning, tmp_pinning, &priv->pinnings, list) {
 		if (pinning->virtual_address != in.virtual_address)
 			continue;
@@ -941,6 +950,43 @@ long ioctl_unpin_pages(struct chardev_private *priv,
 
 	mutex_unlock(&priv->mutex);
 	return ret;
+}
+
+// Whether [addr, addr + size) lies inside one of the fd's pinnings or DMA
+// buffers, as the device sees them: by IOVA, or by physical address without
+// an IOMMU. Caller holds priv->mutex.
+bool tenstorrent_is_dma_source(struct chardev_private *priv, u64 addr, u64 size)
+{
+	struct pinned_page_range *pinning;
+	struct dmabuf *dmabuf;
+	unsigned int i;
+	u64 end;
+
+	lockdep_assert_held(&priv->mutex);
+
+	if (check_add_overflow(addr, size, &end))
+		return false;
+
+	list_for_each_entry(pinning, &priv->pinnings, list) {
+		u64 base;
+
+		// PIN_PAGES maps through the IOMMU when there is one, and
+		// otherwise insists the pages are physically contiguous.
+		if (pinning->dma_mapping.sgl)
+			base = sg_dma_address(pinning->dma_mapping.sgl);
+		else
+			base = page_to_phys(pinning->pages[0]);
+
+		if (addr >= base && end <= base + ((u64)pinning->page_count << PAGE_SHIFT))
+			return true;
+	}
+
+	hash_for_each(priv->dmabufs, i, dmabuf, hash_chain) {
+		if (addr >= dmabuf->phys && end <= dmabuf->phys + dmabuf->size)
+			return true;
+	}
+
+	return false;
 }
 
 long ioctl_map_peer_bar(struct chardev_private *priv,

@@ -63,6 +63,7 @@ void tenstorrent_remove_memory_cleanup(struct tenstorrent_device *tt_dev);
 void tenstorrent_revoke_tlb_dmabufs(struct tenstorrent_device *tt_dev);
 bool tenstorrent_has_tlb_dmabuf_exports(struct tenstorrent_device *tt_dev);
 bool is_iommu_translated(struct device *dev);
+bool tenstorrent_is_dma_source(struct chardev_private *priv, u64 addr, u64 size);
 
 #define TENSTORRENT_MAX_OUTBOUND_IATU_REGIONS 16
 struct tenstorrent_outbound_iatu_region {

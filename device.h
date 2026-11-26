@@ -107,6 +107,7 @@ struct tenstorrent_device {
 };
 
 struct tlb_descriptor;
+struct io_uring_cmd;
 
 struct tenstorrent_device_class {
 	const char *name;
@@ -147,6 +148,15 @@ struct tenstorrent_device_class {
 	void (*interrupt)(struct tenstorrent_device *ttdev, unsigned int vector);
 	// Most interrupt vectors to ask for; 0 means one. Fewer may be granted.
 	unsigned int max_msi_vectors;
+	// Optional. Queue a TENSTORRENT_URING_CMD_DMA_WRITE. Called with
+	// reset_rwsem held shared on a current fd. Returns -EIOCBQUEUED once the
+	// request is queued, or an errno for its CQE.
+	int (*dma_write)(struct chardev_private *priv, struct io_uring_cmd *cmd,
+			 const struct tenstorrent_dma_write *args);
+	// Optional. Stop DMA and fail every queued request with -ENODEV, before
+	// a reset, suspend or removal. Called with reset_rwsem held for write;
+	// reachable says whether the hardware may be touched.
+	void (*dma_quiesce)(struct tenstorrent_device *ttdev, bool reachable);
 	// Reset-safe scalar NOC transfers. width is one of 1, 2, 4, 8.
 	// Return 0 on success or a negative errno.
 	int (*noc_read)(struct tenstorrent_device *ttdev, u32 x, u32 y, u64 addr, void *value, u32 width, int noc);

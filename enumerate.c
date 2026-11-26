@@ -471,6 +471,12 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
 	tenstorrent_vma_zap(tt_dev);
 	tenstorrent_revoke_tlb_dmabufs(tt_dev);
 
+	// Stop the driver's DMA and fail what is queued with -ENODEV, while its
+	// completion interrupt is still there and before the memory it reads
+	// goes.
+	if (tt_dev->dev_class->dma_quiesce)
+		tt_dev->dev_class->dma_quiesce(tt_dev, reachable);
+
 	// Quiesce the hardware.  Interrupts go first, as in suspend: a
 	// device-class interrupt handler may schedule work, which
 	// cleanup_hardware() and cleanup_device() drain.  free_irq() waits for
@@ -544,6 +550,13 @@ static int tenstorrent_suspend(struct device *dev) {
 
 	cancel_delayed_work_sync(&tt_dev->power_down_work);
 	tenstorrent_revoke_tlb_dmabufs(tt_dev);
+
+	// Resume brings DMA back once firmware is ready for it.
+	if (tt_dev->dev_class->dma_quiesce) {
+		down_write(&tt_dev->reset_rwsem);
+		tt_dev->dev_class->dma_quiesce(tt_dev, true);
+		up_write(&tt_dev->reset_rwsem);
+	}
 
 	// Device-class cleanup may need to drain work scheduled by its IRQ
 	// handler before firmware is suspended. free_irq() prevents a late MSI

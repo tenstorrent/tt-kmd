@@ -26,4 +26,16 @@ struct blackhole_device {
 #define tt_dev_to_bh_dev(ttdev) \
 	container_of((ttdev), struct blackhole_device, tt)
 
+// Firmware that leaves HDMA channel 1 to the host advertises 2 MSI vectors:
+// vector 0 for its own MSIs, vector 1 for HDMA completions.
+#define BH_MSI_VECTORS 2
+#define BH_HDMA_MSI_VECTOR 1
+
+struct tenstorrent_noc_tlb_config;
+
+int blackhole_configure_tlb_2M(struct blackhole_device *bh, int tlb,
+			       struct tenstorrent_noc_tlb_config *config);
+bool blackhole_detect_pcie_noc_x(struct blackhole_device *bh, u32 *noc_x);
+int blackhole_read_fw_active_config(struct blackhole_device *bh, u32 *value);
+
 #endif
